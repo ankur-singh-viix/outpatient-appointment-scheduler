@@ -7,7 +7,7 @@ Patients browse doctors, pick an open time slot and book an appointment. Doctors
 | `frontend/` | Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4, **shadcn/ui** |
 | `backend/` | **NestJS** 12, TypeScript, **Zod** validation, **TypeORM** 1.1, JWT auth |
 | Database | **PostgreSQL** (local Docker; **Neon** when deployed) |
-| Deployment | Backend on **Railway**, frontend on **Vercel**, database on **Neon** |
+| Deployment | Backend on **Render** (Railway config also included), frontend on **Vercel**, database on **Neon** |
 | `docs/er-diagram.md` | Data model and design decisions |
 
 ## Features
@@ -123,34 +123,37 @@ All routes are under `/api`. Routes marked 🔒 need an `Authorization: Bearer <
 - **Dates and times are clinic-local.** `date` and `time` columns are kept as strings, never converted to JS `Date`s. "Today" and "now" are worked out in `CLINIC_TIMEZONE` (default `Asia/Kolkata`).
 - **The frontend calls the API directly** from the browser (CORS is limited to `CORS_ORIGIN`). Pages are client components with explicit loading, empty, error and success states.
 
-## Deploying (Neon + Railway + Vercel)
+## Deploying (Neon + Render + Vercel)
 
-Three hosted pieces: the **database on Neon**, the **NestJS backend on Railway**, and the **Next.js frontend on Vercel**. Deploy in this order, because each step needs a value from the previous one.
+Three hosted pieces: the **database on Neon**, the **NestJS backend on Render** (Railway works too, see below), and the **Next.js frontend on Vercel**. Deploy in this order, because each step needs a value from the previous one.
 
 1. **Database (Neon):** create a project at neon.tech and copy the **direct** connection string (not the "pooled" one), which ends in `?sslmode=require`. The migration step takes a session-level lock, which Neon's pooled endpoint doesn't support.
-2. **Backend (Railway):** choose *New → GitHub Repo* and select this repo.
-   - **Settings → Root Directory:** `/backend`. **Config file path:** `/backend/railway.json`.
-   - **Variables:**
+2. **Backend (Render):** choose *New → Blueprint* and select this repo (it reads [`render.yaml`](render.yaml)), or create a *Web Service* by hand with root directory `backend`, build command `npm install --include=dev && npm run build` and start command `npm run db:migrate:prod && npm run db:seed:prod && npm run start:prod`.
+   - **Environment variables:**
      ```
      DATABASE_URL=<the Neon direct connection string>
-     JWT_SECRET=<long random string>
+     JWT_SECRET=<long random string; the Blueprint generates one>
      CORS_ORIGIN=https://<your-vercel-domain>
      CLINIC_TIMEZONE=Asia/Kolkata
+     NODE_VERSION=24.22.1
+     NODE_ENV=production
      ```
-     `CORS_ORIGIN` isn't known until step 3; set a placeholder now and update it afterwards. Don't set `NODE_ENV=production`, because the build needs devDependencies. The app treats Railway as production on its own and refuses to start without `JWT_SECRET`.
-   - **Networking:** generate a public domain.
-   - Each deploy first runs the migrations and the idempotent demo seed (`preDeployCommand`), then health-checks `/api/health`.
+     `CORS_ORIGIN` isn't known until step 3; set a placeholder now and update it afterwards. The app refuses to start in production without `JWT_SECRET`.
+   - Every start first runs the migrations and the idempotent demo seed, then the server. Render health-checks `/api/health`.
+   - On Render's free plan the service sleeps when idle, so the first request after a pause can take about a minute.
 3. **Frontend (Vercel):** import the same repo.
    - **Root Directory:** `frontend`. The framework is detected as Next.js.
    - **Environment variables:**
      ```
-     NEXT_PUBLIC_API_URL=https://<railway-backend-domain>/api
+     NEXT_PUBLIC_API_URL=https://<render-backend-domain>/api
      NEXT_PUBLIC_CLINIC_TIMEZONE=Asia/Kolkata
      ```
      These are baked in at build time, so redeploy after changing them.
-   - Then go back to Railway, set `CORS_ORIGIN` to the Vercel URL and redeploy the backend.
+   - Then go back to Render, set `CORS_ORIGIN` to the Vercel URL (no trailing slash) and let the backend redeploy.
 
-**To verify:** `https://<railway-backend-domain>/api/health` should return `{"status":"ok","database":"up"}`. Then open the Vercel URL, sign in as the demo patient, book a slot, sign in as that doctor and check the dashboard.
+**To verify:** `https://<render-backend-domain>/api/health` should return `{"status":"ok","database":"up"}`. Then open the Vercel URL, sign in as the demo patient, book a slot, sign in as that doctor and check the dashboard.
+
+**Railway instead of Render:** [`backend/railway.json`](backend/railway.json) is ready. Use root directory `/backend`, config file `/backend/railway.json`, the same variables (without `NODE_ENV`, because the build needs devDependencies), and a generated public domain. Railway runs the migrations in a pre-deploy step.
 
 ## Known limitations
 

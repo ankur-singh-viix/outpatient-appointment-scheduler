@@ -1,0 +1,25 @@
+# Render Blueprint for the NestJS backend. The database lives on Neon, so there is no database block here.
+services:
+  - type: web
+    name: outpatient-scheduler-api
+    runtime: node
+    rootDir: backend
+    plan: free
+    # NODE_ENV=production makes npm skip devDependencies, but the Nest build needs them.
+    buildCommand: npm install --include=dev && npm run build
+    # The free plan has no pre-deploy step, so run the (idempotent) migrations and demo seed on start.
+    startCommand: npm run db:migrate:prod && npm run db:seed:prod && npm run start:prod
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.22.1
+      - key: NODE_ENV
+        value: production
+      - key: CLINIC_TIMEZONE
+        value: Asia/Kolkata
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false # Neon DIRECT connection string, entered in the Render dashboard
+      - key: CORS_ORIGIN
+        sync: false # Vercel URL, e.g. https://your-app.vercel.app
