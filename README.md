@@ -139,7 +139,7 @@ Three hosted pieces: the **database on Neon**, the **NestJS backend on Render** 
      NODE_ENV=production
      ```
      `CORS_ORIGIN` isn't known until step 3; set a placeholder now and update it afterwards. The app refuses to start in production without `JWT_SECRET`.
-   - Every start first runs the migrations and the idempotent demo seed, then the server. Render health-checks `/api/health`.
+   - Every start first runs the migrations and the idempotent demo seed, then the server. `npm run start:prod` also applies any pending migrations itself, so the app never starts against an empty database. Render health-checks `/api/health`.
    - On Render's free plan the service sleeps when idle, so the first request after a pause can take about a minute.
 3. **Frontend (Vercel):** import the same repo.
    - **Root Directory:** `frontend`. The framework is detected as Next.js.
