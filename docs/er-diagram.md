@@ -1,6 +1,6 @@
 # Outpatient Scheduler — ER Diagram
 
-Data model for the full planned system (patients, doctors, receptionists, admins, availability, schedule overrides, capacity and appointments). Today this is a design document only. No database, migrations or ORM entities exist yet.
+Data model for the full planned system (patients, doctors, receptionists, admins, availability, schedule overrides, capacity and appointments). The schema is implemented as plain SQL migrations in `backend/db/migrations/`.
 
 **Target database:** PostgreSQL.
 
@@ -10,7 +10,11 @@ Data model for the full planned system (patients, doctors, receptionists, admins
 - Every person who can log in is a `users` row. `role` takes one of `PATIENT`, `DOCTOR`, `RECEPTIONIST` or `ADMIN`.
 - `password_hash` and `google_id` are both nullable so an account can use a password, Google sign-in, or both.
 - In `schedule_overrides`, `start_time`, `end_time` and `capacity` may be NULL when `is_available = false`, because the doctor is off for the whole day.
-- Times are local clinic times (`time` without time zone), paired with a `date`. Timezone handling is out of scope for now.
+- Times are local clinic times (`time` without time zone), paired with a `date`. The clinics' zone is configured once (`CLINIC_TIMEZONE`, default `Asia/Kolkata`) and decides what "today" and "now" mean.
+- `day_of_week` uses 0 = Sunday … 6 = Saturday, the same as JavaScript's `Date.getUTCDay()`.
+- `doctors.consultation_fee` (added when the booking flow was built) is stored in whole rupees.
+
+The schema is implemented in [`backend/db/migrations/001_initial_schema.sql`](../backend/db/migrations/001_initial_schema.sql), including every constraint and index listed below.
 
 ## Diagram
 
@@ -43,6 +47,7 @@ erDiagram
         uuid specialty_id FK
         int consultation_minutes
         int default_daily_capacity
+        int consultation_fee "whole rupees, shown to patients"
         text bio
     }
 
@@ -159,7 +164,7 @@ If there's no override and no availability row for that weekday, the doctor isn'
 
 ### 4. Double-booking index
 
-Documentation only. **Do not run this yet.** There are no migrations today.
+Implemented in the initial migration:
 
 ```sql
 CREATE UNIQUE INDEX uq_active_doctor_appointment_start
@@ -188,11 +193,11 @@ The ER diagram defines structure only. **It doesn't prevent race conditions.** T
 4. `INSERT` the appointment.
 5. `COMMIT`. If the unique index raises a violation, treat it as "slot taken" and don't return a 500.
 
-The unique index is the last line of defence and doesn't replace the transactional check. None of this is implemented today.
+The unique index is the last line of defence and doesn't replace the transactional check. The booking service implements this: it locks the doctor row with `SELECT … FOR UPDATE`, recomputes the slots and session capacity, then inserts (`backend/src/appointments/appointments.service.ts`).
 
 ### 6. Data integrity
 
-Foreign keys, uniqueness, valid ranges and deletion policy. Documentation only; nothing is applied yet.
+Foreign keys, uniqueness, valid ranges and deletion policy. All of these are applied by the initial migration.
 
 ```sql
 -- Uniqueness

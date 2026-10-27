@@ -1,0 +1,23 @@
+# Local development database only. Production uses a managed PostgreSQL (e.g. Railway).
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: outpatient-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: outpatient
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates the separate database used by the automated tests.
+      - ./backend/db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d outpatient']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:
