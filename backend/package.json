@@ -13,7 +13,7 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/database/migrate.js && node dist/main",
+    "start:prod": "node dist/database/migrate.js && node dist/database/seed.js && node dist/main",
     "db:migrate": "nest build && node dist/database/migrate.js",
     "db:seed": "nest build && node dist/database/seed.js",
     "db:migrate:prod": "node dist/database/migrate.js",

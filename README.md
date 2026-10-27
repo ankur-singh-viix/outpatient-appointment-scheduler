@@ -50,7 +50,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:3001. `GET http://localhost:3000/` still returns `Hello World!`.
+Open http://localhost:3001. `GET http://localhost:3000/` returns `Hello World!` on purpose (the original setup check); the API lives under `/api`, for example `/api/health` and `/api/doctors`.
 
 ### Demo accounts
 
@@ -109,7 +109,7 @@ All routes are under `/api`. Routes marked 🔒 need an `Authorization: Bearer <
 | PUT | `/doctor-portal/availability/weekly` | 🔒 DOCTOR | Replace the weekly hours `{ hours: [{ dayOfWeek, startTime, endTime, capacity }] }` |
 | PUT | `/doctor-portal/availability/overrides` | 🔒 DOCTOR | Add or replace one date's exception |
 | DELETE | `/doctor-portal/availability/overrides/:date` | 🔒 DOCTOR | Remove a date exception |
-| GET | `/health` | public | Checks that the database is reachable (used by the hosting health check) |
+| GET | `/health` | public | App and database status (`{"status":"ok","service":…,"database":"up","time":…}`); never returns configuration. Used by the hosting health check |
 
 ## Design decisions
 
@@ -128,7 +128,7 @@ All routes are under `/api`. Routes marked 🔒 need an `Authorization: Bearer <
 Three hosted pieces: the **database on Neon**, the **NestJS backend on Render** (Railway works too, see below), and the **Next.js frontend on Vercel**. Deploy in this order, because each step needs a value from the previous one.
 
 1. **Database (Neon):** create a project at neon.tech and copy the **direct** connection string (not the "pooled" one), which ends in `?sslmode=require`. The migration step takes a session-level lock, which Neon's pooled endpoint doesn't support.
-2. **Backend (Render):** choose *New → Blueprint* and select this repo (it reads [`render.yaml`](render.yaml)), or create a *Web Service* by hand with root directory `backend`, build command `npm install --include=dev && npm run build` and start command `npm run db:migrate:prod && npm run db:seed:prod && npm run start:prod`.
+2. **Backend (Render):** choose *New → Blueprint* and select this repo (it reads [`render.yaml`](render.yaml)), or create a *Web Service* by hand with root directory `backend`, build command `npm install --include=dev && npm run build` and start command `npm run start:prod`.
    - **Environment variables:**
      ```
      DATABASE_URL=<the Neon direct connection string>
@@ -139,7 +139,7 @@ Three hosted pieces: the **database on Neon**, the **NestJS backend on Render** 
      NODE_ENV=production
      ```
      `CORS_ORIGIN` isn't known until step 3; set a placeholder now and update it afterwards. The app refuses to start in production without `JWT_SECRET`.
-   - Every start first runs the migrations and the idempotent demo seed, then the server. `npm run start:prod` also applies any pending migrations itself, so the app never starts against an empty database. Render health-checks `/api/health`.
+   - `npm run start:prod` is the whole start step: it applies pending migrations, adds any demo data that is missing, then starts the API. Seeding only inserts rows that do not exist yet and never overwrites or deletes anything, so edits survive restarts. Set `SKIP_DEMO_SEED=true` to turn the demo data off. Render health-checks `/api/health`.
    - On Render's free plan the service sleeps when idle, so the first request after a pause can take about a minute.
 3. **Frontend (Vercel):** import the same repo.
    - **Root Directory:** `frontend`. The framework is detected as Next.js.
@@ -151,7 +151,9 @@ Three hosted pieces: the **database on Neon**, the **NestJS backend on Render** 
      These are baked in at build time, so redeploy after changing them.
    - Then go back to Render, set `CORS_ORIGIN` to the Vercel URL (no trailing slash) and let the backend redeploy.
 
-**To verify:** `https://<render-backend-domain>/api/health` should return `{"status":"ok","database":"up"}`. Then open the Vercel URL, sign in as the demo patient, book a slot, sign in as that doctor and check the dashboard.
+**To verify:** `https://<render-backend-domain>/api/health` should return `{"status":"ok","service":"outpatient-scheduler-api","database":"up",…}` and `https://<render-backend-domain>/api/doctors` should list 6 doctors. Then open the Vercel URL, sign in as the demo patient, book a slot, sign in as that doctor and check the dashboard.
+
+**Troubleshooting:** the site shows *0 doctors* when the database `DATABASE_URL` points at has no seed data (check that the host and database name match the Neon database you meant). The frontend build fails on purpose if `NEXT_PUBLIC_API_URL` is not set, so it can never silently call `localhost`.
 
 **Railway instead of Render:** [`backend/railway.json`](backend/railway.json) is ready. Use root directory `/backend`, config file `/backend/railway.json`, the same variables (without `NODE_ENV`, because the build needs devDependencies), and a generated public domain. Railway runs the migrations in a pre-deploy step.
 

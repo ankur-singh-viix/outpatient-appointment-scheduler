@@ -7,8 +7,9 @@ services:
     plan: free
     # NODE_ENV=production makes npm skip devDependencies, but the Nest build needs them.
     buildCommand: npm install --include=dev && npm run build
-    # The free plan has no pre-deploy step, so run the (idempotent) migrations and demo seed on start.
-    startCommand: npm run db:migrate:prod && npm run db:seed:prod && npm run start:prod
+    # The free plan has no pre-deploy step. start:prod applies pending migrations, adds the demo data that is
+    # missing (it never overwrites existing rows; set SKIP_DEMO_SEED=true to turn that off), then starts the API.
+    startCommand: npm run start:prod
     healthCheckPath: /api/health
     envVars:
       - key: NODE_VERSION

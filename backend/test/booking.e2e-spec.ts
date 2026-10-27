@@ -299,6 +299,20 @@ describe('Appointment booking (e2e)', () => {
     });
   });
 
+  describe('health', () => {
+    it('reports app and database status without exposing configuration', async () => {
+      const response = await http().get('/api/health').expect(200);
+      expect(response.body).toMatchObject({ status: 'ok', service: 'outpatient-scheduler-api', database: 'up' });
+      const text = JSON.stringify(response.body);
+      expect(text).not.toMatch(/postgres|password|secret|jwt/i);
+    });
+
+    it('keeps serving GET / as Hello World!', async () => {
+      const response = await http().get('/').expect(200);
+      expect(response.text).toBe('Hello World!');
+    });
+  });
+
   describe('role access', () => {
     it('requires a signed-in user to book', async () => {
       await http().post('/api/appointments').send({ doctorId, date: DAY_A, startTime: '10:45' }).expect(401);
