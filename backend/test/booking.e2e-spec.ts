@@ -140,6 +140,26 @@ describe('Appointment booking (e2e)', () => {
       expect(day.sessions[0]).toMatchObject({ capacity: 2, booked: 0, remaining: 2 });
     });
 
+    it('ignores unknown query parameters such as tracking tags, but still validates the real ones', async () => {
+      const tracked = await http()
+        .get('/api/doctors')
+        .query({ utm_source: 'newsletter', utm_medium: 'email', fbclid: 'abc' })
+        .expect(200);
+      expect(tracked.body).toHaveLength(1);
+      const filtered = await http().get('/api/doctors').query({ search: 'ent', utm_source: 'ads' }).expect(200);
+      expect(filtered.body).toHaveLength(1);
+      await http().get(`/api/doctors/${doctorId}/slots`).query({ date: DAY_A, utm_source: 'ads' }).expect(200);
+
+      // Declared parameters keep their validation even when tracking tags are present.
+      await http().get('/api/doctors').query({ specialtyId: 'not-a-uuid', utm_source: 'ads' }).expect(400);
+      await http().get(`/api/doctors/${doctorId}/slots`).query({ date: '2026-02-30', utm_source: 'ads' }).expect(400);
+      await http()
+        .get('/api/doctor-portal/appointments')
+        .query({ scope: 'everything', utm_source: 'ads' })
+        .set('Authorization', `Bearer ${doctorToken}`)
+        .expect(400);
+    });
+
     it('rejects invalid dates and unknown doctors', async () => {
       await http().get(`/api/doctors/${doctorId}/slots`).query({ date: '2026-02-30' }).expect(400);
       await http().get('/api/doctors/00000000-0000-4000-8000-000000000000/slots').query({ date: DAY_A }).expect(404);

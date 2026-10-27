@@ -9,7 +9,8 @@ import { DoctorPortalService } from './doctor-portal.service.js';
 
 const capacitySchema = z.int().min(1).max(200);
 
-const appointmentsQuery = z.strictObject({ scope: z.enum(['upcoming', 'all']).optional() });
+// Query strings ignore unknown keys (tracking parameters); request bodies stay strict.
+const appointmentsQuery = z.object({ scope: z.enum(['upcoming', 'all']).optional() });
 
 const replaceWeeklySchema = z.strictObject({
   hours: z

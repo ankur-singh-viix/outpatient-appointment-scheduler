@@ -4,12 +4,14 @@ import { ZodValidationPipe } from '../common/zod-validation.pipe.js';
 import { dateSchema } from '../scheduling/schemas.js';
 import { DoctorsService } from './doctors.service.js';
 
-const listDoctorsQuery = z.strictObject({
+// Query strings are not strict: links shared on social media or in ads add tracking keys like `utm_source` or
+// `fbclid`, which must not break a public GET. Zod drops unknown keys and still validates the ones declared here.
+const listDoctorsQuery = z.object({
   search: z.string().max(100).optional(),
   specialtyId: z.uuid().optional(),
 });
 
-const slotsQuery = z.strictObject({ date: dateSchema });
+const slotsQuery = z.object({ date: dateSchema });
 
 // Public: patients can browse doctors and open slots before signing in.
 @Controller()
