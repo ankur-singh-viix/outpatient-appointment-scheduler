@@ -85,7 +85,7 @@ The e2e suite (`backend/test/booking.e2e-spec.ts`) drops and rebuilds the schema
 
 - **Availability:** doctor listing and search, slots and session capacity for a date, and invalid input.
 - **Booking:** a successful booking is saved in PostgreSQL and appears on the doctor's dashboard and in the patient's list. A taken slot returns `409`, and a time that isn't a slot returns `400`.
-- **Validation:** malformed bodies and unknown fields are rejected by the Zod schemas with a readable message per problem.
+- **Validation:** malformed bodies and unknown body fields are rejected by the Zod schemas with a readable message per problem, while unknown query parameters (such as `utm_source`) are ignored.
 - **Capacity:** a session rejects bookings beyond its capacity, including **8 simultaneous requests** against a capacity of 2, where exactly 2 succeed.
 - **Doctor availability:** a day off removes that date's slots, custom hours replace them, and overlapping weekly sessions are rejected.
 - **Roles:** no token returns `401`, a doctor trying to book gets `403`, and a patient opening the doctor portal gets `403`.
@@ -114,7 +114,7 @@ All routes are under `/api`. Routes marked 🔒 need an `Authorization: Bearer <
 ## Design decisions
 
 - **TypeORM for data access, SQL migrations for the schema.** All 9 tables from the [ER design](docs/er-diagram.md) are TypeORM entities (`backend/src/database/entities/`) used through repositories, query builders and transactions. The schema itself is created by plain SQL migrations ([`001_initial_schema.sql`](backend/db/migrations/001_initial_schema.sql)), because the design relies on database features that are clearest as SQL: CHECK constraints and the partial unique index. TypeORM never alters tables (`synchronize: false`).
-- **Zod for validation.** Every request body, query and route parameter has a Zod schema, applied by a small `ZodValidationPipe`. The schemas are strict, so unknown fields are rejected too.
+- **Zod for validation.** Every request body, query and route parameter has a Zod schema, applied by a small `ZodValidationPipe`. Request bodies are strict, so unknown fields are rejected. Query strings ignore unknown keys, so tracking parameters like `utm_source` never break a link, while the real parameters are still validated.
 - **shadcn/ui for the interface.** Buttons, cards, inputs, tabs, tables, badges and alerts come from shadcn/ui (`frontend/components/ui/`), themed with a teal brand colour.
 - **One set of slot rules for listing and booking.** [`scheduling/slots.ts`](backend/src/scheduling/slots.ts) is pure logic with unit tests. The slots endpoint and the booking transaction both use it, so what a patient sees is exactly what the server will accept.
 - **Bookings can't race each other.** Booking runs in one TypeORM transaction that first locks the doctor row (`pessimistic_write`, i.e. `SELECT … FOR UPDATE`), so concurrent bookings for the same doctor run one at a time. It then recomputes the slots and capacity and inserts. The partial unique index `(doctor_id, appointment_date, start_time) WHERE status IN ('PENDING','CONFIRMED')` is the final safety net. Removing the lock makes the concurrency test fail with 3 bookings in a capacity-2 session, so the test does exercise the race.
