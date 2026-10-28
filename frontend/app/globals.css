@@ -6,7 +6,8 @@
 
 :root {
   color-scheme: light;
-  --background: oklch(0.984 0.003 247.858);
+  /* CareSlot palette: warm white surfaces, slate text, deep teal brand, soft mint highlights. */
+  --background: oklch(0.985 0.006 90);
   --foreground: oklch(0.208 0.042 265.755);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
@@ -14,16 +15,16 @@
   --popover-foreground: oklch(0.145 0 0);
   --primary: oklch(0.511 0.096 186.391);
   --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0.97 0 0);
+  --secondary: oklch(0.968 0.008 90);
   --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
+  --muted: oklch(0.968 0.008 90);
   /* Darkened from 0.554 so secondary text passes WCAG AA (4.5:1) on the gray panels as well as on white. */
   --muted-foreground: oklch(0.5 0.046 257.417);
   --accent: oklch(0.953 0.051 180.801);
   --accent-foreground: oklch(0.437 0.078 188.216);
   /* Red-700: the tinted "Remove" buttons (destructive text on a light red wash) need 4.5:1 contrast. */
   --destructive: oklch(0.505 0.213 27.518);
-  --border: oklch(0.929 0.013 255.508);
+  --border: oklch(0.922 0.01 95);
   --input: oklch(0.869 0.022 252.894);
   --ring: oklch(0.511 0.096 186.391);
   --chart-1: oklch(0.87 0 0);
@@ -32,14 +33,15 @@
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  /* The workspace sidebar: deep teal with mint for the active item. */
+  --sidebar: oklch(0.29 0.055 195);
+  --sidebar-foreground: oklch(0.95 0.02 175);
+  --sidebar-primary: oklch(0.88 0.09 170);
+  --sidebar-primary-foreground: oklch(0.27 0.05 195);
+  --sidebar-accent: oklch(0.37 0.065 193);
+  --sidebar-accent-foreground: oklch(0.98 0.015 175);
+  --sidebar-border: oklch(0.38 0.05 193);
+  --sidebar-ring: oklch(0.88 0.09 170);
 }
 
 @theme inline {

@@ -9,24 +9,35 @@ Patients browse doctors, pick an open time slot and book an appointment. Doctors
 | Database | **PostgreSQL** (local Docker; **Neon** when deployed) |
 | Deployment | Backend on **Render** (Railway config also included), frontend on **Vercel**, database on **Neon** |
 | `docs/er-diagram.md` | Data model and design decisions |
+| `docs/scheduling.md` | Scheduling approach, cancel/reschedule rules, concurrency and tests |
 
 ## Features
 
+**Everyone**
+- **Sign up with email verification:** email and password, a 6-digit code sent to that email, then a choice of **Patient** or **Doctor** and a profile form for that role. Signing in with a half-finished sign-up continues where it stopped. The password is stored only as a hash.
+
 **Patients**
-- Doctor directory showing name, specialty, clinic, consultation fee and weekly timings, with search by name or specialty and specialty filters.
+- A **dashboard** with the next appointment, quick actions and a summary of past, upcoming and cancelled visits.
+- Doctor directory showing name, specialty, clinic, consultation fee, weekly timings and each doctor's **next available slot** (worked out with the same rules booking uses), with search by name or specialty and specialty filters.
 - Booking in three steps: choose a date, pick a slot, then review and confirm. Slots that are booked, full or in the past are disabled.
 - A confirmation screen after booking, and a **My appointments** page.
+- **Cancel** an upcoming appointment (with a confirmation step) or **reschedule** it to another slot with the same doctor. The old slot is released straight away and the old appointment is kept as history under Past.
 
 **Doctors**
+- **Profile**: name, specialty, clinic, fee and bio, shown to patients straight away. Moving clinic is refused while upcoming appointments exist.
+- **Cancel an appointment** from the appointment list. A confirmation dialog requires a reason; the cancel is recorded with the reason, the time and who did it. The patient sees it on their dashboard and in their history, and the time becomes bookable again.
+- A **workspace layout**: a deep-teal sidebar (Dashboard, Appointments, Availability, Profile) with a compact top bar; on phones the sidebar becomes a strip under the top bar.
 - A dashboard listing appointments with patient name, date, time and status. It reads from the database, so bookings stay visible after a refresh.
 - **Weekly working hours**: one or more sessions per weekday, each with a capacity.
 - **Date exceptions**: a day off, or different hours, for a specific date.
+- **Slot length**: how long each appointment is. It can only change while there are no upcoming appointments.
 
 **Rules enforced by the server**
 - Slots are generated from the doctor's hours in consultation-length steps.
 - A date exception replaces the weekly hours for that date.
 - A session accepts no more than its **capacity** in bookings, and a slot can't be booked twice, even when requests arrive at the same moment.
 - Only `PATIENT` accounts can book, and only `DOCTOR` accounts can use the doctor portal.
+- A cancelled appointment stops counting toward its slot and its session's capacity. Only the owner can cancel or reschedule an upcoming appointment, and a reschedule is all-or-nothing: if the new slot is not valid, the original stays.
 
 ## Run it locally
 
@@ -52,6 +63,10 @@ npm run dev
 
 Open http://localhost:3001. `GET http://localhost:3000/` returns `Hello World!` on purpose (the original setup check); the API lives under `/api`, for example `/api/health` and `/api/doctors`.
 
+### Signing up locally
+
+No email provider is needed in development: the backend prints each verification email, including the 6-digit code, in its terminal (the sign-up page says so). To send real emails, set `RESEND_API_KEY` and `EMAIL_FROM` (see Deploying).
+
 ### Demo accounts
 
 All demo accounts use the password `Demo@1234`. The login page also has one-click buttons for them.
@@ -69,7 +84,7 @@ The other doctors are `vikram.mehta@`, `priya.nair@`, `arjun.kapoor@` and `meera
 
 ```powershell
 cd backend
-npm test            # unit tests: slot generation, capacity rules, dates
+npm test            # unit tests: slot rules, next-available, cancel/reschedule rules, verification codes, email senders, config
 npm run test:e2e    # API tests against the PostgreSQL test database (needs docker compose up)
 npm run lint
 npm run typecheck
@@ -88,7 +103,13 @@ The e2e suite (`backend/test/booking.e2e-spec.ts`) drops and rebuilds the schema
 - **Validation:** malformed bodies and unknown body fields are rejected by the Zod schemas with a readable message per problem, while unknown query parameters (such as `utm_source`) are ignored.
 - **Capacity:** a session rejects bookings beyond its capacity, including **8 simultaneous requests** against a capacity of 2, where exactly 2 succeed.
 - **Doctor availability:** a day off removes that date's slots, custom hours replace them, and overlapping weekly sessions are rejected.
+- **Doctor cancellation:** needs a real reason (no body, empty, too short or too long, and unknown fields are refused); records the reason, the time and the cancelling doctor; frees the slot and the session capacity so someone else can book it; shows up for the patient with the reason and who cancelled; is refused for another doctor's appointment, for patients and for past, completed or already cancelled appointments; and when a doctor and a patient cancel at the same moment exactly one wins (checked by removing the row lock and the ownership filter, which makes those tests fail).
 - **Roles:** no token returns `401`, a doctor trying to book gets `403`, and a patient opening the doctor portal gets `403`.
+- **Cancellation:** frees the slot and capacity (the slot can be booked again), keeps a cancelled record, and rejects cancelling twice, someone else's appointment, a past appointment and invalid input.
+- **Rescheduling:** releases the old slot and books the new one, works inside a session that is full only because of the appointment itself, rejects taken or full slots without touching the original, and stays correct under concurrent reschedules and a cancel racing a reschedule.
+- **Sign-up:** a code is emailed and only its hash is stored; wrong codes are limited to 5 per code, codes expire after 15 minutes, resending is rate-limited, and a new code replaces the old one. A sign-up token can finish a profile but can never act as a session (checked by removing the guard and watching the test fail). Role-specific profile validation, one account per email even under double-clicks, and resuming half-finished sign-ups are covered.
+- **Next available and doctor profile:** every doctor's next slot matches the first free slot the slots endpoint offers; a day off moves it later; profile edits are validated, add the "Dr." title once, and a clinic change is refused while upcoming appointments exist.
+- **Doctor sessions:** weekly hours and per-session capacity persist and drive patient availability; the slot length can change only when it is valid and no upcoming appointments exist.
 
 ## API
 
@@ -96,16 +117,27 @@ All routes are under `/api`. Routes marked 🔒 need an `Authorization: Bearer <
 
 | Method | Route | Access | Purpose |
 |---|---|---|---|
-| POST | `/auth/login` | public | Email and password; returns `{ accessToken, user }` |
+| POST | `/auth/register` | public | Start a sign-up `{ email, password }` (8+ characters). Emails a 6-digit code. `409` if the email already has an account, `429` if a code was sent under 30 seconds ago |
+| POST | `/auth/verify-email` | public | `{ email, code }`. Returns a 30-minute `signupToken`. Wrong codes are limited to 5 per code |
+| POST | `/auth/resend-code` | public | `{ email }`. Sends a fresh code and invalidates the old one (30-second gap) |
+| POST | `/auth/complete-profile` | 🔒 sign-up token | Create the account: `{ role: "PATIENT", firstName, lastName, phone?, dateOfBirth?, gender? }` or `{ role: "DOCTOR", firstName, lastName, specialtyId, clinicId, consultationFee, bio? }`. Returns a session |
+| POST | `/auth/login` | public | Email and password; returns `{ accessToken, user }`, or `{ onboardingRequired, signupToken }` for a verified but unfinished sign-up (`403 EMAIL_NOT_VERIFIED` if not yet verified) |
 | GET | `/auth/me` | 🔒 any role | Current user |
 | GET | `/specialties` | public | Specialty filter options |
+| GET | `/clinics` | public | Clinics a new doctor can join |
 | GET | `/doctors?search=&specialtyId=` | public | Doctor directory |
-| GET | `/doctors/:id` | public | One doctor |
+| GET | `/doctors/:id` | public | One doctor, with `nextAvailable` (the doctor list has it too) |
 | GET | `/doctors/:id/slots?date=YYYY-MM-DD` | public | Sessions (capacity, booked, remaining) and slots (`AVAILABLE`/`BOOKED`/`FULL`/`PAST`) |
 | POST | `/appointments` | 🔒 PATIENT | Book `{ doctorId, date, startTime }`. Returns `201`; `409` if the slot is taken or the session is full |
-| GET | `/appointments/mine` | 🔒 PATIENT | The patient's appointments |
-| GET | `/doctor-portal/appointments?scope=upcoming\|all` | 🔒 DOCTOR | The doctor's appointments, with patient details |
+| GET | `/appointments/mine` | 🔒 PATIENT | The patient's appointments, including cancelled ones |
+| POST | `/appointments/:id/cancel` | 🔒 PATIENT | Cancel an upcoming appointment, optional `{ reason }`. `404` if it is not yours, `409` if it is already cancelled or has started |
+| POST | `/appointments/:id/reschedule` | 🔒 PATIENT | Move an upcoming appointment to another slot with the same doctor `{ date, startTime }`. Returns the new appointment (`201`); `409` if the slot is taken or the session is full |
+| GET | `/doctor-portal/appointments?scope=upcoming\|all` | 🔒 DOCTOR | The doctor's appointments, with patient details and, for cancelled ones, the reason and who cancelled |
+| POST | `/doctor-portal/appointments/:id/cancel` | 🔒 DOCTOR | Cancel one of your own upcoming appointments `{ reason }` (3 to 200 characters, required). `404` if it is not yours, `409` if it is already cancelled, completed or has started |
 | GET | `/doctor-portal/availability` | 🔒 DOCTOR | Weekly hours and upcoming date exceptions |
+| GET | `/doctor-portal/profile` | 🔒 DOCTOR | The doctor's own profile |
+| PUT | `/doctor-portal/profile` | 🔒 DOCTOR | `{ name, specialtyId, clinicId, consultationFee, bio }`. `409` if the clinic changes while upcoming appointments exist |
+| PUT | `/doctor-portal/settings` | 🔒 DOCTOR | Set the slot length `{ consultationMinutes }` (5 to 120). `409` while upcoming appointments exist |
 | PUT | `/doctor-portal/availability/weekly` | 🔒 DOCTOR | Replace the weekly hours `{ hours: [{ dayOfWeek, startTime, endTime, capacity }] }` |
 | PUT | `/doctor-portal/availability/overrides` | 🔒 DOCTOR | Add or replace one date's exception |
 | DELETE | `/doctor-portal/availability/overrides/:date` | 🔒 DOCTOR | Remove a date exception |
@@ -119,6 +151,7 @@ All routes are under `/api`. Routes marked 🔒 need an `Authorization: Bearer <
 - **One set of slot rules for listing and booking.** [`scheduling/slots.ts`](backend/src/scheduling/slots.ts) is pure logic with unit tests. The slots endpoint and the booking transaction both use it, so what a patient sees is exactly what the server will accept.
 - **Bookings can't race each other.** Booking runs in one TypeORM transaction that first locks the doctor row (`pessimistic_write`, i.e. `SELECT … FOR UPDATE`), so concurrent bookings for the same doctor run one at a time. It then recomputes the slots and capacity and inserts. The partial unique index `(doctor_id, appointment_date, start_time) WHERE status IN ('PENDING','CONFIRMED')` is the final safety net. Removing the lock makes the concurrency test fail with 3 bookings in a capacity-2 session, so the test does exercise the race.
 - **Capacity follows the ER design:** a date exception takes priority, then the weekly session, then the doctor's default capacity.
+- **Sign-up and email verification, without a new auth service.** Registration stores a pending sign-up (`email_verifications`, migration 003) with a password hash and a hashed code, so nothing half-created ever lands in `users`. Only after the profile step are the user and patient or doctor rows created, in one transaction. Email goes through a small `EmailSender` interface: the server log in development, Resend over HTTPS when `RESEND_API_KEY` is set (no extra package). In production with no provider, sign-up is switched off instead of printing codes into the logs.
 - **Minimal authentication.** No auth existed before this, so login checks `users.password_hash` (Node's built-in `scrypt`) and returns a JWT that expires after 8 hours. A guard checks the role on every protected route. The frontend keeps the token in `localStorage`. That's simple, but it can be read by injected scripts if the site ever has an XSS bug. An httpOnly cookie is the next step for production. Patient sign-up, password reset and Google login aren't built yet; demo accounts are seeded instead.
 - **Dates and times are clinic-local.** `date` and `time` columns are kept as strings, never converted to JS `Date`s. "Today" and "now" are worked out in `CLINIC_TIMEZONE` (default `Asia/Kolkata`).
 - **The frontend calls the API directly** from the browser (CORS is limited to `CORS_ORIGIN`). Pages are client components with explicit loading, empty, error and success states.
@@ -135,6 +168,8 @@ Three hosted pieces: the **database on Neon**, the **NestJS backend on Render** 
      JWT_SECRET=<long random string; the Blueprint generates one>
      CORS_ORIGIN=https://<your-vercel-domain>
      CLINIC_TIMEZONE=Asia/Kolkata
+     RESEND_API_KEY=<optional, enables real verification emails>
+     EMAIL_FROM=<optional, "CareSlot <no-reply@your-verified-domain>">
      NODE_VERSION=24.22.1
      NODE_ENV=production
      ```
@@ -160,6 +195,9 @@ Three hosted pieces: the **database on Neon**, the **NestJS backend on Render** 
 ## Known limitations
 
 - Only STREAM scheduling (one patient per slot) is implemented. The WAVE mode in the ER design is not.
-- Patients can't cancel or reschedule yet, and receptionist and admin screens aren't built.
+- Doctors can cancel but not reschedule appointments, and patients reschedule only with the same doctor. A patient is not emailed when their doctor cancels: they see it on their dashboard and in their history. There is no cancellation deadline, and receptionist and admin screens aren't built.
 - Changing weekly hours doesn't move or cancel existing appointments. They stay on the dashboard.
+- **Sign-up needs an email provider in production.** Without `RESEND_API_KEY`, sign-up is disabled there (set `EMAIL_DELIVERY=log` only for a private demo: codes would appear in the server logs). The Resend sender is unit-tested against a fake HTTP call, but has not been tried against the live service.
+- **Anyone with a verified email can sign up as a doctor and appear in the directory.** There is no admin approval step yet, so a real deployment would need one.
+- No password reset, no per-IP rate limiting (only per-email limits), and no patient profile editing yet.
 - Demo accounts share a published password, so this deployment is for demos only.

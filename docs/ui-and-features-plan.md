@@ -22,7 +22,7 @@ with server-side capacity rules; patient "My appointments"; cancel and reschedul
 doctor weekly sessions, capacity, date exceptions and slot length; JWT login with role checks; PostgreSQL through TypeORM;
 unit and end-to-end tests including concurrent booking.
 
-Not built: patient sign-up, symptom search, family bookings, receptionist and admin screens, walk-ins, wave scheduling,
+Not built: symptom search, family bookings, receptionist and admin screens, walk-ins, wave scheduling,
 notifications. Those are what this plan covers.
 
 ## 2. Patient UI
@@ -32,20 +32,20 @@ notifications. Those are what this plan covers.
 | Search | Search by doctor name or specialty | Done | Debounced; filter chips per specialty |
 | Search | **Symptom search** ("fever", "skin rash" suggests General Physician, Dermatology) | MVP | A small curated symptom-to-specialty list, not a diagnosis. Shows a clear "this is not medical advice" line |
 | Search | Filter by clinic or area; sort by fee | MVP | Fee sort is Done; area needs `clinics.city` (see section 7) |
-| Search | Filter by "available today" | V2 | Needs a cheap "next free slot" lookup per doctor |
+| Search | **Next available slot** on every doctor card | Done | Computed with the same rules as booking. Filtering by "available today" is still V2 |
 | Doctor cards | Avatar, name, specialty, clinic, fee, visit length, timings, bio, View profile / Book | Done | Real data only. No invented credentials or ratings |
 | Doctor cards | Qualifications and years of experience as separate fields | MVP | Today they live inside the free-text bio |
 | Profile | Bio, clinic, fee, timings, date strip, slots grouped by session | Done | |
 | Profile | Languages spoken; clinic map link | V2 | |
 | Booking | Date, slot, review, confirm, success | Done | Slot states are labelled, not colour only |
-| Booking | **Patient sign-up** and sign-in | MVP | Today only seeded demo accounts exist. No new tables needed |
+| Booking | **Patient sign-up**, email verification, role choice and profile | Done | Pending sign-ups live in `email_verifications`; the user rows are created only after the profile step |
 | Booking | Reason for visit (short note to the doctor) | V2 | One nullable column |
 | Appointments | Upcoming and Past tabs, status badges | Done | |
 | Appointments | **Reschedule and cancel** with confirmation | Done | Same doctor only; old slot released; history kept |
 | Appointments | Cancellation deadline (for example 2 hours before) | V2 | Per-clinic setting |
 | Appointments | Email or SMS reminders | Later | Needs a provider and a `notifications` table |
 | **Family bookings** | Book for a parent, child or partner from one account | V2 | See `family_members` in section 7. Booking screen gets a "Who is this for?" step |
-| Account | Profile (phone, date of birth); change password | V2 | |
+| Account | Patient profile editing and change password | V2 | Doctors can already edit their profile |
 
 **Principle:** a first-time visitor should reach "booked" in under a minute, signed out until the last step.
 
@@ -58,8 +58,9 @@ notifications. Those are what this plan covers.
 | Overrides | Day off or different hours for one date | Done | |
 | Slot length | Doctor sets slot length | Done | Refused while upcoming appointments exist |
 | Daily schedule | Day navigation, patient name and phone, status, "New" badge | Done | |
+| Profile | Doctor edits name, specialty, clinic, fee and bio | Done | A clinic change is refused while upcoming appointments exist |
 | Daily schedule | Mark an appointment **Completed** or **No-show** | V2 | Statuses already exist in the database; needs two buttons and permission checks |
-| Daily schedule | Doctor cancels an appointment (with a reason shown to the patient) | V2 | Unblocks slot-length changes for busy doctors |
+| Daily schedule | Doctor cancels an appointment (with a reason shown to the patient) | Done | Reason, time and canceller are stored; unblocks slot-length changes for busy doctors |
 | Receptionist | Receptionist signs in and sees the doctors of **their clinic** | V2 | `receptionist_assignments` already links receptionists to clinics |
 | Receptionist | Book, reschedule and cancel on behalf of a patient | V2 | `booked_by_user_id` already records who booked |
 | **Walk-ins** | Receptionist adds a patient who arrives without booking | V2 | Takes the next free slot, or an extra place if the session has room. Needs a way to record patients without an account (section 7) |
@@ -146,7 +147,7 @@ The existing nine tables are `users`, `patients`, `doctors`, `clinics`, `special
 | `doctors.qualifications` (text) and `doctors.experience_years` (int) | MVP | Show real credentials on cards and profiles |
 | `clinics.city` (and optional `area`) | MVP | Filter doctors by location |
 | `symptoms (id, name)` and `symptom_specialties (symptom_id, specialty_id)` | MVP | Symptom search. Seeded, curated, small |
-| Patient sign-up | MVP | No schema change: a `users` row plus a `patients` row |
+| `email_verifications` (pending sign-ups, hashed password and code) | **Done** | Migration 003. Patient sign-up itself needed no other schema change |
 | `appointments.visit_reason` (text, nullable) | V2 | Note to the doctor |
 | `family_members (id, patient_id, name, relation, date_of_birth, gender)` and `appointments.family_member_id` (nullable) | V2 | Booking for family. The account holder stays the booker |
 | `appointments.source` enum (`ONLINE`, `WALK_IN`, `PHONE`) | V2 | Tell walk-ins apart in reports |

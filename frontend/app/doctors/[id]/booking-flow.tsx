@@ -2,7 +2,7 @@
 
 import { ArrowLeftIcon, CalendarIcon, CheckIcon, ClockIcon, IndianRupeeIcon, MapPinIcon, StethoscopeIcon } from 'lucide-react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Alert, Avatar, EmptyState, Spinner } from '@/components/common';
 import { Badge } from '@/components/ui/badge';
@@ -21,7 +21,23 @@ export function BookingFlow() {
   const doctor = useQuery(`doctor:${id}`, () => api<Doctor>(`/doctors/${id}`));
   const [confirmed, setConfirmed] = useState<PatientAppointment | null>(null);
 
-  if (doctor.loading) return <Spinner label="Loading doctor…" />;
+  // Reschedule mode (?reschedule=<appointment id>): find the appointment being moved among the patient's own.
+  const searchParams = useSearchParams();
+  const rescheduleId = searchParams.get('reschedule');
+  const requestedDate = searchParams.get('date'); // set by "Next available" on a doctor card
+  const session = useSession();
+  const own = useQuery(rescheduleId && session?.user.role === 'PATIENT' ? `reschedule:${rescheduleId}` : null, () =>
+    api<PatientAppointment[]>('/appointments/mine', { token: session?.accessToken }),
+  );
+  const rescheduling =
+    rescheduleId && own.data
+      ? (own.data.find(
+          (a) => a.id === rescheduleId && a.doctor.id === id && (a.status === 'CONFIRMED' || a.status === 'PENDING'),
+        ) ?? null)
+      : null;
+  const rescheduleUnavailable = Boolean(rescheduleId && own.data && !rescheduling);
+
+  if (doctor.loading || own.loading) return <Spinner label="Loading doctor…" />;
   if (doctor.error || !doctor.data) {
     return (
       <EmptyState title="We couldn't load this doctor" icon={StethoscopeIcon}>
@@ -40,10 +56,20 @@ export function BookingFlow() {
         All doctors
       </Link>
       <DoctorHeader doctor={doctor.data} />
+      {rescheduleUnavailable && !confirmed && (
+        <Alert tone="info">
+          That appointment can no longer be rescheduled: it may have been cancelled or already passed. You can still book a new
+          time below.
+        </Alert>
+      )}
       {confirmed ? (
-        <BookingSuccess appointment={confirmed} onBookAnother={() => setConfirmed(null)} />
+        <BookingSuccess
+          appointment={confirmed}
+          rescheduled={Boolean(confirmed.rescheduledFromId)}
+          onBookAnother={() => setConfirmed(null)}
+        />
       ) : (
-        <SlotPicker doctor={doctor.data} onBooked={setConfirmed} />
+        <SlotPicker doctor={doctor.data} rescheduling={rescheduling} requestedDate={requestedDate} onBooked={setConfirmed} />
       )}
     </div>
   );
@@ -121,12 +147,25 @@ function sessionLabel(startTime: string) {
   return 'Evening';
 }
 
-function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointment: PatientAppointment) => void }) {
+function SlotPicker({
+  doctor,
+  rescheduling,
+  requestedDate,
+  onBooked,
+}: {
+  doctor: Doctor;
+  /** The appointment being moved, when the page was opened from "Reschedule"; null for a new booking. */
+  rescheduling: PatientAppointment | null;
+  /** A date from the link (?date=), used as the starting date when it is one of the dates offered. */
+  requestedDate: string | null;
+  onBooked: (appointment: PatientAppointment) => void;
+}) {
   const today = useClinicToday();
   const session = useSession();
   const hydrated = useHydrated();
   const summaryRef = useRef<HTMLDivElement>(null);
   const bookRef = useRef<HTMLDivElement>(null);
+  const stripRef = useRef<HTMLDivElement>(null);
   const [pickedDate, setPickedDate] = useState<string | null>(null);
   const [selected, setSelected] = useState<Slot | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -134,7 +173,9 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
 
   const deepLinked = useRef(false);
 
-  const date = pickedDate ?? today;
+  const offeredDates = today ? Array.from({ length: BOOKING_DAYS_SHOWN }, (_, i) => addDays(today, i)) : [];
+  const linkedDate = requestedDate && offeredDates.includes(requestedDate) ? requestedDate : null;
+  const date = pickedDate ?? linkedDate ?? today;
   const schedule = useQuery(date ? `slots:${doctor.id}:${date}` : null, () =>
     api<DaySchedule>(`/doctors/${doctor.id}/slots?date=${date}`),
   );
@@ -146,8 +187,13 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
     bookRef.current?.scrollIntoView({ block: 'start' });
   }, [schedule.data]);
 
+  // A date chosen by link may sit off-screen in the scrolling strip: bring it into view.
+  useEffect(() => {
+    stripRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ inline: 'center', block: 'nearest' });
+  }, [date]);
+
   const workingDays = new Set(doctor.weeklyHours.map((h) => h.dayOfWeek));
-  const dates = today ? Array.from({ length: BOOKING_DAYS_SHOWN }, (_, i) => addDays(today, i)) : [];
+  const dates = offeredDates;
 
   const chooseDate = (next: string) => {
     setPickedDate(next);
@@ -169,11 +215,17 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
     setSubmitting(true);
     setBookingError(null);
     try {
-      const appointment = await api<PatientAppointment>('/appointments', {
-        method: 'POST',
-        token: session.accessToken,
-        body: { doctorId: doctor.id, date, startTime: selected.startTime },
-      });
+      const appointment = rescheduling
+        ? await api<PatientAppointment>(`/appointments/${rescheduling.id}/reschedule`, {
+            method: 'POST',
+            token: session.accessToken,
+            body: { date, startTime: selected.startTime },
+          })
+        : await api<PatientAppointment>('/appointments', {
+            method: 'POST',
+            token: session.accessToken,
+            body: { doctorId: doctor.id, date, startTime: selected.startTime },
+          });
       onBooked(appointment);
     } catch (error) {
       setBookingError(errorMessage(error));
@@ -189,6 +241,14 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
 
   return (
     <div id="book" ref={bookRef} className="grid scroll-mt-20 gap-6 lg:grid-cols-[1fr_360px]">
+      {rescheduling && (
+        <div className="lg:col-span-2">
+          <Alert tone="info">
+            Rescheduling your appointment on {formatDate(rescheduling.date, { weekday: 'long' })} at{' '}
+            {formatTime(rescheduling.startTime)}. Pick a new time below. Your current appointment is kept until you confirm.
+          </Alert>
+        </div>
+      )}
       <Card className="min-w-0 [--card-spacing:--spacing(5)]">
         <CardContent className="space-y-8">
           <div>
@@ -198,7 +258,7 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
                 <p className="text-sm text-muted-foreground">{formatDate(date, { weekday: undefined, day: undefined })}</p>
               )}
             </div>
-            <div className="-mx-1 mt-3 flex gap-2 overflow-x-auto px-1 pb-2" role="listbox" aria-label="Appointment date">
+            <div ref={stripRef} className="-mx-1 mt-3 flex gap-2 overflow-x-auto px-1 pb-2" role="listbox" aria-label="Appointment date">
               {dates.map((d) => {
                 const active = d === date;
                 const works = workingDays.has(dayOfWeek(d));
@@ -336,6 +396,12 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
                 />
                 <SummaryRow label="Clinic" value={`${doctor.clinic.name}, ${doctor.clinic.address}`} />
                 <SummaryRow label="Fee (pay at clinic)" value={formatFee(doctor.consultationFee)} />
+                {rescheduling && (
+                  <SummaryRow
+                    label="Moving from"
+                    value={`${formatDate(rescheduling.date, { weekday: 'long' })}, ${formatTime(rescheduling.startTime)}`}
+                  />
+                )}
               </dl>
             ) : (
               <p className="rounded-lg bg-muted p-3 text-sm text-muted-foreground">
@@ -356,7 +422,15 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
             )}
             {session?.user.role === 'PATIENT' && (
               <Button size="lg" className="h-10 w-full" disabled={!selected || submitting} onClick={confirm}>
-                {submitting ? 'Booking…' : selected ? 'Confirm appointment' : 'Select a time slot'}
+                {submitting
+                  ? rescheduling
+                    ? 'Rescheduling…'
+                    : 'Booking…'
+                  : selected
+                    ? rescheduling
+                      ? 'Confirm new time'
+                      : 'Confirm appointment'
+                    : 'Select a time slot'}
               </Button>
             )}
           </CardContent>
@@ -395,7 +469,15 @@ function SlotLegend() {
   );
 }
 
-function BookingSuccess({ appointment, onBookAnother }: { appointment: PatientAppointment; onBookAnother: () => void }) {
+function BookingSuccess({
+  appointment,
+  rescheduled,
+  onBookAnother,
+}: {
+  appointment: PatientAppointment;
+  rescheduled: boolean;
+  onBookAnother: () => void;
+}) {
   return (
     <Card className="mx-auto max-w-xl [--card-spacing:--spacing(6)] animate-in fade-in-0 zoom-in-95 duration-300">
       <CardContent className="space-y-5 text-center" aria-live="polite">
@@ -406,8 +488,11 @@ function BookingSuccess({ appointment, onBookAnother }: { appointment: PatientAp
           <CheckIcon className="size-7" />
         </div>
         <div>
-          <h2 className="text-2xl font-bold text-foreground">Appointment confirmed</h2>
-          <p className="mt-1 text-sm text-muted-foreground">Booking reference {appointment.id.slice(0, 8).toUpperCase()}</p>
+          <h2 className="text-2xl font-bold text-foreground">{rescheduled ? 'Appointment rescheduled' : 'Appointment confirmed'}</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Booking reference {appointment.id.slice(0, 8).toUpperCase()}
+            {rescheduled && ' · your previous time has been released'}
+          </p>
         </div>
         <dl className="grid gap-3 rounded-lg bg-muted p-4 text-left text-sm sm:grid-cols-2">
           <SummaryRow label="Doctor" value={`${appointment.doctor.name} · ${appointment.doctor.specialty}`} />
@@ -422,9 +507,11 @@ function BookingSuccess({ appointment, onBookAnother }: { appointment: PatientAp
           <Link href="/appointments" className={buttonVariants({ size: 'lg', className: 'h-10' })}>
             View my appointments
           </Link>
-          <Button size="lg" variant="outline" className="h-10" onClick={onBookAnother}>
-            Book another slot
-          </Button>
+          {!rescheduled && (
+            <Button size="lg" variant="outline" className="h-10" onClick={onBookAnother}>
+              Book another slot
+            </Button>
+          )}
         </div>
       </CardContent>
     </Card>

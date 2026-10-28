@@ -104,8 +104,22 @@ erDiagram
         time end_time "must be > start_time"
         appointment_status status "PENDING | CONFIRMED | CANCELLED | COMPLETED | NO_SHOW"
         text cancel_reason
+        timestamptz cancelled_at "set when status = CANCELLED"
+        uuid cancelled_by_user_id FK "who cancelled: the patient or the doctor"
+        uuid rescheduled_from_id FK "the cancelled appointment this one replaced"
         timestamptz created_at
         timestamptz updated_at
+    }
+
+    email_verifications {
+        varchar email PK "lower-cased; one pending sign-up per email"
+        varchar password_hash "scrypt hash, never the password"
+        varchar code_hash "HMAC of the 6-digit code"
+        timestamptz expires_at
+        int attempts "wrong guesses against the current code"
+        timestamptz verified_at
+        timestamptz last_sent_at
+        timestamptz created_at
     }
 
     users ||--o| patients : "has patient profile"
@@ -118,6 +132,8 @@ erDiagram
     doctors ||--o{ schedule_overrides : "date exceptions"
     patients ||--o{ appointments : "attends"
     doctors ||--o{ appointments : "sees"
+    appointments |o--o| appointments : "rescheduled from"
+    users ||--o{ appointments : "cancelled"
     users ||--o{ appointments : "books"
 ```
 

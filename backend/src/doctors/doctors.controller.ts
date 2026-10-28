@@ -23,6 +23,11 @@ export class DoctorsController {
     return this.doctors.specialties();
   }
 
+  @Get('clinics')
+  clinics() {
+    return this.doctors.clinics();
+  }
+
   @Get('doctors')
   list(@Query(new ZodValidationPipe(listDoctorsQuery)) query: z.infer<typeof listDoctorsQuery>) {
     return this.doctors.list(query.search, query.specialtyId);

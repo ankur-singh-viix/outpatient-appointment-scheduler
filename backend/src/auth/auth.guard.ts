@@ -32,6 +32,10 @@ export class AuthGuard implements CanActivate {
     } catch {
       throw new UnauthorizedException('Your session has expired. Please sign in again.');
     }
+    // Tokens issued during sign-up carry a `purpose` and no user. They must never work as a session.
+    if (!payload.sub || !payload.role || 'purpose' in payload) {
+      throw new UnauthorizedException('Please sign in to continue.');
+    }
     request.user = { id: payload.sub, name: payload.name, role: payload.role };
 
     const allowed = this.reflector.getAllAndOverride<Role[] | undefined>(ROLES_KEY, [

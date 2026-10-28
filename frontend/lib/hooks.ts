@@ -64,6 +64,18 @@ export function useClinicToday(): string | null {
   return useSyncExternalStore(noopSubscribe, clinicToday, () => null);
 }
 
+/** Calls `callback` every `intervalMs` while the component is on screen, always using the latest version of it. */
+export function useAutoRefresh(callback: () => void, intervalMs = 30_000): void {
+  const latest = useRef(callback);
+  useEffect(() => {
+    latest.current = callback;
+  });
+  useEffect(() => {
+    const timer = setInterval(() => latest.current(), intervalMs);
+    return () => clearInterval(timer);
+  }, [intervalMs]);
+}
+
 /** The current time in ms, refreshed on an interval so "booked 5 min ago" labels stay accurate. */
 export function useNow(intervalMs = 30_000): number {
   const [now, setNow] = useState(() => Date.now());

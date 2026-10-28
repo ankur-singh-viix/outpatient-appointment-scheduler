@@ -8,7 +8,14 @@ export interface AppConfig {
   clinicTimezone: string;
   /** How many days ahead patients may book. */
   bookingWindowDays: number;
+  /** How sign-up verification emails are delivered: Resend (needs RESEND_API_KEY), the server log (development), or not at all. */
+  emailDelivery: EmailDelivery;
+  resendApiKey: string;
+  /** The "from" address; with Resend it must be on a domain you have verified there. */
+  emailFrom: string;
 }
+
+export type EmailDelivery = 'resend' | 'log' | 'disabled';
 
 const DEV_DATABASE_URL = 'postgres://postgres:postgres@localhost:5432/outpatient';
 
@@ -27,6 +34,15 @@ export function loadConfig(): AppConfig {
     return devDefault;
   };
 
+  const resendApiKey = process.env.RESEND_API_KEY ?? '';
+  // Printing codes to the server log is only safe on a developer machine, so in production it has to be asked for
+  // explicitly (EMAIL_DELIVERY=log, for a demo). Otherwise sign-up is switched off until a provider is configured.
+  const emailDelivery: EmailDelivery = resendApiKey
+    ? 'resend'
+    : !production || process.env.EMAIL_DELIVERY === 'log'
+      ? 'log'
+      : 'disabled';
+
   return {
     databaseUrl: required('DATABASE_URL', DEV_DATABASE_URL),
     jwtSecret: required('JWT_SECRET', 'dev-only-secret-change-me'),
@@ -36,5 +52,8 @@ export function loadConfig(): AppConfig {
       .filter(Boolean),
     clinicTimezone: process.env.CLINIC_TIMEZONE ?? 'Asia/Kolkata',
     bookingWindowDays: Number(process.env.BOOKING_WINDOW_DAYS ?? 30),
+    emailDelivery,
+    resendApiKey,
+    emailFrom: process.env.EMAIL_FROM ?? 'CareSlot <onboarding@resend.dev>',
   };
 }

@@ -102,6 +102,24 @@ export function initials(name: string): string {
     .join('');
 }
 
+/** The date and time of day (HH:MM) in the clinic time zone at the given moment. */
+export function clinicClock(nowMs: number): { date: string; time: string } {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: CLINIC_TIMEZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(new Date(nowMs))
+      .map((part) => [part.type, part.value]),
+  );
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}` };
+}
+
 /** "Today" or "Tomorrow" for the two nearest days, otherwise null. */
 export function relativeDay(date: string, today: string | null): string | null {
   if (!today) return null;

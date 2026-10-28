@@ -10,8 +10,8 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api';
-import { formatFee, initials, summariseWeeklyHours } from '@/lib/format';
-import { useDebounced, useQuery } from '@/lib/hooks';
+import { formatDate, formatFee, formatTime, initials, relativeDay, summariseWeeklyHours } from '@/lib/format';
+import { useClinicToday, useDebounced, useQuery } from '@/lib/hooks';
 import type { Doctor, Specialty } from '@/lib/types';
 
 type SortKey = 'relevance' | 'fee-asc' | 'fee-desc' | 'name';
@@ -188,6 +188,8 @@ function FilterChip({ active, onClick, children }: { active: boolean; onClick: (
 
 function DoctorCard({ doctor }: { doctor: Doctor }) {
   const timings = summariseWeeklyHours(doctor.weeklyHours);
+  const today = useClinicToday();
+  const next = doctor.nextAvailable;
   return (
     <article className="h-full">
       <Card className="h-full transition-all duration-200 [--card-spacing:--spacing(5)] hover:-translate-y-0.5 hover:shadow-md hover:ring-primary/30">
@@ -210,6 +212,27 @@ function DoctorCard({ doctor }: { doctor: Doctor }) {
 
           {/* The bio is where doctors list their qualifications; shown exactly as stored, never invented. */}
           {doctor.bio && <p className="line-clamp-2 text-sm text-foreground/80">{doctor.bio}</p>}
+
+          {/* Worked out by the server from the same rules booking uses, so this time can really be booked. */}
+          <p
+            className={
+              next
+                ? 'flex items-center gap-2 rounded-lg bg-accent px-3 py-2 text-sm text-accent-foreground'
+                : 'flex items-center gap-2 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground'
+            }
+          >
+            <ClockIcon className="size-4 shrink-0" aria-hidden />
+            {next ? (
+              <span>
+                Next available:{' '}
+                <span className="font-semibold">
+                  {relativeDay(next.date, today) ?? formatDate(next.date, { year: undefined })}, {formatTime(next.startTime)}
+                </span>
+              </span>
+            ) : (
+              <span>No free slots in the next 14 days</span>
+            )}
+          </p>
 
           <dl className="grid grid-cols-2 gap-3 text-sm">
             <div className="rounded-lg bg-muted p-3">
@@ -246,7 +269,7 @@ function DoctorCard({ doctor }: { doctor: Doctor }) {
               View profile
             </Link>
             <Link
-              href={`/doctors/${doctor.id}#book`}
+              href={`/doctors/${doctor.id}${next ? `?date=${next.date}` : ''}#book`}
               aria-label={`Book appointment with ${doctor.name}`}
               className={buttonVariants({ size: 'lg', className: 'h-10' })}
             >

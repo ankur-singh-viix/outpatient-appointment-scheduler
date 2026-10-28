@@ -1,9 +1,10 @@
 'use client';
 
-import { CalendarCheckIcon, LayoutDashboardIcon, LogOutIcon, SearchIcon, StethoscopeIcon } from 'lucide-react';
+import { LogOutIcon, SearchIcon, StethoscopeIcon } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { Avatar } from '@/components/common';
+import { useNavItems } from '@/components/nav';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { initials } from '@/lib/format';
 import { saveSession, useHydrated, useSession } from '@/lib/session';
@@ -23,26 +24,21 @@ function Brand() {
 /** Static header shown while the interactive one loads. */
 export function SiteHeaderFallback() {
   return (
-    <header className="sticky top-0 z-20 border-b bg-card/95">
-      <div className="mx-auto flex min-h-15 max-w-6xl items-center px-4 py-3">
+    <header className="sticky top-0 z-30 border-b bg-card/95">
+      <div className="mx-auto flex h-14 max-w-6xl items-center px-4">
         <Brand />
       </div>
     </header>
   );
 }
 
+/** A compact top bar: logo, who is signed in, sign out. The workspace navigation lives in the sidebar. */
 export function SiteHeader() {
   const session = useSession();
   const hydrated = useHydrated();
   const pathname = usePathname();
   const router = useRouter();
-  const role = session?.user.role;
-
-  const links = [
-    { href: '/', label: 'Find doctors', icon: SearchIcon, show: role !== 'DOCTOR' },
-    { href: '/appointments', label: 'My appointments', icon: CalendarCheckIcon, show: role === 'PATIENT' },
-    { href: '/doctor', label: 'Dashboard', icon: LayoutDashboardIcon, show: role === 'DOCTOR' },
-  ].filter((link) => link.show);
+  const items = useNavItems();
 
   const signOut = () => {
     saveSession(null);
@@ -50,29 +46,12 @@ export function SiteHeader() {
   };
 
   return (
-    <header className="sticky top-0 z-20 border-b bg-card/95 backdrop-blur">
-      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-x-6 gap-y-2 px-4 py-3">
+    <header className="sticky top-0 z-30 border-b bg-card/95 backdrop-blur">
+      <div className="flex h-14 items-center justify-between gap-4 px-4 lg:px-6">
         <Brand />
 
-        <nav className="order-3 flex w-full gap-1 overflow-x-auto sm:order-none sm:w-auto" aria-label="Main">
-          {links.map((link) => {
-            const active = pathname === link.href;
-            return (
-              <Link
-                key={link.href}
-                href={link.href}
-                aria-current={active ? 'page' : undefined}
-                className={cn(buttonVariants({ variant: active ? 'secondary' : 'ghost', size: 'lg' }), 'gap-2', active && 'text-primary')}
-              >
-                <link.icon aria-hidden />
-                {link.label}
-              </Link>
-            );
-          })}
-        </nav>
-
         {/* Rendered only after hydration so the server and browser markup match. */}
-        <div className="flex min-h-9 items-center gap-2 text-sm">
+        <div className="flex items-center gap-2 text-sm">
           {hydrated && session && (
             <>
               <div className="flex items-center gap-2">
@@ -88,13 +67,48 @@ export function SiteHeader() {
               </Button>
             </>
           )}
-          {hydrated && !session && pathname !== '/login' && (
-            <Link href="/login" className={buttonVariants({ size: 'lg' })}>
-              Sign in
-            </Link>
+          {hydrated && !session && (
+            <>
+              {pathname !== '/' && (
+                <Link href="/" className={cn(buttonVariants({ variant: 'ghost', size: 'lg' }), 'gap-2')}>
+                  <SearchIcon aria-hidden />
+                  <span className="hidden sm:inline">Find doctors</span>
+                </Link>
+              )}
+              {pathname !== '/login' && (
+                <Link href="/login" className={buttonVariants({ variant: 'ghost', size: 'lg' })}>
+                  Sign in
+                </Link>
+              )}
+              {pathname !== '/signup' && pathname !== '/onboarding' && (
+                <Link href="/signup" className={buttonVariants({ size: 'lg' })}>
+                  Get started
+                </Link>
+              )}
+            </>
           )}
         </div>
       </div>
+
+      {/* On phones the sidebar is replaced by this strip. */}
+      {items.length > 0 && (
+        <nav aria-label="Workspace (mobile)" className="flex gap-1 overflow-x-auto border-t px-3 py-1.5 lg:hidden">
+          {items.map((item) => (
+            <Link
+              key={item.href}
+              href={item.href}
+              aria-current={item.active ? 'page' : undefined}
+              className={cn(
+                buttonVariants({ variant: item.active ? 'default' : 'ghost', size: 'lg' }),
+                'shrink-0 gap-2',
+              )}
+            >
+              <item.icon aria-hidden />
+              {item.label}
+            </Link>
+          ))}
+        </nav>
+      )}
     </header>
   );
 }

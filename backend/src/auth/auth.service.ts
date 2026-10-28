@@ -3,34 +3,35 @@ import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from '../database/entities/index.js';
-import type { JwtPayload, Role } from './auth.types.js';
 import { verifyPassword } from './password.js';
+import { signSession, toPublicUser, type PublicUser } from './session.js';
+import { SignupService } from './signup.service.js';
 
-export interface PublicUser {
-  id: string;
-  name: string;
-  email: string;
-  role: Role;
-}
+export type { PublicUser } from './session.js';
 
 @Injectable()
 export class AuthService {
   constructor(
     @InjectRepository(User) private readonly users: Repository<User>,
     private readonly jwt: JwtService,
+    private readonly signup: SignupService,
   ) {}
 
-  async login(email: string, password: string): Promise<{ accessToken: string; user: PublicUser }> {
+  /**
+   * A normal sign-in returns `{ accessToken, user }`. If the email has no account but a pending sign-up that matches
+   * the password, the answer tells the client to continue the sign-up instead (see SignupService.loginPending).
+   */
+  async login(email: string, password: string) {
     const user = await this.users
       .createQueryBuilder('user')
       .where('lower(user.email) = lower(:email)', { email: email.trim() })
       .getOne();
+    if (!user) return this.signup.loginPending(email, password);
     // Same message for unknown email and wrong password, so emails can't be probed.
-    if (!user || !(await verifyPassword(password, user.passwordHash))) {
+    if (!(await verifyPassword(password, user.passwordHash))) {
       throw new UnauthorizedException('Incorrect email or password.');
     }
-    const payload: JwtPayload = { sub: user.id, name: user.name, role: user.role };
-    return { accessToken: await this.jwt.signAsync(payload), user: toPublicUser(user) };
+    return signSession(this.jwt, user);
   }
 
   async me(userId: string): Promise<PublicUser> {
@@ -38,8 +39,4 @@ export class AuthService {
     if (!user) throw new NotFoundException('User not found.');
     return toPublicUser(user);
   }
-}
-
-function toPublicUser(user: User): PublicUser {
-  return { id: user.id, name: user.name, email: user.email, role: user.role };
 }
