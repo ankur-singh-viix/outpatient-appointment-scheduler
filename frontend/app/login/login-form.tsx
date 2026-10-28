@@ -51,7 +51,9 @@ export function LoginForm() {
       <Card className="[--card-spacing:--spacing(6)]">
         <form onSubmit={signIn} className="contents">
           <CardHeader>
-            <CardTitle className="text-2xl font-bold">Sign in</CardTitle>
+            <CardTitle as="h1" className="text-2xl font-bold">
+              Sign in
+            </CardTitle>
             <CardDescription>Patients sign in to book. Doctors sign in to manage their schedule.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -89,7 +91,9 @@ export function LoginForm() {
 
       <Card className="h-fit [--card-spacing:--spacing(6)]">
         <CardHeader>
-          <CardTitle className="text-lg font-semibold">Demo accounts</CardTitle>
+          <CardTitle as="h2" className="text-lg font-semibold">
+            Demo accounts
+          </CardTitle>
           <CardDescription>
             All demo accounts use the password{' '}
             <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">{DEMO_PASSWORD}</code>.

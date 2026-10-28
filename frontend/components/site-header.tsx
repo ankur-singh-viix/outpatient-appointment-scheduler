@@ -1,15 +1,19 @@
 'use client';
 
+import { CalendarCheckIcon, LayoutDashboardIcon, LogOutIcon, SearchIcon, StethoscopeIcon } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
+import { Avatar } from '@/components/common';
 import { Button, buttonVariants } from '@/components/ui/button';
+import { initials } from '@/lib/format';
 import { saveSession, useHydrated, useSession } from '@/lib/session';
+import { cn } from '@/lib/utils';
 
 function Brand() {
   return (
-    <Link href="/" className="flex items-center gap-2 text-lg font-bold text-foreground">
-      <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-sm text-primary-foreground" aria-hidden>
-        +
+    <Link href="/" className="flex items-center gap-2 text-lg font-bold tracking-tight text-foreground">
+      <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground" aria-hidden>
+        <StethoscopeIcon className="size-4.5" />
       </span>
       CareSlot
     </Link>
@@ -35,9 +39,9 @@ export function SiteHeader() {
   const role = session?.user.role;
 
   const links = [
-    { href: '/', label: 'Find doctors', show: role !== 'DOCTOR' },
-    { href: '/appointments', label: 'My appointments', show: role === 'PATIENT' },
-    { href: '/doctor', label: 'Dashboard', show: role === 'DOCTOR' },
+    { href: '/', label: 'Find doctors', icon: SearchIcon, show: role !== 'DOCTOR' },
+    { href: '/appointments', label: 'My appointments', icon: CalendarCheckIcon, show: role === 'PATIENT' },
+    { href: '/doctor', label: 'Dashboard', icon: LayoutDashboardIcon, show: role === 'DOCTOR' },
   ].filter((link) => link.show);
 
   const signOut = () => {
@@ -51,26 +55,36 @@ export function SiteHeader() {
         <Brand />
 
         <nav className="order-3 flex w-full gap-1 overflow-x-auto sm:order-none sm:w-auto" aria-label="Main">
-          {links.map((link) => (
-            <Link
-              key={link.href}
-              href={link.href}
-              className={buttonVariants({ variant: pathname === link.href ? 'secondary' : 'ghost' })}
-            >
-              {link.label}
-            </Link>
-          ))}
+          {links.map((link) => {
+            const active = pathname === link.href;
+            return (
+              <Link
+                key={link.href}
+                href={link.href}
+                aria-current={active ? 'page' : undefined}
+                className={cn(buttonVariants({ variant: active ? 'secondary' : 'ghost', size: 'lg' }), 'gap-2', active && 'text-primary')}
+              >
+                <link.icon aria-hidden />
+                {link.label}
+              </Link>
+            );
+          })}
         </nav>
 
         {/* Rendered only after hydration so the server and browser markup match. */}
-        <div className="flex min-h-9 items-center gap-3 text-sm">
+        <div className="flex min-h-9 items-center gap-2 text-sm">
           {hydrated && session && (
             <>
-              <span className="hidden text-muted-foreground sm:inline">
-                {session.user.name} <span className="opacity-70">· {session.user.role.toLowerCase()}</span>
-              </span>
-              <Button variant="ghost" onClick={signOut}>
-                Sign out
+              <div className="flex items-center gap-2">
+                <Avatar size="sm" text={initials(session.user.name)} />
+                <div className="hidden leading-tight sm:block">
+                  <p className="font-medium text-foreground">{session.user.name}</p>
+                  <p className="text-xs text-muted-foreground capitalize">{session.user.role.toLowerCase()}</p>
+                </div>
+              </div>
+              <Button variant="ghost" size="lg" onClick={signOut} className="gap-2" aria-label="Sign out">
+                <LogOutIcon aria-hidden />
+                <span className="hidden sm:inline">Sign out</span>
               </Button>
             </>
           )}

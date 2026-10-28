@@ -56,7 +56,9 @@ export function WeeklyHoursEditor({ session, availability, onSaved }: EditorProp
   return (
     <Card className="[--card-spacing:--spacing(5)]">
       <CardHeader>
-        <CardTitle className="text-lg font-semibold">Weekly working hours</CardTitle>
+        <CardTitle as="h2" className="text-lg font-semibold">
+          Weekly working hours
+        </CardTitle>
         <CardDescription>
           Patients book {availability.consultationMinutes}-minute slots inside these hours. Capacity is the maximum number of
           bookings per session.
@@ -170,7 +172,9 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
   return (
     <Card className="[--card-spacing:--spacing(5)]">
       <CardHeader>
-        <CardTitle className="text-lg font-semibold">Date exceptions</CardTitle>
+        <CardTitle as="h2" className="text-lg font-semibold">
+          Date exceptions
+        </CardTitle>
         <CardDescription>
           Take a day off or set different hours for a specific date. This replaces your weekly hours for that date.
         </CardDescription>

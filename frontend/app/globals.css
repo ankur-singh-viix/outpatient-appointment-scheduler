@@ -17,10 +17,12 @@
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.554 0.046 257.417);
+  /* Darkened from 0.554 so secondary text passes WCAG AA (4.5:1) on the gray panels as well as on white. */
+  --muted-foreground: oklch(0.5 0.046 257.417);
   --accent: oklch(0.953 0.051 180.801);
   --accent-foreground: oklch(0.437 0.078 188.216);
-  --destructive: oklch(0.577 0.245 27.325);
+  /* Red-700: the tinted "Remove" buttons (destructive text on a light red wash) need 4.5:1 contrast. */
+  --destructive: oklch(0.505 0.213 27.518);
   --border: oklch(0.929 0.013 255.508);
   --input: oklch(0.869 0.022 252.894);
   --ring: oklch(0.511 0.096 186.391);
@@ -130,5 +132,17 @@ body {
   }
   html {
     @apply font-sans;
+  }
+}
+
+/* Respect users who ask the OS for less motion: keep state changes, drop the movement. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

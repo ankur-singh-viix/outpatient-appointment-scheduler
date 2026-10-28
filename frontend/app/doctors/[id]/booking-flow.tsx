@@ -1,10 +1,11 @@
 'use client';
 
-import { CheckIcon } from 'lucide-react';
+import { ArrowLeftIcon, CalendarIcon, CheckIcon, ClockIcon, IndianRupeeIcon, MapPinIcon, StethoscopeIcon } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Alert, Avatar, EmptyState, Spinner } from '@/components/common';
+import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { api, errorMessage } from '@/lib/api';
@@ -23,9 +24,9 @@ export function BookingFlow() {
   if (doctor.loading) return <Spinner label="Loading doctor…" />;
   if (doctor.error || !doctor.data) {
     return (
-      <EmptyState title="We couldn't load this doctor">
+      <EmptyState title="We couldn't load this doctor" icon={StethoscopeIcon}>
         <p>{doctor.error}</p>
-        <Link href="/" className={buttonVariants({ variant: 'link' })}>
+        <Link href="/" className={buttonVariants({ variant: 'outline' })}>
           Back to all doctors
         </Link>
       </EmptyState>
@@ -33,9 +34,10 @@ export function BookingFlow() {
   }
 
   return (
-    <div className="space-y-6">
-      <Link href="/" className="text-sm font-medium text-primary hover:underline">
-        ← All doctors
+    <div className="space-y-6 animate-in fade-in-0 duration-300">
+      <Link href="/" className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline">
+        <ArrowLeftIcon className="size-4" aria-hidden />
+        All doctors
       </Link>
       <DoctorHeader doctor={doctor.data} />
       {confirmed ? (
@@ -47,37 +49,69 @@ export function BookingFlow() {
   );
 }
 
+function InfoTile({ icon, label, children }: { icon: ReactNode; label: string; children: ReactNode }) {
+  return (
+    <div className="rounded-lg bg-muted px-4 py-3 text-sm">
+      <p className="flex items-center gap-1.5 text-muted-foreground">
+        {icon}
+        {label}
+      </p>
+      <p className="mt-0.5 text-lg font-bold text-foreground">{children}</p>
+    </div>
+  );
+}
+
 function DoctorHeader({ doctor }: { doctor: Doctor }) {
+  const timings = summariseWeeklyHours(doctor.weeklyHours);
   return (
     <Card className="[--card-spacing:--spacing(5)]">
-      <CardContent className="flex flex-col gap-4 sm:flex-row sm:items-start">
-        <Avatar text={initials(doctor.name)} />
-        <div className="flex-1 space-y-1">
-          <h1 className="text-2xl font-bold text-foreground">{doctor.name}</h1>
-          <p className="font-medium text-primary">{doctor.specialty.name}</p>
-          {doctor.bio && <p className="text-sm text-foreground/80">{doctor.bio}</p>}
-          <p className="text-sm text-muted-foreground">
-            {doctor.clinic.name} · {doctor.clinic.address}
-          </p>
-          <p className="text-sm text-muted-foreground">
-            {summariseWeeklyHours(doctor.weeklyHours).join(' · ') || 'No regular hours set'}
-          </p>
+      <CardContent className="flex flex-col gap-5 lg:flex-row lg:items-start">
+        <div className="flex flex-1 gap-4">
+          <Avatar text={initials(doctor.name)} />
+          <div className="min-w-0 flex-1 space-y-2">
+            <div className="space-y-1">
+              <h1 className="text-2xl font-bold tracking-tight text-foreground">{doctor.name}</h1>
+              <Badge variant="secondary" className="bg-accent text-accent-foreground">
+                {doctor.specialty.name}
+              </Badge>
+            </div>
+            {doctor.bio && <p className="text-sm text-foreground/80">{doctor.bio}</p>}
+            <p className="flex items-start gap-1.5 text-sm text-muted-foreground">
+              <MapPinIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+              {doctor.clinic.name} · {doctor.clinic.address}
+            </p>
+            <p className="flex items-start gap-1.5 text-sm text-muted-foreground">
+              <CalendarIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+              {timings.join(' · ') || 'No regular hours set'}
+            </p>
+          </div>
         </div>
-        <div className="rounded-lg bg-muted px-4 py-3 text-sm sm:text-right">
-          <p className="text-muted-foreground">Consultation fee</p>
-          <p className="text-xl font-bold text-foreground">{formatFee(doctor.consultationFee)}</p>
-          <p className="text-muted-foreground">{doctor.consultationMinutes} min visit</p>
+        <div className="grid grid-cols-2 gap-3 lg:w-104">
+          <InfoTile icon={<IndianRupeeIcon className="size-3.5" aria-hidden />} label="Consultation fee">
+            {formatFee(doctor.consultationFee)}
+          </InfoTile>
+          <InfoTile icon={<ClockIcon className="size-3.5" aria-hidden />} label="Visit length">
+            {doctor.consultationMinutes} min
+          </InfoTile>
         </div>
       </CardContent>
     </Card>
   );
 }
 
+const SLOT_LABEL: Record<Slot['status'], string> = {
+  AVAILABLE: 'Available',
+  BOOKED: 'Booked',
+  FULL: 'Full',
+  PAST: 'Passed',
+};
+
+// Color is never the only cue: booked, full and passed slots also carry a text label.
 const SLOT_STYLES: Record<Slot['status'], string> = {
-  AVAILABLE: 'border-primary/60 bg-card text-primary hover:bg-accent',
-  BOOKED: 'border-border bg-muted text-muted-foreground/60 line-through',
-  FULL: 'border-amber-200 bg-amber-50 text-amber-700/70',
-  PAST: 'border-border bg-muted/50 text-muted-foreground/40',
+  AVAILABLE: 'border-primary/50 bg-card text-primary hover:bg-accent',
+  BOOKED: 'border-border bg-muted text-muted-foreground',
+  FULL: 'border-amber-200 bg-amber-50 text-amber-800',
+  PAST: 'border-border bg-muted/50 text-muted-foreground/60',
 };
 
 function sessionLabel(startTime: string) {
@@ -91,15 +125,27 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
   const today = useClinicToday();
   const session = useSession();
   const hydrated = useHydrated();
+  const summaryRef = useRef<HTMLDivElement>(null);
+  const bookRef = useRef<HTMLDivElement>(null);
   const [pickedDate, setPickedDate] = useState<string | null>(null);
   const [selected, setSelected] = useState<Slot | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [bookingError, setBookingError] = useState<string | null>(null);
 
+  const deepLinked = useRef(false);
+
   const date = pickedDate ?? today;
   const schedule = useQuery(date ? `slots:${doctor.id}:${date}` : null, () =>
     api<DaySchedule>(`/doctors/${doctor.id}/slots?date=${date}`),
   );
+  // "Book appointment" on a doctor card links to #book. Scroll once the slots have loaded: while the page still shows
+  // a spinner it is too short to scroll anywhere.
+  useEffect(() => {
+    if (deepLinked.current || !schedule.data || window.location.hash !== '#book') return;
+    deepLinked.current = true;
+    bookRef.current?.scrollIntoView({ block: 'start' });
+  }, [schedule.data]);
+
   const workingDays = new Set(doctor.weeklyHours.map((h) => h.dayOfWeek));
   const dates = today ? Array.from({ length: BOOKING_DAYS_SHOWN }, (_, i) => addDays(today, i)) : [];
 
@@ -107,6 +153,15 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
     setPickedDate(next);
     setSelected(null);
     setBookingError(null);
+  };
+
+  const chooseSlot = (slot: Slot) => {
+    setSelected(slot);
+    setBookingError(null);
+    // On phones the summary sits below the slots: bring it into view so the next step is obvious.
+    if (window.matchMedia('(max-width: 1023px)').matches) {
+      summaryRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
   };
 
   const confirm = async () => {
@@ -133,11 +188,16 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
   const availableCount = slots.filter((slot) => slot.status === 'AVAILABLE').length;
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
+    <div id="book" ref={bookRef} className="grid scroll-mt-20 gap-6 lg:grid-cols-[1fr_360px]">
       <Card className="min-w-0 [--card-spacing:--spacing(5)]">
-        <CardContent className="space-y-6">
+        <CardContent className="space-y-8">
           <div>
-            <h2 className="text-lg font-semibold text-foreground">1. Choose a date</h2>
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 className="text-lg font-semibold text-foreground">1. Choose a date</h2>
+              {date && (
+                <p className="text-sm text-muted-foreground">{formatDate(date, { weekday: undefined, day: undefined })}</p>
+              )}
+            </div>
             <div className="-mx-1 mt-3 flex gap-2 overflow-x-auto px-1 pb-2" role="listbox" aria-label="Appointment date">
               {dates.map((d) => {
                 const active = d === date;
@@ -145,21 +205,25 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
                 return (
                   <button
                     key={d}
+                    type="button"
                     role="option"
                     aria-selected={active}
+                    aria-label={`${formatDate(d, { weekday: 'long' })}${works ? '' : ', usually closed'}`}
                     onClick={() => chooseDate(d)}
                     className={cn(
-                      'flex w-16 shrink-0 flex-col items-center rounded-lg border px-2 py-2 text-sm transition focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none',
+                      'flex w-18 shrink-0 flex-col items-center rounded-xl border px-2 py-2.5 text-sm transition-all focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none',
                       active
-                        ? 'border-primary bg-primary text-primary-foreground'
+                        ? 'border-primary bg-primary text-primary-foreground shadow-sm'
                         : works
-                          ? 'bg-card text-foreground hover:border-primary/60'
-                          : 'bg-muted text-muted-foreground/60',
+                          ? 'bg-card text-foreground hover:-translate-y-0.5 hover:border-primary/60 hover:shadow-sm'
+                          : 'bg-muted text-muted-foreground hover:border-border',
                     )}
                   >
-                    <span className="text-xs">{d === today ? 'Today' : DAY_SHORT[dayOfWeek(d)]}</span>
-                    <span className="text-lg font-bold">{Number(d.slice(8))}</span>
-                    <span className="text-xs">{formatDate(d, { weekday: undefined, day: undefined, year: undefined })}</span>
+                    <span className="text-xs font-medium">{d === today ? 'Today' : DAY_SHORT[dayOfWeek(d)]}</span>
+                    <span className="text-xl font-bold">{Number(d.slice(8))}</span>
+                    <span className="text-[11px]">
+                      {works ? formatDate(d, { weekday: undefined, day: undefined, year: undefined }) : 'Closed'}
+                    </span>
                   </button>
                 );
               })}
@@ -195,14 +259,14 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
 
             {schedule.data && slots.length === 0 && (
               <div className="mt-3">
-                <EmptyState title="No appointments on this date">
+                <EmptyState title="No appointments on this date" icon={CalendarIcon}>
                   {schedule.data.unavailableReason ?? 'The doctor does not consult on this day.'} Please choose another date.
                 </EmptyState>
               </div>
             )}
 
             {schedule.data && slots.length > 0 && (
-              <div className="mt-3 space-y-5">
+              <div className="mt-4 space-y-6 animate-in fade-in-0 duration-300">
                 {availableCount === 0 && <Alert tone="info">All slots on this date are taken. Please choose another date.</Alert>}
                 {schedule.data.sessions.map((s) => {
                   const sessionSlots = slots.filter((slot) => slot.startTime >= s.startTime && slot.startTime < s.endTime);
@@ -219,26 +283,27 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
                       <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5">
                         {sessionSlots.map((slot) => {
                           const isSelected = selected?.startTime === slot.startTime;
+                          const bookable = slot.status === 'AVAILABLE';
                           return (
                             <Button
                               key={slot.startTime}
                               variant="outline"
-                              size="lg"
-                              disabled={slot.status !== 'AVAILABLE'}
+                              disabled={!bookable}
                               aria-pressed={isSelected}
-                              title={slot.status === 'AVAILABLE' ? undefined : slot.status.toLowerCase()}
-                              onClick={() => {
-                                setSelected(slot);
-                                setBookingError(null);
-                              }}
+                              aria-label={`${formatTime(slot.startTime)}, ${isSelected ? 'selected' : SLOT_LABEL[slot.status].toLowerCase()}`}
+                              onClick={() => chooseSlot(slot)}
                               className={cn(
-                                'h-10 font-semibold disabled:opacity-100',
+                                'h-12 flex-col gap-0 font-semibold transition-all disabled:opacity-100',
                                 isSelected
-                                  ? 'border-primary bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground'
+                                  ? 'border-primary bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 hover:text-primary-foreground'
                                   : SLOT_STYLES[slot.status],
                               )}
                             >
-                              {formatTime(slot.startTime)}
+                              <span className={cn('flex items-center gap-1', slot.status === 'BOOKED' && 'line-through')}>
+                                {isSelected && <CheckIcon className="size-3.5" aria-hidden />}
+                                {formatTime(slot.startTime)}
+                              </span>
+                              {!bookable && <span className="text-[10px] font-medium tracking-wide uppercase">{SLOT_LABEL[slot.status]}</span>}
                             </Button>
                           );
                         })}
@@ -253,41 +318,50 @@ function SlotPicker({ doctor, onBooked }: { doctor: Doctor; onBooked: (appointme
         </CardContent>
       </Card>
 
-      <Card className="h-fit [--card-spacing:--spacing(5)] lg:sticky lg:top-24">
-        <CardHeader>
-          <CardTitle className="text-lg font-semibold">3. Review &amp; confirm</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {selected && date ? (
-            <dl className="space-y-3 text-sm">
-              <SummaryRow label="Doctor" value={`${doctor.name} · ${doctor.specialty.name}`} />
-              <SummaryRow label="Date" value={formatDate(date, { weekday: 'long' })} />
-              <SummaryRow label="Time" value={`${formatTime(selected.startTime)} – ${formatTime(selected.endTime)}`} />
-              <SummaryRow label="Clinic" value={`${doctor.clinic.name}, ${doctor.clinic.address}`} />
-              <SummaryRow label="Fee (pay at clinic)" value={formatFee(doctor.consultationFee)} />
-            </dl>
-          ) : (
-            <p className="text-sm text-muted-foreground">Select an available time to see your appointment details here.</p>
-          )}
+      <div ref={summaryRef} className="h-fit scroll-mt-24 lg:sticky lg:top-24">
+        <Card className="[--card-spacing:--spacing(5)]">
+          <CardHeader>
+            <CardTitle as="h2" className="text-lg font-semibold">
+              3. Review &amp; confirm
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {selected && date ? (
+              <dl className="space-y-3 text-sm animate-in fade-in-0 duration-200">
+                <SummaryRow label="Doctor" value={`${doctor.name} · ${doctor.specialty.name}`} />
+                <SummaryRow label="Date" value={formatDate(date, { weekday: 'long' })} />
+                <SummaryRow
+                  label="Time"
+                  value={`${formatTime(selected.startTime)} – ${formatTime(selected.endTime)} (${doctor.consultationMinutes} min)`}
+                />
+                <SummaryRow label="Clinic" value={`${doctor.clinic.name}, ${doctor.clinic.address}`} />
+                <SummaryRow label="Fee (pay at clinic)" value={formatFee(doctor.consultationFee)} />
+              </dl>
+            ) : (
+              <p className="rounded-lg bg-muted p-3 text-sm text-muted-foreground">
+                Select an available time to see your appointment details here.
+              </p>
+            )}
 
-          {hydrated && !session && (
-            <Link
-              href={`/login?next=${encodeURIComponent(`/doctors/${doctor.id}`)}`}
-              className={buttonVariants({ size: 'lg', className: 'w-full' })}
-            >
-              Sign in to book
-            </Link>
-          )}
-          {session && session.user.role !== 'PATIENT' && (
-            <Alert tone="info">Sign in with a patient account to book appointments.</Alert>
-          )}
-          {session?.user.role === 'PATIENT' && (
-            <Button size="lg" className="w-full" disabled={!selected || submitting} onClick={confirm}>
-              {submitting ? 'Booking…' : selected ? 'Confirm appointment' : 'Select a time slot'}
-            </Button>
-          )}
-        </CardContent>
-      </Card>
+            {hydrated && !session && (
+              <Link
+                href={`/login?next=${encodeURIComponent(`/doctors/${doctor.id}`)}`}
+                className={buttonVariants({ size: 'lg', className: 'h-10 w-full' })}
+              >
+                Sign in to book
+              </Link>
+            )}
+            {session && session.user.role !== 'PATIENT' && (
+              <Alert tone="info">Sign in with a patient account to book appointments.</Alert>
+            )}
+            {session?.user.role === 'PATIENT' && (
+              <Button size="lg" className="h-10 w-full" disabled={!selected || submitting} onClick={confirm}>
+                {submitting ? 'Booking…' : selected ? 'Confirm appointment' : 'Select a time slot'}
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }
@@ -303,13 +377,14 @@ function SummaryRow({ label, value }: { label: string; value: string }) {
 
 function SlotLegend() {
   const items: [string, string][] = [
-    ['Available', 'border-primary/60 bg-card'],
+    ['Available', 'border-primary/50 bg-card'],
+    ['Selected', 'border-primary bg-primary'],
     ['Booked', 'border-border bg-muted'],
     ['Session full', 'border-amber-200 bg-amber-50'],
     ['Passed', 'border-border bg-muted/50'],
   ];
   return (
-    <ul className="flex flex-wrap gap-4 text-xs text-muted-foreground">
+    <ul className="flex flex-wrap gap-x-4 gap-y-2 border-t pt-4 text-xs text-muted-foreground" aria-label="Slot colour guide">
       {items.map(([label, style]) => (
         <li key={label} className="flex items-center gap-1.5">
           <span className={cn('size-3 rounded border', style)} aria-hidden />
@@ -322,10 +397,10 @@ function SlotLegend() {
 
 function BookingSuccess({ appointment, onBookAnother }: { appointment: PatientAppointment; onBookAnother: () => void }) {
   return (
-    <Card className="mx-auto max-w-xl [--card-spacing:--spacing(6)]">
+    <Card className="mx-auto max-w-xl [--card-spacing:--spacing(6)] animate-in fade-in-0 zoom-in-95 duration-300">
       <CardContent className="space-y-5 text-center" aria-live="polite">
         <div
-          className="mx-auto flex size-14 items-center justify-center rounded-full bg-emerald-100 text-emerald-700"
+          className="mx-auto flex size-14 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 animate-in zoom-in-50 duration-500"
           aria-hidden
         >
           <CheckIcon className="size-7" />
@@ -344,10 +419,10 @@ function BookingSuccess({ appointment, onBookAnother }: { appointment: PatientAp
           </div>
         </dl>
         <div className="flex flex-col gap-3 sm:flex-row sm:justify-center">
-          <Link href="/appointments" className={buttonVariants({ size: 'lg' })}>
+          <Link href="/appointments" className={buttonVariants({ size: 'lg', className: 'h-10' })}>
             View my appointments
           </Link>
-          <Button size="lg" variant="outline" onClick={onBookAnother}>
+          <Button size="lg" variant="outline" className="h-10" onClick={onBookAnother}>
             Book another slot
           </Button>
         </div>
