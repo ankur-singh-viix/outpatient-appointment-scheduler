@@ -7,9 +7,11 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { api, errorMessage } from '@/lib/api';
+import Link from 'next/link';
+import { ApiError, api, errorMessage } from '@/lib/api';
 import { saveSession } from '@/lib/session';
-import type { Session } from '@/lib/types';
+import { saveSignupDraft } from '@/lib/signup-draft';
+import type { LoginResult } from '@/lib/types';
 
 // Seeded by `npm run db:seed` in the backend.
 const DEMO_PASSWORD = 'Demo@1234';
@@ -37,10 +39,20 @@ export function LoginForm() {
     setSubmitting(true);
     setError(null);
     try {
-      const session = await api<Session>('/auth/login', { method: 'POST', body: credentials });
-      saveSession(session);
-      router.push(next ?? (session.user.role === 'DOCTOR' ? '/doctor' : '/'));
+      const result = await api<LoginResult>('/auth/login', { method: 'POST', body: credentials });
+      if ('onboardingRequired' in result) {
+        // The email is verified but no role or profile was chosen yet: carry on where they stopped.
+        saveSignupDraft({ email: result.email, signupToken: result.signupToken });
+        router.push('/onboarding');
+        return;
+      }
+      saveSession(result);
+      router.push(next ?? (result.user.role === 'DOCTOR' ? '/doctor' : '/dashboard'));
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'EMAIL_NOT_VERIFIED') {
+        router.push(`/signup/legacy?step=verify&email=${encodeURIComponent(credentials.email.trim())}`);
+        return;
+      }
       setError(errorMessage(err));
       setSubmitting(false);
     }
@@ -51,7 +63,9 @@ export function LoginForm() {
       <Card className="[--card-spacing:--spacing(6)]">
         <form onSubmit={signIn} className="contents">
           <CardHeader>
-            <CardTitle className="text-2xl font-bold">Sign in</CardTitle>
+            <CardTitle as="h1" className="text-2xl font-bold">
+              Sign in
+            </CardTitle>
             <CardDescription>Patients sign in to book. Doctors sign in to manage their schedule.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -83,13 +97,21 @@ export function LoginForm() {
             <Button type="submit" size="lg" disabled={submitting} className="w-full">
               {submitting ? 'Signing in…' : 'Sign in'}
             </Button>
+            <p className="text-center text-sm text-muted-foreground">
+              New to CareSlot?{' '}
+              <Link href="/signup" className="font-medium text-primary hover:underline">
+                Create an account
+              </Link>
+            </p>
           </CardContent>
         </form>
       </Card>
 
       <Card className="h-fit [--card-spacing:--spacing(6)]">
         <CardHeader>
-          <CardTitle className="text-lg font-semibold">Demo accounts</CardTitle>
+          <CardTitle as="h2" className="text-lg font-semibold">
+            Demo accounts
+          </CardTitle>
           <CardDescription>
             All demo accounts use the password{' '}
             <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">{DEMO_PASSWORD}</code>.

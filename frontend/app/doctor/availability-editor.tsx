@@ -20,6 +20,73 @@ interface EditorProps {
 
 type Feedback = { tone: 'success' | 'error'; message: string } | null;
 
+const SLOT_LENGTHS = [10, 15, 20, 30, 45, 60];
+
+/** Edits how long each appointment slot is (the doctor's consultation length). */
+export function SlotLengthEditor({ session, availability, onSaved }: EditorProps) {
+  const [minutes, setMinutes] = useState(availability.consultationMinutes);
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<Feedback>(null);
+  const options = SLOT_LENGTHS.includes(availability.consultationMinutes)
+    ? SLOT_LENGTHS
+    : [...SLOT_LENGTHS, availability.consultationMinutes].sort((a, b) => a - b);
+
+  const save = async () => {
+    setSaving(true);
+    setFeedback(null);
+    try {
+      await api('/doctor-portal/settings', {
+        method: 'PUT',
+        token: session.accessToken,
+        body: { consultationMinutes: minutes },
+      });
+      setFeedback({ tone: 'success', message: `Slot length set to ${minutes} minutes. Patients now see ${minutes}-minute slots.` });
+      onSaved();
+    } catch (error) {
+      setFeedback({ tone: 'error', message: errorMessage(error) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card className="[--card-spacing:--spacing(5)]">
+      <CardHeader>
+        <CardTitle as="h2" className="text-lg font-semibold">
+          Slot length
+        </CardTitle>
+        <CardDescription>
+          How long each appointment slot is. It can only change when you have no upcoming appointments, because existing
+          bookings would no longer line up with the new slots.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {feedback && <Alert tone={feedback.tone}>{feedback.message}</Alert>}
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-2">
+            <Label htmlFor="slot-length">Minutes per appointment</Label>
+            <select
+              id="slot-length"
+              value={minutes}
+              onChange={(event) => setMinutes(Number(event.target.value))}
+              className="h-9 w-40 rounded-lg border border-input bg-card px-2.5 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              {options.map((m) => (
+                <option key={m} value={m}>
+                  {m} minutes
+                </option>
+              ))}
+            </select>
+          </div>
+          <Button size="lg" onClick={save} disabled={saving || minutes === availability.consultationMinutes}>
+            {saving ? 'Saving…' : 'Save slot length'}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 /** Edits the recurring weekly schedule (the `availability` table). */
 export function WeeklyHoursEditor({ session, availability, onSaved }: EditorProps) {
   const [rows, setRows] = useState<WeeklyHours[]>(availability.weekly);
@@ -39,11 +106,12 @@ export function WeeklyHoursEditor({ session, availability, onSaved }: EditorProp
     setSaving(true);
     setFeedback(null);
     try {
-      await api('/doctor-portal/availability/weekly', {
+      const saved = await api<DoctorAvailability>('/doctor-portal/availability/weekly', {
         method: 'PUT',
         token: session.accessToken,
         body: { hours: rows },
       });
+      setRows(saved.weekly); // the server's tidied-up order, without remounting the editor (which would wipe the message below)
       setFeedback({ tone: 'success', message: 'Weekly hours saved. Patients now see the updated slots.' });
       onSaved();
     } catch (error) {
@@ -56,7 +124,9 @@ export function WeeklyHoursEditor({ session, availability, onSaved }: EditorProp
   return (
     <Card className="[--card-spacing:--spacing(5)]">
       <CardHeader>
-        <CardTitle className="text-lg font-semibold">Weekly working hours</CardTitle>
+        <CardTitle as="h2" className="text-lg font-semibold">
+          Weekly working hours
+        </CardTitle>
         <CardDescription>
           Patients book {availability.consultationMinutes}-minute slots inside these hours. Capacity is the maximum number of
           bookings per session.
@@ -170,7 +240,9 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
   return (
     <Card className="[--card-spacing:--spacing(5)]">
       <CardHeader>
-        <CardTitle className="text-lg font-semibold">Date exceptions</CardTitle>
+        <CardTitle as="h2" className="text-lg font-semibold">
+          Date exceptions
+        </CardTitle>
         <CardDescription>
           Take a day off or set different hours for a specific date. This replaces your weekly hours for that date.
         </CardDescription>

@@ -104,8 +104,65 @@ erDiagram
         time end_time "must be > start_time"
         appointment_status status "PENDING | CONFIRMED | CANCELLED | COMPLETED | NO_SHOW"
         text cancel_reason
+        timestamptz cancelled_at "set when status = CANCELLED"
+        uuid cancelled_by_user_id FK "who cancelled: the patient or the doctor"
+        uuid rescheduled_from_id FK "the cancelled appointment this one replaced"
+        timestamptz hold_expires_at "set only while an unpaid PENDING hold; null otherwise"
         timestamptz created_at
         timestamptz updated_at
+    }
+
+    email_verifications {
+        varchar email PK "lower-cased; one pending sign-up per email"
+        varchar password_hash "scrypt hash, never the password"
+        varchar code_hash "HMAC of the 6-digit code"
+        timestamptz expires_at
+        int attempts "wrong guesses against the current code"
+        timestamptz verified_at
+        timestamptz last_sent_at
+        timestamptz created_at
+    }
+
+    payments {
+        uuid id PK
+        uuid appointment_id FK "one live payment per appointment"
+        uuid patient_id FK
+        varchar razorpay_order_id UK
+        varchar razorpay_payment_id UK "the receipt number"
+        int amount_paise "from doctors.consultation_fee, never the browser"
+        payment_status status "CREATED | FAILED | PAID | EXPIRED"
+        timestamptz paid_at
+    }
+
+    refunds {
+        uuid id PK
+        uuid payment_id FK
+        int amount_paise "all refunds on a payment never exceed it"
+        text reason
+        refund_status status "PENDING | PROCESSED | FAILED; PROCESSED only after Razorpay confirms"
+        varchar razorpay_refund_id UK
+        varchar idempotency_key UK
+        uuid initiated_by_user_id FK "null = automatic by policy"
+    }
+
+    payment_events {
+        varchar event_id PK "Razorpay webhook event id, for de-duplication"
+    }
+
+    notifications {
+        uuid id PK
+        uuid appointment_id FK
+        varchar kind "booking-confirmed, reminder, refund-processed, ..."
+        timestamptz send_at "a reminder is a row with a future send_at"
+        notification_status status "PENDING | SENT | FAILED | CANCELLED"
+        varchar dedupe_key UK
+    }
+
+    external_identities {
+        varchar provider PK "UK with external_id, e.g. clerk"
+        varchar external_id PK "the provider's user id"
+        uuid user_id FK "UK with provider: one identity per provider per user"
+        timestamptz created_at
     }
 
     users ||--o| patients : "has patient profile"
@@ -118,7 +175,14 @@ erDiagram
     doctors ||--o{ schedule_overrides : "date exceptions"
     patients ||--o{ appointments : "attends"
     doctors ||--o{ appointments : "sees"
+    appointments |o--o| appointments : "rescheduled from"
+    users ||--o{ appointments : "cancelled"
     users ||--o{ appointments : "books"
+    users ||--o{ external_identities : "signs in with"
+    appointments ||--o{ payments : "is paid by"
+    patients ||--o{ payments : "pays"
+    payments ||--o{ refunds : "refunded by"
+    appointments ||--o{ notifications : "notifies about"
 ```
 
 Mermaid can't express composite unique keys, `CHECK` constraints or partial indexes. Columns marked "UK with …" belong to a composite unique key, and each column on its own is **not** unique. The exact constraints are written in SQL in the next section.

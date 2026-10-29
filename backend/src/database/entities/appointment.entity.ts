@@ -67,6 +67,25 @@ export class Appointment {
   @Column({ name: 'cancel_reason', type: 'text', nullable: true })
   cancelReason: string | null;
 
+  @Column({ name: 'cancelled_at', type: 'timestamptz', nullable: true })
+  cancelledAt: Date | null;
+
+  /** Who cancelled it: the patient or the doctor. Always set together with cancelled_at. */
+  @Column({ name: 'cancelled_by_user_id', type: 'uuid', nullable: true })
+  cancelledByUserId: string | null;
+
+  @ManyToOne(() => User, { onDelete: 'RESTRICT', nullable: true })
+  @JoinColumn({ name: 'cancelled_by_user_id' })
+  cancelledBy: Relation<User> | null;
+
+  /** Set on the new appointment created by a reschedule: the (now cancelled) appointment it replaced. */
+  @Column({ name: 'rescheduled_from_id', type: 'uuid', nullable: true })
+  rescheduledFromId: string | null;
+
+  /** Set only while the appointment is an unpaid hold (PENDING): when the slot is released if payment has not completed. */
+  @Column({ name: 'hold_expires_at', type: 'timestamptz', nullable: true })
+  holdExpiresAt: Date | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
 

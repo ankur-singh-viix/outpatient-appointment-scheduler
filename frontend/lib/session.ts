@@ -1,10 +1,14 @@
 'use client';
 
-import { useSyncExternalStore } from 'react';
+import { useMemo, useSyncExternalStore } from 'react';
+import { CLERK_ENABLED } from './clerk-config';
+import { getClerkState, setClerkState, useClerkState } from './clerk-state';
 import type { Session } from './types';
 
-// The signed-in session lives in localStorage, exposed to React as an external store
-// so every component (header, booking panel, dashboard) sees the same value.
+// Two ways to be signed in, one `useSession()` for the app:
+//  * the legacy login: a stored token in localStorage (demo accounts, existing logins, and the fallback during migration);
+//  * Clerk: the browser holds Clerk's session, and a fresh token is fetched for each request.
+// Components never need to know which one is active.
 const STORAGE_KEY = 'careslot.session';
 const listeners = new Set<() => void>();
 let cachedRaw: string | null | undefined;
@@ -41,6 +45,7 @@ function subscribe(listener: () => void) {
   };
 }
 
+/** Saves (or, with null, clears) the legacy login session. */
 export function saveSession(session: Session | null) {
   try {
     if (session) window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
@@ -51,9 +56,64 @@ export function saveSession(session: Session | null) {
   listeners.forEach((listener) => listener());
 }
 
-/** Current session, or null when signed out (always null during server rendering). */
-export function useSession(): Session | null {
+function useLegacySession(): Session | null {
   return useSyncExternalStore(subscribe, readSession, () => null);
+}
+
+/** The signed-in user (legacy login, or a Clerk sign-in linked to a CareSlot account), or null. Null while rendering on the server. */
+export function useSession(): Session | null {
+  const legacy = useLegacySession();
+  const clerk = useClerkState();
+  const clerkUser = clerk.account?.state === 'LINKED' ? clerk.account.user : null;
+  const clerkSession = useMemo<Session | null>(
+    () => (clerkUser ? { accessToken: clerk.getToken, user: clerkUser } : null),
+    [clerkUser, clerk.getToken],
+  );
+  return legacy ?? clerkSession;
+}
+
+export type AuthState =
+  | 'loading'
+  | 'signed-out'
+  | 'signed-in'
+  /** Signed in with Clerk, but no CareSlot account yet: choose a role and fill in a profile. */
+  | 'needs-profile'
+  /** Signed in with Clerk, and an old CareSlot account uses the same verified email: prove it is theirs to link it. */
+  | 'needs-link'
+  /** Signed in with Clerk, but something stops the account being set up automatically (unverified or ambiguous email). */
+  | 'blocked';
+
+/** Where the visitor stands: used to decide between showing a page, a sign-in prompt, or the setup steps. */
+export function useAuthState(): AuthState {
+  const hydrated = useHydrated();
+  const legacy = useLegacySession();
+  const clerk = useClerkState();
+
+  if (!hydrated) return 'loading';
+  if (legacy) return 'signed-in';
+  if (!CLERK_ENABLED) return 'signed-out';
+  if (!clerk.loaded) return 'loading';
+  if (!clerk.signedIn) return 'signed-out';
+  if (clerk.accountError) return 'blocked';
+  if (!clerk.account) return 'loading';
+  switch (clerk.account.state) {
+    case 'LINKED':
+      return 'signed-in';
+    case 'ONBOARDING_REQUIRED':
+      return 'needs-profile';
+    case 'LINK_REQUIRED':
+      return 'needs-link';
+    default:
+      return 'blocked';
+  }
+}
+
+/** Signs out of whichever kind of session is active (or both). */
+export async function signOutEverywhere(): Promise<void> {
+  saveSession(null);
+  const clerk = getClerkState();
+  if (clerk.signedIn) await clerk.signOut();
+  setClerkState({ account: undefined, accountError: null });
 }
 
 const noopSubscribe = () => () => {};

@@ -140,25 +140,22 @@ async function seedDemoData(connectionString: string): Promise<void> {
 
     for (const doctor of DOCTORS) {
       const userId = await upsertUser(client, doctor.name, doctor.email, 'DOCTOR', passwordHash);
-      await client.query(
+      // RETURNING is empty when the doctor already exists, so existing doctors and any hours they edited are never touched.
+      const created = await client.query<{ id: string }>(
         `INSERT INTO doctors (user_id, clinic_id, specialty_id, consultation_minutes, default_daily_capacity, consultation_fee, bio)
          VALUES ($1, (SELECT id FROM clinics WHERE name = $2 LIMIT 1), (SELECT id FROM specialties WHERE name = $3),
                  $4, 20, $5, $6)
-         ON CONFLICT (user_id) DO NOTHING`,
+         ON CONFLICT (user_id) DO NOTHING
+         RETURNING id`,
         [userId, doctor.clinic, doctor.specialty, doctor.minutes, doctor.fee, doctor.bio],
       );
-      const { rows } = await client.query<{ id: string; has_hours: boolean }>(
-        `SELECT d.id, EXISTS (SELECT 1 FROM availability a WHERE a.doctor_id = d.id) AS has_hours
-           FROM doctors d WHERE d.user_id = $1`,
-        [userId],
-      );
-      if (rows[0].has_hours) continue;
+      if (created.rows.length === 0) continue;
       for (const session of doctor.sessions) {
         for (const day of session.days) {
           await client.query(
             `INSERT INTO availability (doctor_id, day_of_week, start_time, end_time, capacity)
              VALUES ($1, $2, $3, $4, $5)`,
-            [rows[0].id, day, session.start, session.end, session.capacity],
+            [created.rows[0].id, day, session.start, session.end, session.capacity],
           );
         }
       }
@@ -182,5 +179,9 @@ async function seedDemoData(connectionString: string): Promise<void> {
 }
 
 loadEnvFileIfPresent();
-await seedDemoData(loadConfig().databaseUrl);
-console.log(`Demo data ready. All demo accounts use the password: ${DEMO_PASSWORD}`);
+if (process.env.SKIP_DEMO_SEED === 'true') {
+  console.log('SKIP_DEMO_SEED=true: not adding demo data.');
+} else {
+  await seedDemoData(loadConfig().databaseUrl);
+  console.log(`Demo data ready. All demo accounts use the password: ${DEMO_PASSWORD}`);
+}

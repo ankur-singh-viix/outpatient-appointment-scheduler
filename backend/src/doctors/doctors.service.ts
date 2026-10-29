@@ -1,10 +1,15 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { Between, DataSource, In, Repository } from 'typeorm';
 import { loadConfig } from '../config.js';
-import { Doctor, Specialty } from '../database/entities/index.js';
+import { ACTIVE_STATUSES, Appointment, Clinic, Doctor, ScheduleOverride, Specialty } from '../database/entities/index.js';
+import { addDays, clinicNow } from '../scheduling/calendar.js';
 import { loadDaySchedule } from '../scheduling/day-schedule.js';
-import { hhmm } from '../scheduling/slots.js';
+import { findNextAvailable, type NextSlot } from '../scheduling/next-available.js';
+import { hhmm, type DateOverride } from '../scheduling/slots.js';
+
+/** How far ahead a card looks for the "next available" time. */
+const NEXT_SLOT_DAYS = 14;
 
 @Injectable()
 export class DoctorsService {
@@ -13,8 +18,15 @@ export class DoctorsService {
   constructor(
     @InjectRepository(Doctor) private readonly doctors: Repository<Doctor>,
     @InjectRepository(Specialty) private readonly specialtiesRepo: Repository<Specialty>,
+    @InjectRepository(Clinic) private readonly clinicsRepo: Repository<Clinic>,
     private readonly dataSource: DataSource,
   ) {}
+
+  /** Clinics a new doctor can join during sign-up. */
+  async clinics() {
+    const rows = await this.clinicsRepo.find({ order: { name: 'ASC' } });
+    return rows.map((row) => ({ id: row.id, name: row.name, address: row.address }));
+  }
 
   /** Doctors with their user, specialty, clinic and weekly sessions loaded. */
   private query() {
@@ -35,7 +47,59 @@ export class DoctorsService {
       query.andWhere('(user.name ILIKE :term OR specialty.name ILIKE :term)', { term: `%${escapeLike(search.trim())}%` });
     }
     if (specialtyId) query.andWhere('specialty.id = :specialtyId', { specialtyId });
-    return (await query.getMany()).map(toDoctor);
+    const rows = await query.getMany();
+    const next = await this.nextSlots(rows);
+    return rows.map((row) => ({ ...toDoctor(row), nextAvailable: next.get(row.id) ?? null }));
+  }
+
+  /**
+   * The first bookable slot for each doctor, worked out from a few bulk queries (exceptions and active appointments for
+   * the next two weeks) and the same pure slot rules that booking uses, not one query per doctor per day.
+   */
+  private async nextSlots(rows: Doctor[]): Promise<Map<string, NextSlot | null>> {
+    const result = new Map<string, NextSlot | null>();
+    if (rows.length === 0) return result;
+
+    const today = clinicNow(this.config.clinicTimezone);
+    const last = addDays(today.date, NEXT_SLOT_DAYS - 1);
+    const doctorIds = rows.map((row) => row.id);
+    const overrideRows = await this.dataSource.manager.find(ScheduleOverride, {
+      where: { doctorId: In(doctorIds), overrideDate: Between(today.date, last) },
+    });
+    const bookedRows = await this.dataSource.manager.find(Appointment, {
+      select: { doctorId: true, appointmentDate: true, startTime: true },
+      where: { doctorId: In(doctorIds), appointmentDate: Between(today.date, last), status: In(ACTIVE_STATUSES) },
+    });
+
+    for (const doctor of rows) {
+      const overrides = new Map<string, DateOverride>();
+      for (const row of overrideRows.filter((r) => r.doctorId === doctor.id)) {
+        overrides.set(row.overrideDate, {
+          isAvailable: row.isAvailable,
+          startTime: row.startTime,
+          endTime: row.endTime,
+          capacity: row.capacity,
+          reason: row.reason,
+        });
+      }
+      const booked = new Map<string, string[]>();
+      for (const row of bookedRows.filter((r) => r.doctorId === doctor.id)) {
+        booked.set(row.appointmentDate, [...(booked.get(row.appointmentDate) ?? []), row.startTime]);
+      }
+      result.set(
+        doctor.id,
+        findNextAvailable({
+          consultationMinutes: doctor.consultationMinutes,
+          defaultCapacity: doctor.defaultDailyCapacity,
+          weekly: doctor.availability.map((a) => ({ dayOfWeek: a.dayOfWeek, startTime: a.startTime, endTime: a.endTime, capacity: a.capacity })),
+          overrides,
+          booked,
+          today,
+          days: NEXT_SLOT_DAYS,
+        }),
+      );
+    }
+    return result;
   }
 
   async get(id: string) {
@@ -45,7 +109,8 @@ export class DoctorsService {
       .addOrderBy('availability.startTime', 'ASC')
       .getOne();
     if (!doctor) throw new NotFoundException('Doctor not found.');
-    return toDoctor(doctor);
+    const next = await this.nextSlots([doctor]);
+    return { ...toDoctor(doctor), nextAvailable: next.get(doctor.id) ?? null };
   }
 
   slots(id: string, date: string) {
