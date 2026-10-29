@@ -122,6 +122,13 @@ erDiagram
         timestamptz created_at
     }
 
+    external_identities {
+        varchar provider PK "UK with external_id, e.g. clerk"
+        varchar external_id PK "the provider's user id"
+        uuid user_id FK "UK with provider: one identity per provider per user"
+        timestamptz created_at
+    }
+
     users ||--o| patients : "has patient profile"
     users ||--o| doctors : "has doctor profile"
     clinics ||--o{ doctors : "employs"
@@ -135,6 +142,7 @@ erDiagram
     appointments |o--o| appointments : "rescheduled from"
     users ||--o{ appointments : "cancelled"
     users ||--o{ appointments : "books"
+    users ||--o{ external_identities : "signs in with"
 ```
 
 Mermaid can't express composite unique keys, `CHECK` constraints or partial indexes. Columns marked "UK with …" belong to a composite unique key, and each column on its own is **not** unique. The exact constraints are written in SQL in the next section.

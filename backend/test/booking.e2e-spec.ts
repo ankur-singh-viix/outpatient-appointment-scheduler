@@ -1,12 +1,13 @@
 // End-to-end tests for the booking flow against a real PostgreSQL test database.
 // Requires TEST_DATABASE_URL (see .env.example); the schema there is dropped and rebuilt.
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, ServiceUnavailableException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import pg from 'pg';
 import request from 'supertest';
 import { App } from 'supertest/types.js';
 import { AppModule } from '../src/app.module.js';
 import { configureApp } from '../src/app.setup.js';
+import { CLERK_VERIFIER, type ClerkVerifier } from '../src/auth/clerk-verifier.js';
 import { EMAIL_SENDER, type EmailMessage } from '../src/auth/email-sender.js';
 import { hashPassword } from '../src/auth/password.js';
 import { loadEnvFileIfPresent } from '../src/config.js';
@@ -93,6 +94,29 @@ describe('Appointment booking (e2e)', () => {
     },
   };
 
+  // Stands in for Clerk: tokens made by clerkToken() are "valid sessions" for a Clerk user with the given verified emails.
+  // Anything else (unknown, expired, tampered) verifies as nothing, exactly like the real thing fails closed.
+  const clerkSessions = new Map<string, string>();
+  const clerkEmails = new Map<string, string[]>();
+  const fakeClerk: ClerkVerifier = {
+    enabled: true,
+    verifySessionToken: async (token) => {
+      // Like the real verifier when the server's own Clerk keys are wrong: it refuses, and says why.
+      if (token.includes('server-setup-broken')) throw new ServiceUnavailableException('Sign-in is temporarily unavailable because the server is not set up correctly for Clerk.');
+      return clerkSessions.get(token) ?? null;
+    },
+    getVerifiedEmails: async (clerkUserId) => clerkEmails.get(clerkUserId) ?? [],
+  };
+  let clerkCounter = 0;
+  const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  /** A Clerk-looking token (RS256 header, so it is routed to Clerk, not the legacy verifier) for a new Clerk user. */
+  const clerkToken = (verifiedEmails: string[], clerkUserId = `user_clerk_${++clerkCounter}`) => {
+    const token = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({ sub: clerkUserId })}.sig${clerkCounter}${Math.random()}`;
+    clerkSessions.set(token, clerkUserId);
+    clerkEmails.set(clerkUserId, verifiedEmails);
+    return { token, clerkUserId };
+  };
+
   const http = () => request(app.getHttpServer());
   const login = async (email: string) =>
     (await http().post('/api/auth/login').send({ email, password: PASSWORD }).expect(200)).body.accessToken as string;
@@ -114,6 +138,8 @@ describe('Appointment booking (e2e)', () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(EMAIL_SENDER)
       .useValue(mailbox)
+      .overrideProvider(CLERK_VERIFIER)
+      .useValue(fakeClerk)
       .compile();
     app = moduleRef.createNestApplication();
     configureApp(app);
@@ -1286,6 +1312,229 @@ describe('Appointment booking (e2e)', () => {
       await cancelAs(doctorToken, id, { reason: 'Clinic closed that day' }).expect(200);
       await put(30).expect(200);
       await put(15).expect(200);
+    });
+  });
+
+  describe('Clerk sign-in: token checks and safe account linking', () => {
+    const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
+    const getAs = (token: string, path: string) => http().get(path).set(auth(token));
+    const postAs = (token: string, path: string, body: object) => http().post(path).set(auth(token)).send(body);
+    const COMPLETE = '/api/auth/clerk/complete-profile';
+    const LINK = '/api/auth/clerk/link';
+    const patientProfile = { role: 'PATIENT', firstName: 'Clerk', lastName: 'Patient' };
+    type Status = { state: string; email?: string; user?: { id: string; role: string; email: string } };
+    const status = async (token: string) => (await getAs(token, '/api/auth/clerk/status').expect(200)).body as Status;
+    const hashOf = async (email: string) =>
+      (await db.query('SELECT password_hash FROM users WHERE email = $1', [email])).rows[0]?.password_hash as string | null | undefined;
+    const idOf = async (email: string) => (await db.query('SELECT id FROM users WHERE email = $1', [email])).rows[0].id as string;
+    const usersWith = async (email: string) =>
+      Number((await db.query('SELECT count(*) AS n FROM users WHERE lower(email) = lower($1)', [email])).rows[0].n);
+    const linksFor = async (email: string) =>
+      Number(
+        (
+          await db.query(
+            'SELECT count(*) AS n FROM external_identities e JOIN users u ON u.id = e.user_id WHERE lower(u.email) = lower($1)',
+            [email],
+          )
+        ).rows[0].n,
+      );
+    const firstId = async (path: string) => ((await http().get(path).expect(200)).body as { id: string }[])[0].id;
+
+    it('lets a Clerk sign-in without a CareSlot account reach nothing except the onboarding steps', async () => {
+      const { token } = clerkToken(['brand.new@test.local']);
+      for (const path of ['/api/appointments/mine', '/api/doctor-portal/appointments', '/api/auth/me']) {
+        const response = await getAs(token, path).expect(403);
+        expect(response.body.code).toBe('PROFILE_REQUIRED');
+      }
+      expect(await status(token)).toEqual({ state: 'ONBOARDING_REQUIRED', email: 'brand.new@test.local' });
+    });
+
+    it('says sign-in is unavailable, not "session expired", when the Clerk keys on the server are wrong, and still lets nobody in', async () => {
+      const token = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({ sub: 'user_x' })}.server-setup-broken`;
+      for (const path of ['/api/auth/clerk/status', '/api/auth/me', '/api/appointments/mine']) {
+        const response = await getAs(token, path).expect(503);
+        expect(response.body.message).toMatch(/not set up correctly for Clerk/);
+        expect(response.body.message).not.toMatch(/expired/i);
+      }
+    });
+
+    it('rejects Clerk tokens that are unknown, tampered, unsigned or malformed', async () => {
+      const { token } = clerkToken(['x@test.local']);
+      const tampered = `${token.slice(0, -3)}xyz`;
+      const unsigned = `${encode({ alg: 'none', typ: 'JWT' })}.${encode({ sub: 'user_x' })}.`;
+      for (const bad of [tampered, unsigned, 'garbage', encode({ a: 1 })]) {
+        await getAs(bad, '/api/appointments/mine').expect(401);
+        await getAs(bad, '/api/auth/clerk/status').expect(401);
+      }
+      await http().get('/api/auth/clerk/status').expect(401);
+    });
+
+    it('keeps the two kinds of token apart: a legacy token is no use on the Clerk endpoints', async () => {
+      await getAs(patientToken, '/api/auth/clerk/status').expect(401);
+      await getAs(doctorToken, '/api/auth/clerk/status').expect(401);
+      await postAs(patientToken, COMPLETE, patientProfile).expect(401);
+    });
+
+    it('creates a patient account for a new person, with the role coming only from the validated form', async () => {
+      const email = 'fresh.patient@test.local';
+      const { token } = clerkToken([email]);
+
+      // Nothing the browser sends can pick a privileged role, another email, or an id.
+      await postAs(token, COMPLETE, { ...patientProfile, role: 'ADMIN' }).expect(400);
+      await postAs(token, COMPLETE, { ...patientProfile, role: 'RECEPTIONIST' }).expect(400);
+      await postAs(token, COMPLETE, { ...patientProfile, userId: 'someone-else' }).expect(400);
+      await postAs(token, COMPLETE, { ...patientProfile, email: 'other@test.local' }).expect(400);
+      await postAs(token, COMPLETE, { role: 'PATIENT', firstName: '', lastName: 'X' }).expect(400);
+      expect(await usersWith(email)).toBe(0);
+
+      const created = await postAs(token, COMPLETE, patientProfile).expect(201);
+      expect(created.body.user).toMatchObject({ name: 'Clerk Patient', email, role: 'PATIENT' });
+      expect(await hashOf(email)).toBeNull(); // no CareSlot password: Clerk handles the credentials
+      expect(await linksFor(email)).toBe(1);
+
+      // The same Clerk token now works as a normal patient: same endpoints, same role rules.
+      const me = await getAs(token, '/api/auth/me').expect(200);
+      expect(me.body).toMatchObject({ id: created.body.user.id, role: 'PATIENT' });
+      await getAs(token, '/api/appointments/mine').expect(200);
+      await getAs(token, '/api/doctor-portal/appointments').expect(403);
+      await book(token, addDays(today, 15), '10:00').expect(201);
+
+      expect((await status(token)).state).toBe('LINKED');
+      await postAs(token, COMPLETE, patientProfile).expect(409);
+    });
+
+    it('creates a doctor through Clerk and takes the doctor role from our own table', async () => {
+      const { token } = clerkToken(['fresh.doctor@test.local']);
+      const created = await postAs(token, COMPLETE, {
+        role: 'DOCTOR',
+        firstName: 'Clerk',
+        lastName: 'Doctor',
+        specialtyId: await firstId('/api/specialties'),
+        clinicId: await firstId('/api/clinics'),
+        consultationFee: 400,
+      }).expect(201);
+      expect(created.body.user).toMatchObject({ name: 'Dr. Clerk Doctor', role: 'DOCTOR' });
+
+      await getAs(token, '/api/doctor-portal/availability').expect(200);
+      await postAs(token, '/api/appointments', { doctorId, date: addDays(today, 16), startTime: '10:00' }).expect(403); // doctors cannot book
+    });
+
+    it('never trusts an email Clerk has not verified', async () => {
+      const { token } = clerkToken([]);
+      expect(await status(token)).toEqual({ state: 'EMAIL_UNVERIFIED' });
+      await postAs(token, COMPLETE, patientProfile).expect(403);
+      await postAs(token, LINK, { password: PASSWORD }).expect(403);
+    });
+
+    it('does not link an existing account on a matching email alone', async () => {
+      const email = 'patient1@test.local';
+      const hashBefore = await hashOf(email);
+      const { token } = clerkToken([email]);
+
+      expect((await status(token)).state).toBe('LINK_REQUIRED');
+      const blocked = await getAs(token, '/api/appointments/mine').expect(403);
+      expect(blocked.body.code).toBe('PROFILE_REQUIRED'); // still no access to the existing account's data
+
+      const duplicate = await postAs(token, COMPLETE, patientProfile).expect(409); // and no second account is created
+      expect(duplicate.body.code).toBe('ACCOUNT_LINK_REQUIRED');
+      expect(await usersWith(email)).toBe(1);
+      expect(await linksFor(email)).toBe(0);
+      expect(await hashOf(email)).toBe(hashBefore);
+    });
+
+    it('links an existing account only with its own password, and keeps every existing record', async () => {
+      const email = 'patient1@test.local';
+      const hashBefore = await hashOf(email);
+      const userId = await idOf(email);
+      const legacyAppointments = ((await getAs(patientToken, '/api/appointments/mine').expect(200)).body as { id: string }[]).map((a) => a.id);
+      const { token } = clerkToken([email]);
+
+      await postAs(token, LINK, { password: 'not-the-password' }).expect(401);
+      expect(await linksFor(email)).toBe(0);
+
+      const linked = await postAs(token, LINK, { password: PASSWORD }).expect(200);
+      expect(linked.body.user).toMatchObject({ id: userId, email, role: 'PATIENT' });
+      expect(await linksFor(email)).toBe(1);
+      expect(await usersWith(email)).toBe(1); // the same account: nothing duplicated
+      expect(await hashOf(email)).toBe(hashBefore); // password hash untouched
+
+      // The Clerk token now acts as that same user, with all of their appointments.
+      expect((await getAs(token, '/api/auth/me').expect(200)).body.id).toBe(userId);
+      const viaClerk = ((await getAs(token, '/api/appointments/mine').expect(200)).body as { id: string }[]).map((a) => a.id);
+      expect(viaClerk).toEqual(legacyAppointments);
+      await login(email); // and the legacy login still works
+
+      expect((await status(token)).state).toBe('LINKED');
+      await postAs(token, LINK, { password: PASSWORD }).expect(409); // an already-linked sign-in cannot link again
+    });
+
+    it('locks linking after repeated wrong passwords, so it cannot be used to guess one', async () => {
+      const email = 'patient2@test.local';
+      const { token } = clerkToken([email]);
+      for (let attempt = 0; attempt < 5; attempt++) await postAs(token, LINK, { password: `wrong-${attempt}` }).expect(401);
+      const locked = await postAs(token, LINK, { password: PASSWORD }).expect(429); // even the right password is refused now
+      expect(locked.body.message).toMatch(/Too many incorrect passwords/);
+      expect(await linksFor(email)).toBe(0);
+    });
+
+    it('does not let a second sign-in claim an account that is already linked', async () => {
+      const { token } = clerkToken(['patient1@test.local']); // linked to a different Clerk user above
+      expect((await status(token)).state).toBe('CONFLICT');
+      await postAs(token, LINK, { password: PASSWORD }).expect(409);
+      const duplicate = await postAs(token, COMPLETE, patientProfile).expect(409);
+      expect(duplicate.body.code).toBe('ACCOUNT_LINK_REQUIRED');
+      expect(await linksFor('patient1@test.local')).toBe(1);
+    });
+
+    it('refuses to link an account that has no password to prove ownership with', async () => {
+      const userId = (
+        await db.query<{ id: string }>("INSERT INTO users (name, email, role) VALUES ('No Password', 'nopass@test.local', 'PATIENT') RETURNING id")
+      ).rows[0].id;
+      await db.query('INSERT INTO patients (user_id) VALUES ($1)', [userId]);
+
+      const { token } = clerkToken(['nopass@test.local']);
+      expect((await status(token)).state).toBe('LINK_REQUIRED');
+      const refused = await postAs(token, LINK, { password: PASSWORD }).expect(409);
+      expect(refused.body.message).toMatch(/no password/);
+      expect(await linksFor('nopass@test.local')).toBe(0);
+    });
+
+    it('treats a person whose emails match several different accounts as ambiguous, and does nothing', async () => {
+      const { token } = clerkToken(['patient2@test.local', 'doctor@test.local']);
+      expect((await status(token)).state).toBe('CONFLICT');
+      const refused = await postAs(token, LINK, { password: PASSWORD }).expect(409);
+      expect(refused.body.message).toMatch(/More than one/);
+      expect(await linksFor('doctor@test.local')).toBe(0);
+    });
+  });
+
+  describe('without a Clerk key', () => {
+    const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
+
+    it('ignores Clerk tokens entirely and the legacy login carries on working', async () => {
+      const saved = process.env.CLERK_SECRET_KEY;
+      process.env.CLERK_SECRET_KEY = '';
+      const module = await Test.createTestingModule({ imports: [AppModule] })
+        .overrideProvider(EMAIL_SENDER)
+        .useValue(mailbox)
+        .compile();
+      const plain = module.createNestApplication<INestApplication<App>>();
+      configureApp(plain);
+      await plain.init();
+      try {
+        const server = plain.getHttpServer();
+        const { token } = clerkToken(['patient1@test.local'], 'user_when_clerk_is_off');
+        await request(server).get('/api/appointments/mine').set(auth(token)).expect(401);
+        const off = await request(server).get('/api/auth/clerk/status').set(auth(token)).expect(401);
+        expect(off.body.message).toMatch(/CLERK_SECRET_KEY/);
+
+        const loggedIn = await request(server).post('/api/auth/login').send({ email: 'patient1@test.local', password: PASSWORD }).expect(200);
+        await request(server).get('/api/appointments/mine').set(auth(loggedIn.body.accessToken)).expect(200);
+      } finally {
+        await plain.close();
+        if (saved === undefined) delete process.env.CLERK_SECRET_KEY;
+        else process.env.CLERK_SECRET_KEY = saved;
+      }
     });
   });
 });

@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { buttonVariants } from '@/components/ui/button';
-import { useHydrated, useSession } from '@/lib/session';
+import { useAuthState, useSession } from '@/lib/session';
 import type { Role, Session } from '@/lib/types';
 import { EmptyState, Spinner } from './common';
 
@@ -20,15 +20,26 @@ export function RequireRole({
   nextPath: string;
   children: (session: Session) => ReactNode;
 }) {
-  const hydrated = useHydrated();
+  const state = useAuthState();
   const session = useSession();
 
-  if (!hydrated) return <Spinner />;
+  if (state === 'loading') return <Spinner />;
+  // Signed in with Clerk but no CareSlot account is linked yet: there is nothing to show until that is sorted out.
+  if (state === 'needs-profile' || state === 'needs-link' || state === 'blocked') {
+    return (
+      <EmptyState title="Finish setting up your account">
+        <p>You are signed in, but your CareSlot account is not set up yet.</p>
+        <Link href="/onboarding" className={buttonVariants({ size: 'lg', className: 'h-10' })}>
+          Continue setup
+        </Link>
+      </EmptyState>
+    );
+  }
   if (!session) {
     return (
       <EmptyState title="Please sign in">
         <p>You need to sign in as a {role.toLowerCase()} to view this page.</p>
-        <Link href={`/login?next=${encodeURIComponent(nextPath)}`} className={buttonVariants({ size: 'lg' })}>
+        <Link href={`/login?next=${encodeURIComponent(nextPath)}`} className={buttonVariants({ size: 'lg', className: 'h-10' })}>
           Sign in
         </Link>
       </EmptyState>

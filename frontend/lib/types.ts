@@ -9,10 +9,22 @@ export interface PublicUser {
   role: Role;
 }
 
+/** Fetches a fresh token when called. Clerk session tokens are short-lived, so they are fetched per request, not stored. */
+export type TokenGetter = () => Promise<string | null>;
+
 export interface Session {
-  accessToken: string;
+  /** A stored token (the legacy login) or a function that fetches a fresh one (Clerk). Pass it straight to api(). */
+  accessToken: string | TokenGetter;
   user: PublicUser;
 }
+
+/** What the backend says about a Clerk sign-in: linked to a CareSlot account, or what is still needed. */
+export type ClerkAccountStatus =
+  | { state: 'LINKED'; user: PublicUser }
+  | { state: 'ONBOARDING_REQUIRED'; email: string }
+  | { state: 'LINK_REQUIRED'; email: string }
+  | { state: 'CONFLICT'; email: string }
+  | { state: 'EMAIL_UNVERIFIED' };
 
 /** What signing in can return: a session, or a note that the sign-up still needs a role and profile. */
 export type LoginResult = Session | { onboardingRequired: true; email: string; signupToken: string };

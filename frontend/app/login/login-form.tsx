@@ -50,7 +50,7 @@ export function LoginForm() {
       router.push(next ?? (result.user.role === 'DOCTOR' ? '/doctor' : '/dashboard'));
     } catch (err) {
       if (err instanceof ApiError && err.code === 'EMAIL_NOT_VERIFIED') {
-        router.push(`/signup?step=verify&email=${encodeURIComponent(credentials.email.trim())}`);
+        router.push(`/signup/legacy?step=verify&email=${encodeURIComponent(credentials.email.trim())}`);
         return;
       }
       setError(errorMessage(err));

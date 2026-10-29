@@ -3,6 +3,7 @@ import { Availability } from './availability.entity.js';
 import { Clinic } from './clinic.entity.js';
 import { Doctor } from './doctor.entity.js';
 import { EmailVerification } from './email-verification.entity.js';
+import { ExternalIdentity } from './external-identity.entity.js';
 import { Patient } from './patient.entity.js';
 import { ReceptionistAssignment } from './receptionist-assignment.entity.js';
 import { ScheduleOverride } from './schedule-override.entity.js';
@@ -16,6 +17,7 @@ export {
   Clinic,
   Doctor,
   EmailVerification,
+  ExternalIdentity,
   Patient,
   ReceptionistAssignment,
   ScheduleOverride,
@@ -35,4 +37,5 @@ export const ENTITIES = [
   ScheduleOverride,
   Appointment,
   EmailVerification,
+  ExternalIdentity,
 ];

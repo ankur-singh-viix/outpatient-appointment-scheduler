@@ -13,10 +13,10 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
-import { withDoctorTitle } from '../common/names.js';
 import { loadConfig } from '../config.js';
-import { Clinic, Doctor, EmailVerification, Patient, Specialty, User } from '../database/entities/index.js';
+import { EmailVerification, User } from '../database/entities/index.js';
 import { isUniqueViolation } from '../database/errors.js';
+import { createAccount, type ProfileInput } from './account-creation.js';
 import { EMAIL_SENDER, type EmailSender } from './email-sender.js';
 import { hashPassword, verifyPassword } from './password.js';
 import { signSession } from './session.js';
@@ -32,9 +32,7 @@ import {
   resendWaitSeconds,
 } from './verification.js';
 
-export type ProfileInput =
-  | { role: 'PATIENT'; firstName: string; lastName: string; phone?: string; dateOfBirth?: string; gender?: string }
-  | { role: 'DOCTOR'; firstName: string; lastName: string; specialtyId: string; clinicId: string; consultationFee: number; bio?: string };
+export type { ProfileInput } from './account-creation.js';
 
 /** The token given after the email is verified: it only allows finishing the profile, never acts as a session. */
 interface SignupTokenPayload {
@@ -138,41 +136,7 @@ export class SignupService {
         if (await this.emailIsRegistered(manager.getRepository(User), email)) {
           throw new ConflictException('An account with this email already exists. Try signing in instead.');
         }
-        if (input.role === 'DOCTOR') {
-          if (!(await manager.existsBy(Specialty, { id: input.specialtyId }))) {
-            throw new BadRequestException('specialtyId: choose one of the listed specialties.');
-          }
-          if (!(await manager.existsBy(Clinic, { id: input.clinicId }))) {
-            throw new BadRequestException('clinicId: choose one of the listed clinics.');
-          }
-        }
-
-        const created = await manager.save(
-          manager.create(User, { name: displayName(input), email, passwordHash: row.passwordHash, googleId: null, role: input.role }),
-        );
-        if (input.role === 'PATIENT') {
-          await manager.save(
-            manager.create(Patient, {
-              userId: created.id,
-              phone: input.phone ?? null,
-              dateOfBirth: input.dateOfBirth ?? null,
-              gender: input.gender ?? null,
-              address: null,
-            }),
-          );
-        } else {
-          await manager.save(
-            manager.create(Doctor, {
-              userId: created.id,
-              clinicId: input.clinicId,
-              specialtyId: input.specialtyId,
-              consultationMinutes: 15,
-              defaultDailyCapacity: 20,
-              consultationFee: input.consultationFee,
-              bio: input.bio ?? null,
-            }),
-          );
-        }
+        const created = await createAccount(manager, { email, passwordHash: row.passwordHash, input });
         await manager.delete(EmailVerification, { email });
         return created;
       });
@@ -270,8 +234,3 @@ function tooManyRequests(message: string, retryAfterSeconds?: number): HttpExcep
   );
 }
 
-/** "Ananya Rao" for patients; doctors are listed as "Dr. Ananya Rao", like the rest of the directory. */
-function displayName(input: ProfileInput): string {
-  const full = `${input.firstName} ${input.lastName}`.replace(/\s+/g, ' ').trim();
-  return input.role === 'PATIENT' ? full : withDoctorTitle(full);
-}

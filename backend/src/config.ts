@@ -13,9 +13,20 @@ export interface AppConfig {
   resendApiKey: string;
   /** The "from" address; with Resend it must be on a domain you have verified there. */
   emailFrom: string;
+  clerk: ClerkConfig;
 }
 
 export type EmailDelivery = 'resend' | 'log' | 'disabled';
+
+/** Clerk (hosted sign-in). Off unless CLERK_SECRET_KEY is set, so the legacy login keeps working on its own. */
+export interface ClerkConfig {
+  enabled: boolean;
+  secretKey: string;
+  /** Optional PEM public key: lets tokens be verified without a network call. */
+  jwtKey: string;
+  /** Origins allowed to have issued a token (Clerk's `azp` claim). Defaults to the CORS origins. */
+  authorizedParties: string[];
+}
 
 const DEV_DATABASE_URL = 'postgres://postgres:postgres@localhost:5432/outpatient';
 
@@ -43,17 +54,31 @@ export function loadConfig(): AppConfig {
       ? 'log'
       : 'disabled';
 
+  const corsOrigins = (process.env.CORS_ORIGIN ?? 'http://localhost:3001')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  const clerkSecretKey = process.env.CLERK_SECRET_KEY ?? '';
+  const explicitParties = (process.env.CLERK_AUTHORIZED_PARTIES ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
   return {
     databaseUrl: required('DATABASE_URL', DEV_DATABASE_URL),
     jwtSecret: required('JWT_SECRET', 'dev-only-secret-change-me'),
-    corsOrigins: (process.env.CORS_ORIGIN ?? 'http://localhost:3001')
-      .split(',')
-      .map((origin) => origin.trim())
-      .filter(Boolean),
+    corsOrigins,
     clinicTimezone: process.env.CLINIC_TIMEZONE ?? 'Asia/Kolkata',
     bookingWindowDays: Number(process.env.BOOKING_WINDOW_DAYS ?? 30),
     emailDelivery,
     resendApiKey,
     emailFrom: process.env.EMAIL_FROM ?? 'CareSlot <onboarding@resend.dev>',
+    clerk: {
+      enabled: Boolean(clerkSecretKey),
+      secretKey: clerkSecretKey,
+      // Hosting dashboards often store a multi-line PEM with literal \n sequences.
+      jwtKey: (process.env.CLERK_JWT_KEY ?? '').replace(/\\n/g, '\n'),
+      authorizedParties: explicitParties.length > 0 ? explicitParties : corsOrigins,
+    },
   };
 }

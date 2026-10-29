@@ -14,9 +14,12 @@ import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { ApiError, api, errorMessage } from '@/lib/api';
 import { useClinicToday, useQuery } from '@/lib/hooks';
-import { saveSession, useHydrated } from '@/lib/session';
+import { LinkAccountPanel } from '@/components/link-account-panel';
+import { setClerkState, useClerkState } from '@/lib/clerk-state';
+import { saveSession, useAuthState, useHydrated } from '@/lib/session';
 import { saveSignupDraft, useSignupDraft } from '@/lib/signup-draft';
-import type { Clinic, Session, Specialty } from '@/lib/types';
+import type { Clinic, PublicUser, Session, Specialty } from '@/lib/types';
+import { ContinueRedirect } from '../continue/continue-redirect';
 import { fieldErrorsFromApi, validateDoctor, validatePatient, without, type Errors } from '@/lib/validation';
 import { cn } from '@/lib/utils';
 
@@ -33,6 +36,12 @@ export function OnboardingForm() {
   const router = useRouter();
   const hydrated = useHydrated();
   const draft = useSignupDraft();
+  const authState = useAuthState();
+  const clerk = useClerkState();
+  // Signed in with Clerk and no CareSlot account yet: the profile is created for that Clerk sign-in. Otherwise this is the
+  // legacy email-code sign-up, continued from its sign-up token.
+  const clerkMode = authState === 'needs-profile';
+  const signupEmail = clerkMode ? (clerk.account?.state === 'ONBOARDING_REQUIRED' ? clerk.account.email : '') : draft?.email;
   const today = useClinicToday();
   const [role, setRole] = useState<Role | null>(null);
   const [step, setStep] = useState<'role' | 'details'>('role');
@@ -50,8 +59,12 @@ export function OnboardingForm() {
     setErrors((current) => without(current, field)); // clear a field's message as soon as it is edited
   };
 
-  if (!hydrated) return <Spinner />;
-  if (!draft) {
+  if (!hydrated || authState === 'loading') return <Spinner />;
+  // An older CareSlot account uses this verified email: link it by proving it is theirs (never automatically).
+  if (authState === 'needs-link' && clerk.account?.state === 'LINK_REQUIRED') return <LinkAccountPanel email={clerk.account.email} />;
+  // Unverified or ambiguous email: explains what to do instead of guessing.
+  if (authState === 'blocked') return <ContinueRedirect />;
+  if (!draft && !clerkMode) {
     return (
       <div className="mx-auto max-w-md">
         <EmptyState title="Your sign-up isn't active">
@@ -99,9 +112,15 @@ export function OnboardingForm() {
 
     setSubmitting(true);
     try {
-      const session = await api<Session>('/auth/complete-profile', { method: 'POST', token: draft.signupToken, body });
-      saveSession(session);
-      saveSignupDraft(null);
+      if (clerkMode) {
+        // The Clerk sign-in is the credential: no token is stored. The response says which account was created.
+        const created = await api<{ user: PublicUser }>('/auth/clerk/complete-profile', { method: 'POST', token: clerk.getToken, body });
+        setClerkState({ account: { state: 'LINKED', user: created.user } });
+      } else {
+        const session = await api<Session>('/auth/complete-profile', { method: 'POST', token: draft?.signupToken, body });
+        saveSession(session);
+        saveSignupDraft(null);
+      }
       router.push(role === 'DOCTOR' ? '/doctor' : '/dashboard');
     } catch (error) {
       if (error instanceof ApiError && error.status === 400) {
@@ -184,7 +203,7 @@ export function OnboardingForm() {
                 Your profile details
               </CardTitle>
               <CardDescription>
-                Signing up as <span className="font-medium text-foreground">{draft.email}</span>.
+                Signing up as <span className="font-medium text-foreground">{signupEmail}</span>.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">

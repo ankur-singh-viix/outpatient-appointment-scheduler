@@ -7,7 +7,7 @@ import { Avatar } from '@/components/common';
 import { useNavItems } from '@/components/nav';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { initials } from '@/lib/format';
-import { saveSession, useHydrated, useSession } from '@/lib/session';
+import { signOutEverywhere, useAuthState, useHydrated, useSession } from '@/lib/session';
 import { cn } from '@/lib/utils';
 
 function Brand() {
@@ -40,8 +40,11 @@ export function SiteHeader() {
   const router = useRouter();
   const items = useNavItems();
 
-  const signOut = () => {
-    saveSession(null);
+  const authState = useAuthState();
+  const needsSetup = authState === 'needs-profile' || authState === 'needs-link' || authState === 'blocked';
+
+  const signOut = async () => {
+    await signOutEverywhere();
     router.push('/');
   };
 
@@ -67,7 +70,19 @@ export function SiteHeader() {
               </Button>
             </>
           )}
-          {hydrated && !session && (
+          {hydrated && !session && needsSetup && (
+            <>
+              <Link href="/onboarding" className={buttonVariants({ size: 'lg' })}>
+                Finish setup
+              </Link>
+              <Button variant="ghost" size="lg" onClick={signOut} className="gap-2" aria-label="Sign out">
+                <LogOutIcon aria-hidden />
+                <span className="hidden sm:inline">Sign out</span>
+              </Button>
+            </>
+          )}
+          {/* Only once we know nobody is signed in: while Clerk is still loading, show nothing rather than flash these. */}
+          {hydrated && !session && authState === 'signed-out' && (
             <>
               {pathname !== '/' && (
                 <Link href="/" className={cn(buttonVariants({ variant: 'ghost', size: 'lg' }), 'gap-2')}>
