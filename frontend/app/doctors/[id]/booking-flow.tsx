@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Alert, Avatar, EmptyState, Spinner } from '@/components/common';
+import { PaymentInfo } from '@/components/payment-info';
+import { PaymentStep } from '@/components/payment-step';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -14,12 +16,15 @@ import { addDays, dayOfWeek, DAY_SHORT, formatDate, formatFee, formatTime, initi
 import { useClinicToday, useQuery } from '@/lib/hooks';
 import { useHydrated, useSession } from '@/lib/session';
 import { cn } from '@/lib/utils';
-import type { DaySchedule, Doctor, PatientAppointment, Slot } from '@/lib/types';
+import type { DaySchedule, Doctor, HeldAppointment, PatientAppointment, PaymentsConfig, Slot } from '@/lib/types';
 
 export function BookingFlow() {
   const { id } = useParams<{ id: string }>();
   const doctor = useQuery(`doctor:${id}`, () => api<Doctor>(`/doctors/${id}`));
   const [confirmed, setConfirmed] = useState<PatientAppointment | null>(null);
+  // A booking that holds its slot but still has to be paid for.
+  const [held, setHeld] = useState<HeldAppointment | null>(null);
+  const config = useQuery('payments-config', () => api<PaymentsConfig>('/payments/config'));
 
   // Reschedule mode (?reschedule=<appointment id>): find the appointment being moved among the patient's own.
   const searchParams = useSearchParams();
@@ -36,6 +41,22 @@ export function BookingFlow() {
         ) ?? null)
       : null;
   const rescheduleUnavailable = Boolean(rescheduleId && own.data && !rescheduling);
+
+  const handleBooked = (appointment: PatientAppointment | HeldAppointment) => {
+    if ('checkout' in appointment && appointment.checkout) setHeld(appointment);
+    else setConfirmed(appointment);
+  };
+
+  // After paying, read the appointment back so the confirmation shows the real status and receipt.
+  const afterPaid = async () => {
+    if (!held || !session) return;
+    const fresh = await api<PatientAppointment[]>('/appointments/mine', { token: session.accessToken }).then(
+      (list) => list.find((a) => a.id === held.id),
+      () => undefined,
+    );
+    setConfirmed(fresh ?? { ...held, status: 'CONFIRMED', holdExpiresAt: null });
+    setHeld(null);
+  };
 
   if (doctor.loading || own.loading) return <Spinner label="Loading doctor…" />;
   if (doctor.error || !doctor.data) {
@@ -62,14 +83,36 @@ export function BookingFlow() {
           time below.
         </Alert>
       )}
-      {confirmed ? (
+      {held && session ? (
+        <div className="mx-auto max-w-xl space-y-4">
+          <Alert tone="info">
+            Your slot with {held.doctor.name} on {formatDate(held.date, { weekday: 'long' })} at {formatTime(held.startTime)} is reserved.
+            Complete the payment to confirm it.
+          </Alert>
+          <PaymentStep
+            appointment={held}
+            checkout={held.checkout}
+            session={session}
+            autoOpen
+            onPaid={afterPaid}
+            onCancelled={() => setHeld(null)}
+            onExpired={() => setHeld(null)}
+          />
+        </div>
+      ) : confirmed ? (
         <BookingSuccess
           appointment={confirmed}
           rescheduled={Boolean(confirmed.rescheduledFromId)}
           onBookAnother={() => setConfirmed(null)}
         />
       ) : (
-        <SlotPicker doctor={doctor.data} rescheduling={rescheduling} requestedDate={requestedDate} onBooked={setConfirmed} />
+        <SlotPicker
+          doctor={doctor.data}
+          rescheduling={rescheduling}
+          requestedDate={requestedDate}
+          paymentsEnabled={Boolean(config.data?.enabled)}
+          onBooked={handleBooked}
+        />
       )}
     </div>
   );
@@ -151,6 +194,7 @@ function SlotPicker({
   doctor,
   rescheduling,
   requestedDate,
+  paymentsEnabled,
   onBooked,
 }: {
   doctor: Doctor;
@@ -158,7 +202,8 @@ function SlotPicker({
   rescheduling: PatientAppointment | null;
   /** A date from the link (?date=), used as the starting date when it is one of the dates offered. */
   requestedDate: string | null;
-  onBooked: (appointment: PatientAppointment) => void;
+  paymentsEnabled: boolean;
+  onBooked: (appointment: PatientAppointment | HeldAppointment) => void;
 }) {
   const today = useClinicToday();
   const session = useSession();
@@ -221,7 +266,7 @@ function SlotPicker({
             token: session.accessToken,
             body: { date, startTime: selected.startTime },
           })
-        : await api<PatientAppointment>('/appointments', {
+        : await api<PatientAppointment | HeldAppointment>('/appointments', {
             method: 'POST',
             token: session.accessToken,
             body: { doctorId: doctor.id, date, startTime: selected.startTime },
@@ -429,7 +474,9 @@ function SlotPicker({
                   : selected
                     ? rescheduling
                       ? 'Confirm new time'
-                      : 'Confirm appointment'
+                      : paymentsEnabled && doctor.consultationFee > 0
+                        ? `Continue to pay ${formatFee(doctor.consultationFee)}`
+                        : 'Confirm appointment'
                     : 'Select a time slot'}
               </Button>
             )}
@@ -440,9 +487,9 @@ function SlotPicker({
   );
 }
 
-function SummaryRow({ label, value }: { label: string; value: string }) {
+function SummaryRow({ label, value, className }: { label: string; value: string; className?: string }) {
   return (
-    <div>
+    <div className={className}>
       <dt className="text-muted-foreground">{label}</dt>
       <dd className="font-medium text-foreground">{value}</dd>
     </div>
@@ -498,10 +545,17 @@ function BookingSuccess({
           <SummaryRow label="Doctor" value={`${appointment.doctor.name} · ${appointment.doctor.specialty}`} />
           <SummaryRow label="Date" value={formatDate(appointment.date, { weekday: 'long' })} />
           <SummaryRow label="Time" value={`${formatTime(appointment.startTime)} – ${formatTime(appointment.endTime)}`} />
-          <SummaryRow label="Fee (pay at clinic)" value={formatFee(appointment.doctor.consultationFee)} />
-          <div className="sm:col-span-2">
-            <SummaryRow label="Clinic" value={`${appointment.clinic.name}, ${appointment.clinic.address}`} />
-          </div>
+          {appointment.payment ? (
+            <div className="sm:col-span-2">
+              <dt className="text-muted-foreground">Payment</dt>
+              <dd className="mt-1 font-medium text-foreground">
+                <PaymentInfo payment={appointment.payment} />
+              </dd>
+            </div>
+          ) : (
+            <SummaryRow label="Fee (pay at clinic)" value={formatFee(appointment.doctor.consultationFee)} />
+          )}
+          <SummaryRow className="sm:col-span-2" label="Clinic" value={`${appointment.clinic.name}, ${appointment.clinic.address}`} />
         </dl>
         <div className="flex flex-col gap-3 sm:flex-row sm:justify-center">
           <Link href="/appointments" className={buttonVariants({ size: 'lg', className: 'h-10' })}>

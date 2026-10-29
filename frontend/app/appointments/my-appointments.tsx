@@ -5,6 +5,9 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { RequireRole } from '@/components/require-role';
 import { Alert, EmptyState, Spinner, StatusBadge } from '@/components/common';
+import { PaymentHistory } from '@/components/payment-history';
+import { PaymentInfo } from '@/components/payment-info';
+import { PaymentStep } from '@/components/payment-step';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -13,7 +16,7 @@ import { api, errorMessage } from '@/lib/api';
 import { formatDate, formatFee, formatTime, relativeDay } from '@/lib/format';
 import { useClinicToday, useQuery } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
-import type { PatientAppointment, Session } from '@/lib/types';
+import type { PatientAppointment, PaymentsConfig, Session } from '@/lib/types';
 
 export function MyAppointments() {
   return (
@@ -31,9 +34,12 @@ const isActive = (a: PatientAppointment) => a.status === 'CONFIRMED' || a.status
 function AppointmentList({ session }: { session: Session }) {
   const today = useClinicToday();
   const [notice, setNotice] = useState<string | null>(null);
+  // Bumped after anything that changes money, so the payment list below reloads too.
+  const [moneyVersion, setMoneyVersion] = useState(0);
   const appointments = useQuery(`mine:${session.user.id}`, () =>
     api<PatientAppointment[]>('/appointments/mine', { token: session.accessToken }),
   );
+  const config = useQuery('payments-config', () => api<PaymentsConfig>('/payments/config'));
 
   // Keep showing the list while it refreshes after a cancellation.
   const data = appointments.data ?? appointments.previous;
@@ -84,8 +90,15 @@ function AppointmentList({ session }: { session: Session }) {
             items={upcoming}
             today={today}
             session={session}
+            policy={config.data ?? null}
             onCancelled={() => {
               setNotice('Appointment cancelled. The slot is now free for other patients.');
+              setMoneyVersion((version) => version + 1);
+              appointments.reload();
+            }}
+            onPaid={() => {
+              setNotice('Payment received. Your appointment is confirmed.');
+              setMoneyVersion((version) => version + 1);
               appointments.reload();
             }}
             empty={
@@ -106,6 +119,7 @@ function AppointmentList({ session }: { session: Session }) {
           />
         </TabsContent>
       </Tabs>
+      <PaymentHistory session={session} reloadKey={moneyVersion} />
     </div>
   );
 }
@@ -114,13 +128,17 @@ function AppointmentGroup({
   items,
   today,
   session,
+  policy = null,
   onCancelled,
+  onPaid,
   empty,
 }: {
   items: PatientAppointment[];
   today: string | null;
   session: Session;
+  policy?: PaymentsConfig | null;
   onCancelled?: () => void;
+  onPaid?: () => void;
   empty: React.ReactNode;
 }) {
   if (items.length === 0) return <>{empty}</>;
@@ -132,7 +150,7 @@ function AppointmentGroup({
           className="animate-in fade-in-0 slide-in-from-bottom-1 duration-300 fill-mode-backwards"
           style={{ animationDelay: `${Math.min(index, 5) * 40}ms` }}
         >
-          <AppointmentCard appointment={a} today={today} session={session} onCancelled={onCancelled} />
+          <AppointmentCard appointment={a} today={today} session={session} policy={policy} onCancelled={onCancelled} onPaid={onPaid} />
         </li>
       ))}
     </ul>
@@ -143,20 +161,25 @@ function AppointmentCard({
   appointment: a,
   today,
   session,
+  policy,
   onCancelled,
+  onPaid,
 }: {
   appointment: PatientAppointment;
   today: string | null;
   session: Session;
+  policy: PaymentsConfig | null;
   onCancelled?: () => void;
+  onPaid?: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const when = isActive(a) ? relativeDay(a.date, today) : null;
   const cancelled = a.status === 'CANCELLED';
-  // The buttons only appear on upcoming appointments (the server also refuses changes to anything else).
-  const changeable = Boolean(onCancelled) && isActive(a);
+  // The buttons only appear on confirmed upcoming appointments (the server also refuses changes to anything else).
+  // A booking still waiting for payment has its own Pay / Cancel buttons instead.
+  const changeable = Boolean(onCancelled) && a.status === 'CONFIRMED';
 
   const cancel = async () => {
     setCancelling(true);
@@ -214,6 +237,16 @@ function AppointmentCard({
           <StatusBadge status={a.status} />
         </div>
 
+        {a.status === 'PENDING' && a.holdExpiresAt && onCancelled && (
+          <PaymentStep appointment={a} session={session} onPaid={() => onPaid?.()} onCancelled={onCancelled} onExpired={onCancelled} />
+        )}
+
+        {a.payment && (
+          <div className="border-t pt-4">
+            <PaymentInfo payment={a.payment} />
+          </div>
+        )}
+
         {cancelled && a.cancelledBy === 'DOCTOR' && today && a.date >= today && (
           <div className="border-t pt-4">
             <Link href={`/doctors/${a.doctor.id}`} className={buttonVariants({ variant: 'outline', size: 'lg', className: 'h-9' })}>
@@ -248,6 +281,17 @@ function AppointmentCard({
             <p className="text-sm font-medium text-foreground">
               Cancel this appointment? The slot will be released for other patients.
             </p>
+            {a.payment?.displayStatus === 'PAID' && policy?.enabled && (
+              <p className="text-sm text-muted-foreground">
+                Refunds: full if you cancel at least {policy.refundPolicy.fullRefundHoursBefore} hours before the appointment
+                {policy.refundPolicy.partialRefundPercent > 0 && (
+                  <>
+                    , {policy.refundPolicy.partialRefundPercent}% if at least {policy.refundPolicy.partialRefundHoursBefore} hours before,
+                  </>
+                )}{' '}
+                and none after that. If your doctor cancels, you always get a full refund.
+              </p>
+            )}
             {error && <Alert>{error}</Alert>}
             <div className="flex flex-wrap gap-2">
               <Button variant="destructive" size="lg" className="h-9" disabled={cancelling} onClick={cancel}>

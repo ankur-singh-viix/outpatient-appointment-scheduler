@@ -7,6 +7,8 @@ import { withDoctorTitle } from '../common/names.js';
 import { changeBlockedReason } from '../scheduling/appointment-rules.js';
 import { ACTIVE_STATUSES, Appointment, Availability, Clinic, Doctor, ScheduleOverride, Specialty, User } from '../database/entities/index.js';
 import { clinicNow, isValidDate } from '../scheduling/calendar.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
+import { PaymentsService } from '../payments/payments.service.js';
 import { hhmm, toMinutes } from '../scheduling/slots.js';
 
 export interface WeeklyHoursInput {
@@ -35,6 +37,8 @@ export class DoctorPortalService {
     @InjectRepository(Availability) private readonly availabilityRepo: Repository<Availability>,
     @InjectRepository(ScheduleOverride) private readonly overrides: Repository<ScheduleOverride>,
     private readonly dataSource: DataSource,
+    private readonly payments: PaymentsService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /** Appointments booked with the signed-in doctor. `upcoming` = today onwards. */
@@ -59,7 +63,7 @@ export class DoctorPortalService {
    */
   async cancelAppointment(user: AuthUser, id: string, reason: string) {
     const doctor = await this.profileFor(user);
-    await this.dataSource.transaction(async (manager) => {
+    const outcome = await this.dataSource.transaction(async (manager) => {
       // Looking it up by this doctor's id means someone else's appointment looks like a missing one.
       const appointment = await manager.findOne(Appointment, {
         where: { id, doctorId: doctor.id },
@@ -75,8 +79,14 @@ export class DoctorPortalService {
       appointment.cancelReason = reason;
       appointment.cancelledAt = new Date();
       appointment.cancelledByUserId = user.id;
+      appointment.holdExpiresAt = null;
       await manager.save(appointment);
+      // When the clinic cancels, a paid booking is always refunded in full, decided in this same transaction.
+      const money = await this.payments.onAppointmentCancelled(manager, appointment, 'DOCTOR');
+      await this.notifications.appointmentCancelled(manager, appointment.id, { cancelledBy: 'DOCTOR', reason, refundNote: money.refundNote });
+      return money;
     });
+    await this.payments.afterCommit(outcome);
     const row = await this.appointmentsRepo.findOneOrFail({ where: { id }, relations: WITH_PATIENT });
     return toDoctorAppointment(row);
   }

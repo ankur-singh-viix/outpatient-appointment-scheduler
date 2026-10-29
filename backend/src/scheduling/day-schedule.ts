@@ -32,10 +32,16 @@ export async function loadDaySchedule(
   // Sequential on purpose: `manager` may be a single transaction connection, which can't run queries in parallel.
   const overrideRow = await manager.findOneBy(ScheduleOverride, { doctorId, overrideDate: date });
   const weeklyRows = await manager.findBy(Availability, { doctorId, dayOfWeek: dayOfWeek(date) });
-  const bookedRows = await manager.find(Appointment, {
-    select: { startTime: true },
+  const activeRows = await manager.find(Appointment, {
+    select: { startTime: true, status: true, holdExpiresAt: true },
     where: { doctorId, appointmentDate: date, status: In(ACTIVE_STATUSES) },
   });
+  // An unpaid hold whose time has run out no longer occupies its slot, even before the background worker cancels it, so a
+  // slow or sleeping worker can never keep a slot looking taken. Booking releases the row itself before it inserts.
+  const nowMs = Date.now();
+  const bookedRows = activeRows.filter(
+    (row) => !(row.status === 'PENDING' && row.holdExpiresAt !== null && row.holdExpiresAt.getTime() <= nowMs),
+  );
 
   const override: DateOverride | null = overrideRow
     ? {

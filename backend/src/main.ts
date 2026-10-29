@@ -5,7 +5,7 @@ import { loadEnvFileIfPresent } from './config.js';
 
 async function bootstrap() {
   loadEnvFileIfPresent();
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true }); // rawBody: Razorpay webhook signatures cover the exact bytes received
   configureApp(app);
   await app.listen(process.env.PORT ?? 3000);
 }

@@ -82,6 +82,10 @@ export class Appointment {
   @Column({ name: 'rescheduled_from_id', type: 'uuid', nullable: true })
   rescheduledFromId: string | null;
 
+  /** Set only while the appointment is an unpaid hold (PENDING): when the slot is released if payment has not completed. */
+  @Column({ name: 'hold_expires_at', type: 'timestamptz', nullable: true })
+  holdExpiresAt: Date | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
 

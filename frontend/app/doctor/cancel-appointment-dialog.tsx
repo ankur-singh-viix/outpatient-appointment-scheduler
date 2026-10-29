@@ -93,7 +93,7 @@ function CancelForm({
           {formatDate(appointment.date, { weekday: 'long' })}, {formatTime(appointment.startTime)}
         </DialogDescription>
         <p className="mt-2 text-sm text-muted-foreground">
-          The patient will see your reason in their appointment history, and this time becomes available to others again.
+          The patient will see your reason in their appointment history, and this time becomes available to others again. If they paid online, they are refunded in full automatically.
         </p>
       </div>
 

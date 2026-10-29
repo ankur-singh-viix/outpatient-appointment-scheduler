@@ -3,6 +3,8 @@
 import { ArrowRightIcon, CalendarCheckIcon, CalendarPlusIcon, ClockIcon, MapPinIcon, SearchIcon } from 'lucide-react';
 import Link from 'next/link';
 import { Alert, EmptyState, PageHeader, StatusBadge } from '@/components/common';
+import { PaymentInfo } from '@/components/payment-info';
+import { PaymentStep } from '@/components/payment-step';
 import { RequireRole } from '@/components/require-role';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -136,13 +138,19 @@ function Dashboard({ session }: { session: Session }) {
                 </div>
                 <StatusBadge status={next.status} />
               </div>
+              {next.status === 'PENDING' && next.holdExpiresAt && (
+                <PaymentStep appointment={next} session={session} onPaid={appointments.reload} onCancelled={appointments.reload} onExpired={appointments.reload} />
+              )}
+              {next.payment && <PaymentInfo payment={next.payment} />}
               <div className="flex flex-wrap gap-2 border-t pt-4">
-                <Link
-                  href={`/doctors/${next.doctor.id}?reschedule=${next.id}`}
-                  className={buttonVariants({ variant: 'outline', size: 'lg', className: 'h-9' })}
-                >
-                  Reschedule
-                </Link>
+                {next.status === 'CONFIRMED' && (
+                  <Link
+                    href={`/doctors/${next.doctor.id}?reschedule=${next.id}`}
+                    className={buttonVariants({ variant: 'outline', size: 'lg', className: 'h-9' })}
+                  >
+                    Reschedule
+                  </Link>
+                )}
                 <Link href="/appointments" className={buttonVariants({ variant: 'ghost', size: 'lg', className: 'h-9 gap-1.5' })}>
                   All appointments
                   <ArrowRightIcon aria-hidden />

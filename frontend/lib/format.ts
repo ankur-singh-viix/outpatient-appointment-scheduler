@@ -12,6 +12,18 @@ export function formatFee(amount: number): string {
   return inr.format(amount);
 }
 
+const inrExact = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 0, maximumFractionDigits: 2 });
+
+/** Money held in paise (1/100 rupee), shown exactly: 32500 -> "₹325", 32550 -> "₹325.50". */
+export function formatPaise(paise: number): string {
+  return inrExact.format(paise / 100);
+}
+
+/** An instant (ISO timestamp) in clinic time: "29 Oct 2026, 2:30 pm". */
+export function formatDateTime(iso: string): string {
+  return new Date(iso).toLocaleString('en-IN', { timeZone: CLINIC_TIMEZONE, day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
 /** "14:30" -> "2:30 PM" */
 export function formatTime(time: string): string {
   const [h, m] = time.split(':').map(Number);

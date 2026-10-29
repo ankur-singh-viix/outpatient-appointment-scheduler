@@ -112,8 +112,71 @@ export interface PatientAppointment {
   /** On an appointment created by a reschedule: the (cancelled) appointment it replaced. */
   rescheduledFromId: string | null;
   createdAt: string;
+  /** While the booking waits for payment: when the held slot is released. Null otherwise. */
+  holdExpiresAt: string | null;
+  /** Payment, receipt and refunds, or null when the visit was free. */
+  payment: PaymentSummary | null;
   doctor: { id: string; name: string; specialty: string; consultationFee: number };
   clinic: { name: string; address: string };
+}
+
+export type PaymentDisplayStatus =
+  | 'PAYMENT_PENDING'
+  | 'PAYMENT_FAILED'
+  | 'EXPIRED'
+  | 'PAID'
+  | 'REFUND_PENDING'
+  | 'PARTIALLY_REFUNDED'
+  | 'REFUNDED';
+
+export interface RefundSummary {
+  id: string;
+  amountPaise: number;
+  /** PROCESSED only once the payment provider has confirmed it. */
+  status: 'PENDING' | 'PROCESSED' | 'FAILED';
+  reason: string;
+  /** The provider's refund id, to quote to the bank. Null until the provider has accepted the refund. */
+  reference: string | null;
+  createdAt: string;
+  processedAt: string | null;
+}
+
+export interface PaymentSummary {
+  id: string;
+  displayStatus: PaymentDisplayStatus;
+  amountPaise: number;
+  paidAt: string | null;
+  /** The receipt number. Null until paid. */
+  receiptNumber: string | null;
+  orderId: string;
+  failureReason: string | null;
+  /** Money the provider has confirmed returning. */
+  refundedPaise: number;
+  refunds: RefundSummary[];
+}
+
+/** One row of the payment history. */
+export interface PaymentHistoryItem extends PaymentSummary {
+  appointment: { id: string; date: string; startTime: string; status: AppointmentStatus; doctorName: string; clinicName: string };
+}
+
+/** What the browser needs to open Razorpay Checkout. Contains only the public key id. */
+export interface CheckoutDetails {
+  appointmentId: string;
+  orderId: string;
+  amountPaise: number;
+  currency: string;
+  keyId: string;
+  expiresAt: string | null;
+}
+
+/** The answer to booking when payment is needed: the held appointment plus the checkout to open. */
+export type HeldAppointment = PatientAppointment & { checkout: CheckoutDetails };
+
+export interface PaymentsConfig {
+  enabled: boolean;
+  holdMinutes: number;
+  refundPolicy: { fullRefundHoursBefore: number; partialRefundHoursBefore: number; partialRefundPercent: number };
 }
 
 export interface DoctorAppointment {

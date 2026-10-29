@@ -11,6 +11,9 @@ import type { AuthUser } from '../auth/auth.types.js';
 import { loadConfig } from '../config.js';
 import { Appointment, Doctor, Patient } from '../database/entities/index.js';
 import { isUniqueViolation } from '../database/errors.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
+import { PaymentsService } from '../payments/payments.service.js';
+import type { PaymentSummary } from '../payments/payment-summary.js';
 import { changeBlockedReason } from '../scheduling/appointment-rules.js';
 import { clinicNow } from '../scheduling/calendar.js';
 import { loadDaySchedule } from '../scheduling/day-schedule.js';
@@ -48,6 +51,8 @@ export class AppointmentsService {
     @InjectRepository(Appointment) private readonly appointments: Repository<Appointment>,
     @InjectRepository(Patient) private readonly patients: Repository<Patient>,
     private readonly dataSource: DataSource,
+    private readonly payments: PaymentsService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /**
@@ -60,8 +65,15 @@ export class AppointmentsService {
   async book(user: AuthUser, input: BookAppointmentInput) {
     const patientId = await this.patientIdFor(user.id);
 
+    let appointmentId: string;
+    let needsPayment = false;
     try {
-      const appointmentId = await this.dataSource.transaction(async (manager) => {
+      appointmentId = await this.dataSource.transaction(async (manager) => {
+        // Lock the doctor first: this is what serialises bookings, and it must happen before expired holds are freed.
+        const doctor = await manager.findOne(Doctor, { where: { id: input.doctorId }, lock: { mode: 'pessimistic_write' } });
+        if (!doctor) throw new NotFoundException('Doctor not found.');
+        await this.payments.prepareForBooking(manager, doctor.id, patientId);
+
         const schedule = await loadDaySchedule(manager, input.doctorId, input.date, {
           timeZone: this.config.clinicTimezone,
           bookingWindowDays: this.config.bookingWindowDays,
@@ -71,6 +83,9 @@ export class AppointmentsService {
         const slot = schedule.slots.find((candidate) => candidate.startTime === input.startTime);
         assertBookable(slot);
 
+        // With payments on, a booking with a fee is a HOLD: the slot is reserved but unconfirmed until payment succeeds.
+        // The fee is read from the database here, never from the request. Without payments, or for a free doctor, it is confirmed as before.
+        needsPayment = this.payments.enabled && doctor.consultationFee > 0;
         const saved = await manager.save(
           manager.create(Appointment, {
             patientId,
@@ -79,16 +94,25 @@ export class AppointmentsService {
             appointmentDate: input.date,
             startTime: slot.startTime,
             endTime: slot.endTime,
-            status: 'CONFIRMED',
+            status: needsPayment ? 'PENDING' : 'CONFIRMED',
+            holdExpiresAt: needsPayment ? new Date(Date.now() + this.payments.holdMinutes * 60_000) : null,
           }),
         );
+        if (!needsPayment) await this.notifications.bookingConfirmed(manager, saved.id);
         return saved.id;
       });
-      return this.findOne(appointmentId);
     } catch (error) {
       if (isUniqueViolation(error)) throw new ConflictException(SLOT_TAKEN);
       throw error;
     }
+
+    if (!needsPayment) {
+      this.notifications.kick();
+      return this.findOne(appointmentId);
+    }
+    // Opening the Razorpay order is a network call, so it happens after the hold is safely committed. If it fails the hold is released.
+    const checkout = await this.payments.createCheckout(appointmentId);
+    return { ...(await this.findOne(appointmentId)), checkout };
   }
 
   /**
@@ -98,15 +122,25 @@ export class AppointmentsService {
    */
   async cancel(user: AuthUser, id: string, reason?: string) {
     const patientId = await this.patientIdFor(user.id);
-    await this.dataSource.transaction(async (manager) => {
+    const outcome = await this.dataSource.transaction(async (manager) => {
       const appointment = await this.lockOwn(manager, id, patientId);
       this.assertChangeable(appointment);
       appointment.status = 'CANCELLED';
       appointment.cancelReason = reason?.trim() || 'Cancelled by patient';
       appointment.cancelledAt = new Date();
       appointment.cancelledByUserId = user.id;
+      appointment.holdExpiresAt = null;
       await manager.save(appointment);
+      // Money and email are decided in the same transaction, so a cancelled appointment never lacks its refund or its notice.
+      const money = await this.payments.onAppointmentCancelled(manager, appointment, 'PATIENT');
+      await this.notifications.appointmentCancelled(manager, appointment.id, {
+        cancelledBy: 'PATIENT',
+        reason: appointment.cancelReason,
+        refundNote: money.refundNote,
+      });
+      return money;
     });
+    await this.payments.afterCommit(outcome);
     return this.findOne(id);
   }
 
@@ -126,8 +160,14 @@ export class AppointmentsService {
     try {
       const newId = await this.dataSource.transaction(async (manager) => {
         await manager.findOne(Doctor, { where: { id: existing.doctorId }, lock: { mode: 'pessimistic_write' } });
+        // A lapsed unpaid hold on the target slot must not block the move: release it first (the doctor row is already locked).
+        await this.payments.releaseLapsedHolds(manager, existing.doctorId);
         const current = await this.lockOwn(manager, id, patientId);
         this.assertChangeable(current);
+        if (current.status === 'PENDING') {
+          // An unpaid hold must not turn into a confirmed booking by moving it.
+          throw new ConflictException('Finish paying for this booking, or cancel it, before rescheduling.');
+        }
 
         if (current.appointmentDate === input.date && hhmm(current.startTime) === input.startTime) {
           throw new BadRequestException('You already have this appointment at that time. Choose a different slot.');
@@ -159,8 +199,12 @@ export class AppointmentsService {
             rescheduledFromId: current.id,
           }),
         );
+        // The payment follows the patient to the new time (no refund, no second charge) and the reminders move with it.
+        await this.payments.moveToAppointment(manager, current.id, saved.id);
+        await this.notifications.appointmentRescheduled(manager, current.id, saved.id);
         return saved.id;
       });
+      this.notifications.kick();
       return this.findOne(newId);
     } catch (error) {
       if (isUniqueViolation(error)) throw new ConflictException(SLOT_TAKEN);
@@ -175,12 +219,13 @@ export class AppointmentsService {
       relations: WITH_DOCTOR,
       order: { appointmentDate: 'DESC', startTime: 'DESC' },
     });
-    return rows.map(toAppointment);
+    const payments = await this.payments.summariesFor(rows.map((row) => row.id));
+    return rows.map((row) => toAppointment(row, payments.get(row.id)));
   }
 
   private async findOne(id: string) {
     const row = await this.appointments.findOneOrFail({ where: { id }, relations: WITH_DOCTOR });
-    return toAppointment(row);
+    return toAppointment(row, (await this.payments.summariesFor([id])).get(id));
   }
 
   /** Loads the patient's own appointment with a row lock. Someone else's appointment looks like a missing one. */
@@ -208,7 +253,7 @@ export class AppointmentsService {
   }
 }
 
-function toAppointment(row: Appointment) {
+function toAppointment(row: Appointment, payment?: PaymentSummary) {
   return {
     id: row.id,
     date: row.appointmentDate,
@@ -221,6 +266,10 @@ function toAppointment(row: Appointment) {
     cancelledBy: row.cancelledBy?.role ?? null,
     rescheduledFromId: row.rescheduledFromId,
     createdAt: row.createdAt,
+    /** While the booking waits for payment: when the held slot is released. Null otherwise. */
+    holdExpiresAt: row.holdExpiresAt,
+    /** Payment, receipt and refunds for this appointment, or null when it was free. */
+    payment: payment ?? null,
     doctor: {
       id: row.doctor.id,
       name: row.doctor.user.name,

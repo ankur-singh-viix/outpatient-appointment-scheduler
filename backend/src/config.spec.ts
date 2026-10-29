@@ -12,6 +12,15 @@ const KEYS = [
   'CLERK_SECRET_KEY',
   'CLERK_JWT_KEY',
   'CLERK_AUTHORIZED_PARTIES',
+  'RAZORPAY_KEY_ID',
+  'RAZORPAY_KEY_SECRET',
+  'RAZORPAY_WEBHOOK_SECRET',
+  'PAYMENT_HOLD_MINUTES',
+  'REFUND_FULL_HOURS_BEFORE',
+  'REFUND_PARTIAL_HOURS_BEFORE',
+  'REFUND_PARTIAL_PERCENT',
+  'REMINDER_HOURS_BEFORE',
+  'BACKGROUND_JOBS',
 ];
 
 describe('email delivery mode', () => {
@@ -88,5 +97,46 @@ describe('email delivery mode', () => {
     process.env.DATABASE_URL = 'postgres://x:y@host/db';
     process.env.JWT_SECRET = 'a-real-secret';
     expect(loadConfig().emailDelivery).toBe('disabled');
+  });
+  describe('payments and reminders', () => {
+    it('is off, with a 15 minute hold and the standard refund policy, when nothing is configured', () => {
+      const { payments, reminderHoursBefore, backgroundJobs } = loadConfig();
+      expect(payments.enabled).toBe(false);
+      expect(payments.holdMinutes).toBe(15);
+      expect(payments.refundPolicy).toEqual({ fullRefundHoursBefore: 24, partialRefundHoursBefore: 2, partialRefundPercent: 50 });
+      expect(reminderHoursBefore).toEqual([24, 2]);
+      expect(backgroundJobs).toBe(true);
+    });
+
+    it('needs BOTH Razorpay keys, and never reports a key as enabled with only one', () => {
+      process.env.RAZORPAY_KEY_ID = 'rzp_test_x';
+      expect(loadConfig().payments.enabled).toBe(false);
+      process.env.RAZORPAY_KEY_SECRET = 'secret';
+      expect(loadConfig().payments).toMatchObject({ enabled: true, keyId: 'rzp_test_x' });
+      process.env.RAZORPAY_KEY_ID = '   ';
+      expect(loadConfig().payments.enabled).toBe(false);
+    });
+
+    it('reads the hold, refund policy and reminders from the environment, ignoring nonsense', () => {
+      process.env.PAYMENT_HOLD_MINUTES = '30';
+      process.env.REFUND_FULL_HOURS_BEFORE = '48';
+      process.env.REFUND_PARTIAL_HOURS_BEFORE = '6';
+      process.env.REFUND_PARTIAL_PERCENT = '25';
+      process.env.REMINDER_HOURS_BEFORE = '48, 1 ,x,-3,0';
+      process.env.BACKGROUND_JOBS = 'false';
+      const { payments, reminderHoursBefore, backgroundJobs } = loadConfig();
+      expect(payments.holdMinutes).toBe(30);
+      expect(payments.refundPolicy).toEqual({ fullRefundHoursBefore: 48, partialRefundHoursBefore: 6, partialRefundPercent: 25 });
+      expect(reminderHoursBefore).toEqual([48, 1]);
+      expect(backgroundJobs).toBe(false);
+
+      process.env.PAYMENT_HOLD_MINUTES = 'soon';
+      process.env.REFUND_PARTIAL_PERCENT = '250';
+      process.env.REMINDER_HOURS_BEFORE = '';
+      const fallback = loadConfig();
+      expect(fallback.payments.holdMinutes).toBe(15);
+      expect(fallback.payments.refundPolicy.partialRefundPercent).toBe(100); // a share can never exceed the whole
+      expect(fallback.reminderHoursBefore).toEqual([]); // empty switches reminders off
+    });
   });
 });

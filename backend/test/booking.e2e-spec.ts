@@ -19,6 +19,10 @@ const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 if (!TEST_DATABASE_URL) throw new Error('Set TEST_DATABASE_URL to run the e2e tests (see backend/.env.example).');
 process.env.DATABASE_URL = TEST_DATABASE_URL;
 process.env.JWT_SECRET = 'e2e-test-secret';
+// These tests are about booking without payments: never pick up real Razorpay keys from backend/.env, and keep the background worker off.
+process.env.RAZORPAY_KEY_ID = '';
+process.env.RAZORPAY_KEY_SECRET = '';
+process.env.BACKGROUND_JOBS = 'false';
 
 const PASSWORD = 'Test@1234';
 const TIME_ZONE = process.env.CLINIC_TIMEZONE ?? 'Asia/Kolkata';

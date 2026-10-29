@@ -4,7 +4,11 @@ import { Clinic } from './clinic.entity.js';
 import { Doctor } from './doctor.entity.js';
 import { EmailVerification } from './email-verification.entity.js';
 import { ExternalIdentity } from './external-identity.entity.js';
+import { Notification } from './notification.entity.js';
 import { Patient } from './patient.entity.js';
+import { PaymentEvent } from './payment-event.entity.js';
+import { Payment } from './payment.entity.js';
+import { Refund } from './refund.entity.js';
 import { ReceptionistAssignment } from './receptionist-assignment.entity.js';
 import { ScheduleOverride } from './schedule-override.entity.js';
 import { Specialty } from './specialty.entity.js';
@@ -18,8 +22,12 @@ export {
   Doctor,
   EmailVerification,
   ExternalIdentity,
+  Notification,
   Patient,
+  Payment,
+  PaymentEvent,
   ReceptionistAssignment,
+  Refund,
   ScheduleOverride,
   Specialty,
   User,
@@ -38,4 +46,8 @@ export const ENTITIES = [
   Appointment,
   EmailVerification,
   ExternalIdentity,
+  Payment,
+  Refund,
+  PaymentEvent,
+  Notification,
 ];

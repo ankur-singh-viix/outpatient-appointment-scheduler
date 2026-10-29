@@ -14,6 +14,30 @@ export interface AppConfig {
   /** The "from" address; with Resend it must be on a domain you have verified there. */
   emailFrom: string;
   clerk: ClerkConfig;
+  payments: PaymentsConfig;
+  /** How many hours before an appointment a reminder email goes out (one email per entry). Empty turns reminders off. */
+  reminderHoursBefore: number[];
+  /** Runs the background workers (expiring unpaid holds, sending due emails, settling refunds). Off in tests that call them directly. */
+  backgroundJobs: boolean;
+}
+
+/** Razorpay (card/UPI payments). Off unless both RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are set: booking is then free, as before. */
+export interface PaymentsConfig {
+  enabled: boolean;
+  keyId: string;
+  keySecret: string;
+  /** Signs webhook calls from Razorpay. Without it the webhook endpoint refuses everything. */
+  webhookSecret: string;
+  /** How long an unpaid booking holds its slot before the slot is released. */
+  holdMinutes: number;
+  refundPolicy: RefundPolicy;
+}
+
+/** Patient cancellations: full refund this many hours or more before the appointment, a partial one later, none after. */
+export interface RefundPolicy {
+  fullRefundHoursBefore: number;
+  partialRefundHoursBefore: number;
+  partialRefundPercent: number;
 }
 
 export type EmailDelivery = 'resend' | 'log' | 'disabled';
@@ -58,6 +82,14 @@ export function loadConfig(): AppConfig {
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);
+  const razorpayKeyId = (process.env.RAZORPAY_KEY_ID ?? '').trim();
+  const razorpayKeySecret = (process.env.RAZORPAY_KEY_SECRET ?? '').trim();
+  /** A non-negative number from the environment, or the default when it is unset or not a number. */
+  const numberFrom = (name: string, fallback: number): number => {
+    const value = Number(process.env[name]);
+    return process.env[name] && Number.isFinite(value) && value >= 0 ? value : fallback;
+  };
+  const reminderHours = process.env.REMINDER_HOURS_BEFORE ?? '24,2';
   const clerkSecretKey = process.env.CLERK_SECRET_KEY ?? '';
   const explicitParties = (process.env.CLERK_AUTHORIZED_PARTIES ?? '')
     .split(',')
@@ -80,5 +112,22 @@ export function loadConfig(): AppConfig {
       jwtKey: (process.env.CLERK_JWT_KEY ?? '').replace(/\\n/g, '\n'),
       authorizedParties: explicitParties.length > 0 ? explicitParties : corsOrigins,
     },
+    payments: {
+      enabled: Boolean(razorpayKeyId && razorpayKeySecret),
+      keyId: razorpayKeyId,
+      keySecret: razorpayKeySecret,
+      webhookSecret: (process.env.RAZORPAY_WEBHOOK_SECRET ?? '').trim(),
+      holdMinutes: Math.max(1, numberFrom('PAYMENT_HOLD_MINUTES', 15)),
+      refundPolicy: {
+        fullRefundHoursBefore: numberFrom('REFUND_FULL_HOURS_BEFORE', 24),
+        partialRefundHoursBefore: numberFrom('REFUND_PARTIAL_HOURS_BEFORE', 2),
+        partialRefundPercent: Math.min(100, numberFrom('REFUND_PARTIAL_PERCENT', 50)),
+      },
+    },
+    reminderHoursBefore: reminderHours
+      .split(',')
+      .map((hours) => Number(hours.trim()))
+      .filter((hours) => Number.isFinite(hours) && hours > 0),
+    backgroundJobs: process.env.BACKGROUND_JOBS !== 'false',
   };
 }
