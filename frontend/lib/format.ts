@@ -12,11 +12,22 @@ export function formatFee(amount: number): string {
   return inr.format(amount);
 }
 
-const inrExact = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 0, maximumFractionDigits: 2 });
+const inrWhole = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 0, maximumFractionDigits: 0 });
+const inrPaise = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-/** Money held in paise (1/100 rupee), shown exactly: 32500 -> "₹325", 32550 -> "₹325.50". */
+/** Money held in paise (1/100 rupee), shown exactly: 32500 -> "₹325", 32550 -> "₹325.50" (never "₹325.5"). */
 export function formatPaise(paise: number): string {
-  return inrExact.format(paise / 100);
+  return (paise % 100 === 0 ? inrWhole : inrPaise).format(paise / 100);
+}
+
+/** How long before the appointment a reminder goes out: "24 hours before", "1 hour before", "30 minutes before". */
+export function formatReminderInterval(hours: number): string {
+  if (hours >= 1) {
+    const whole = Math.round(hours * 10) / 10;
+    return `${whole} hour${whole === 1 ? '' : 's'} before`;
+  }
+  const minutes = Math.max(1, Math.round(hours * 60));
+  return `${minutes} minute${minutes === 1 ? '' : 's'} before`;
 }
 
 /**

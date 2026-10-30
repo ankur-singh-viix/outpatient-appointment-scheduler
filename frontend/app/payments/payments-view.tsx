@@ -6,6 +6,7 @@ import { useState } from 'react';
 import { Alert, EmptyState, Spinner } from '@/components/common';
 import { PaymentBadge } from '@/components/payment-info';
 import { ReceiptDialog } from '@/components/receipt-dialog';
+import { useReceiptPrinter } from '@/components/receipt-print';
 import { RequireRole } from '@/components/require-role';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -24,8 +25,9 @@ export function PaymentsView() {
 
 function Payments({ session }: { session: Session }) {
   const history = useQuery(`payments-page:${session.user.id}`, () => api<PaymentHistoryItem[]>('/payments/mine', { token: session.accessToken }));
-  const [receipt, setReceipt] = useState<{ item: PaymentHistoryItem; print: boolean } | null>(null);
+  const [receipt, setReceipt] = useState<PaymentHistoryItem | null>(null);
   const [receiptOpen, setReceiptOpen] = useState(false);
+  const printer = useReceiptPrinter(session.user.name);
 
   const items = history.data ?? history.previous;
   if (!items && history.loading) return <Spinner label="Loading your payments…" />;
@@ -58,8 +60,8 @@ function Payments({ session }: { session: Session }) {
   const totalRefunded = items.reduce((sum, item) => sum + item.refundedPaise, 0);
   const waiting = items.filter((item) => item.displayStatus === 'PAYMENT_PENDING' || item.displayStatus === 'PAYMENT_FAILED').length;
 
-  const open = (item: PaymentHistoryItem, print: boolean) => {
-    setReceipt({ item, print });
+  const open = (item: PaymentHistoryItem) => {
+    setReceipt(item);
     setReceiptOpen(true);
   };
 
@@ -78,18 +80,22 @@ function Payments({ session }: { session: Session }) {
             className="animate-in fade-in-0 slide-in-from-bottom-1 duration-300 fill-mode-backwards"
             style={{ animationDelay: `${Math.min(index, 5) * 40}ms` }}
           >
-            <PaymentCard item={item} onView={() => open(item, false)} onPrint={() => open(item, true)} />
+            <PaymentCard item={item} onView={() => open(item)} onPrint={() => printer.print([item])} />
           </li>
         ))}
       </ul>
 
-      <ReceiptDialog
-        item={receipt?.item ?? null}
-        patientName={session.user.name}
-        open={receiptOpen}
-        autoPrint={receipt?.print ?? false}
-        onOpenChange={setReceiptOpen}
-      />
+      {paid.length > 1 && (
+        <div className="flex justify-end">
+          <Button variant="outline" size="lg" className="h-9 gap-2" onClick={() => printer.print(paid)}>
+            <PrinterIcon aria-hidden />
+            Print all receipts ({paid.length})
+          </Button>
+        </div>
+      )}
+
+      <ReceiptDialog item={receipt} patientName={session.user.name} open={receiptOpen} onOpenChange={setReceiptOpen} onPrint={(item) => printer.print([item])} />
+      {printer.sheets}
     </div>
   );
 }

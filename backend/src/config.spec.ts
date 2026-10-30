@@ -21,6 +21,13 @@ const KEYS = [
   'REFUND_PARTIAL_PERCENT',
   'REMINDER_HOURS_BEFORE',
   'BACKGROUND_JOBS',
+  'SMS_PROVIDER',
+  'TWILIO_ACCOUNT_SID',
+  'TWILIO_AUTH_TOKEN',
+  'TWILIO_FROM_NUMBER',
+  'SMS_DEFAULT_COUNTRY_CODE',
+  'NOTIFICATION_MAX_ATTEMPTS',
+  'NOTIFICATION_RETRY_BASE_SECONDS',
 ];
 
 describe('email delivery mode', () => {
@@ -104,7 +111,7 @@ describe('email delivery mode', () => {
       expect(payments.enabled).toBe(false);
       expect(payments.holdMinutes).toBe(15);
       expect(payments.refundPolicy).toEqual({ fullRefundHoursBefore: 24, partialRefundHoursBefore: 2, partialRefundPercent: 50 });
-      expect(reminderHoursBefore).toEqual([24, 2]);
+      expect(reminderHoursBefore).toEqual([24, 1]);
       expect(backgroundJobs).toBe(true);
     });
 
@@ -138,5 +145,58 @@ describe('email delivery mode', () => {
       expect(fallback.payments.refundPolicy.partialRefundPercent).toBe(100); // a share can never exceed the whole
       expect(fallback.reminderHoursBefore).toEqual([]); // empty switches reminders off
     });
+  });
+});
+
+describe('SMS and notification delivery settings', () => {
+  const clear = () => {
+    for (const key of ['SMS_PROVIDER', 'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER', 'SMS_DEFAULT_COUNTRY_CODE', 'NOTIFICATION_MAX_ATTEMPTS', 'NOTIFICATION_RETRY_BASE_SECONDS']) delete process.env[key];
+  };
+
+  it('has SMS off, and 5 attempts starting at a minute, when nothing is configured', () => {
+    clear();
+    const { sms, notifications } = loadConfig();
+    expect(sms.provider).toBe('disabled');
+    expect(notifications).toEqual({ maxAttempts: 5, retryBaseSeconds: 60 });
+  });
+
+  it('turns Twilio on only when all three of its settings are present', () => {
+    clear();
+    process.env.TWILIO_ACCOUNT_SID = 'ACx';
+    process.env.TWILIO_AUTH_TOKEN = 'token';
+    expect(loadConfig().sms.provider).toBe('disabled');
+    process.env.TWILIO_FROM_NUMBER = '+15005550006';
+    expect(loadConfig().sms).toMatchObject({ provider: 'twilio', twilioAccountSid: 'ACx', fromNumber: '+15005550006' });
+    process.env.TWILIO_AUTH_TOKEN = '   ';
+    expect(loadConfig().sms.provider).toBe('disabled');
+    clear();
+  });
+
+  it('lets SMS_PROVIDER force the mock for development, or force SMS off even with credentials', () => {
+    clear();
+    process.env.SMS_PROVIDER = 'mock';
+    expect(loadConfig().sms.provider).toBe('mock');
+    process.env.SMS_PROVIDER = 'Disabled';
+    process.env.TWILIO_ACCOUNT_SID = 'ACx';
+    process.env.TWILIO_AUTH_TOKEN = 'token';
+    process.env.TWILIO_FROM_NUMBER = '+15005550006';
+    expect(loadConfig().sms.provider).toBe('disabled');
+    process.env.SMS_PROVIDER = 'carrier-pigeon';
+    expect(loadConfig().sms.provider).toBe('twilio'); // an unknown name is ignored: credentials decide
+    clear();
+  });
+
+  it('reads the retry settings and the default country code, ignoring nonsense', () => {
+    clear();
+    process.env.NOTIFICATION_MAX_ATTEMPTS = '8';
+    process.env.NOTIFICATION_RETRY_BASE_SECONDS = '30';
+    process.env.SMS_DEFAULT_COUNTRY_CODE = ' +91 ';
+    const config = loadConfig();
+    expect(config.notifications).toEqual({ maxAttempts: 8, retryBaseSeconds: 30 });
+    expect(config.sms.defaultCountryCode).toBe('+91');
+    process.env.NOTIFICATION_MAX_ATTEMPTS = '0';
+    process.env.NOTIFICATION_RETRY_BASE_SECONDS = 'soon';
+    expect(loadConfig().notifications).toEqual({ maxAttempts: 1, retryBaseSeconds: 60 });
+    clear();
   });
 });

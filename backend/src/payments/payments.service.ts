@@ -515,10 +515,18 @@ export class PaymentsService {
       await this.settlePaid(payment.id, paymentEntity.id);
     } else if (type === 'payment.failed' && paymentEntity?.order_id) {
       // Only an unpaid order can fail; a PAID or EXPIRED one is left alone. The patient may retry on the same order.
-      await this.payments.update(
-        { razorpayOrderId: paymentEntity.order_id, status: In(['CREATED', 'FAILED']) },
-        { status: 'FAILED', failureReason: (paymentEntity.error_description ?? 'The payment failed.').slice(0, 300) },
-      );
+      const payment = await this.payments.findOneBy({ razorpayOrderId: paymentEntity.order_id });
+      if (!payment || (payment.status !== 'CREATED' && payment.status !== 'FAILED')) return;
+      const reason = (paymentEntity.error_description ?? 'The payment failed.').slice(0, 300);
+      await this.dataSource.transaction(async (manager) => {
+        await manager.update(Payment, { id: payment.id, status: In(['CREATED', 'FAILED']) }, { status: 'FAILED', failureReason: reason });
+        // Tell the patient so they can try again while the slot is still held. Each failed attempt is reported once.
+        await this.notifications.paymentFailed(manager, payment.appointmentId, {
+          attemptId: paymentEntity.id ?? `${payment.id}:${Date.now()}`,
+          reason: reason.slice(0, 120),
+        });
+      });
+      this.notifications.kick();
     } else if ((type === 'refund.processed' || type === 'refund.failed' || type === 'refund.created') && refundEntity?.id) {
       await this.applyRefundEvent(refundEntity.id, refundEntity.payment_id, refundEntity.amount, type);
     }

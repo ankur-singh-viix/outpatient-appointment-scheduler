@@ -15,6 +15,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('Jobs');
   private timer?: NodeJS.Timeout;
   private running = false;
+  private passes = 0;
 
   constructor(
     private readonly payments: PaymentsService,
@@ -40,6 +41,8 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
         ['release unpaid holds', () => this.payments.expireHolds()],
         ['settle refunds', () => this.payments.settleRefunds()],
         ['send due emails', () => this.notifications.dispatchDue()],
+        // Reminder upkeep is a scan of upcoming appointments, so it runs on the first pass after start-up and then every 10 minutes.
+        ...(this.passes++ % 20 === 0 ? ([['repair reminders', () => this.notifications.maintainReminders()]] as const) : []),
       ] as const) {
         await job().catch((error: Error) => this.logger.error(`Job "${name}" failed: ${error.message}`));
       }

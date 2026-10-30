@@ -4,6 +4,7 @@ import { Clinic } from './clinic.entity.js';
 import { Doctor, slotIntervalOf } from './doctor.entity.js';
 import { EmailVerification } from './email-verification.entity.js';
 import { ExternalIdentity } from './external-identity.entity.js';
+import { NotificationPreference } from './notification-preference.entity.js';
 import { Notification } from './notification.entity.js';
 import { Patient } from './patient.entity.js';
 import { PaymentEvent } from './payment-event.entity.js';
@@ -23,6 +24,7 @@ export {
   EmailVerification,
   ExternalIdentity,
   Notification,
+  NotificationPreference,
   Patient,
   Payment,
   PaymentEvent,
@@ -51,4 +53,5 @@ export const ENTITIES = [
   Refund,
   PaymentEvent,
   Notification,
+  NotificationPreference,
 ];

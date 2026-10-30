@@ -177,7 +177,7 @@ describe('Payments, refunds and notifications (e2e)', () => {
       [appointmentId],
     );
   const queued = (appointmentId: string, kind?: string) =>
-    rows<{ kind: string; status: string; send_at: Date; subject: string; attempts: number }>(
+    rows<{ kind: string; status: string; send_at: Date; subject: string; attempts: number; recipient_role: string | null; channel: string; to_address: string }>(
       `SELECT * FROM notifications WHERE appointment_id = $1 ${kind ? 'AND kind = $2' : ''} ORDER BY created_at, kind`,
       kind ? [appointmentId, kind] : [appointmentId],
     );
@@ -362,14 +362,16 @@ describe('Payments, refunds and notifications (e2e)', () => {
       expect(await paymentOf(held.id)).toMatchObject({ status: 'PAID', razorpay_payment_id: paymentId });
       expect((await one<{ hold_expires_at: Date | null }>('SELECT hold_expires_at FROM appointments WHERE id = $1', [held.id])).hold_expires_at).toBeNull();
 
-      const kinds = (await queued(held.id)).map((row) => row.kind).sort();
-      expect(kinds).toEqual(['booking-confirmed', 'payment-received', 'reminder', 'reminder']);
+      const kinds = (await queued(held.id)).map((row) => `${row.recipient_role}:${row.kind}`).sort();
+      // The patient gets the confirmation, the receipt and two reminders; the doctor gets a heads-up about the booking.
+      expect(kinds).toEqual(['DOCTOR:booking-confirmed', 'PATIENT:booking-confirmed', 'PATIENT:payment-received', 'PATIENT:reminder', 'PATIENT:reminder']);
 
       await notifications.dispatchDue();
       expect(sentTo(/appointment confirmed/i)).toHaveLength(1);
       expect(sentTo(/payment received/i)).toHaveLength(1);
       expect(sentTo(/reminder/i)).toHaveLength(0); // the reminders are for tomorrow and the day before, not now
-      expect(sentEmails.every((email) => email.to === 'patient1@test.local')).toBe(true);
+      expect(sentEmails.map((email) => email.to).sort()).toEqual(['doctor@test.local', 'patient1@test.local', 'patient1@test.local']);
+      expect(sentTo(/new booking/i).map((email) => email.to)).toEqual(['doctor@test.local']);
     });
 
     it('is safe to repeat: the second call changes nothing and queues nothing new', async () => {
@@ -377,7 +379,7 @@ describe('Payments, refunds and notifications (e2e)', () => {
       const body = verifyBody(held.orderId);
       await http().post('/api/payments/verify').set(as(patientToken)).send(body).expect(200);
       await http().post('/api/payments/verify').set(as(patientToken)).send(body).expect(200);
-      expect((await queued(held.id, 'booking-confirmed'))).toHaveLength(1);
+      expect(await queued(held.id, 'booking-confirmed')).toHaveLength(2); // one for the patient, one for the doctor
       expect(await rows('SELECT 1 FROM payments WHERE appointment_id = $1', [held.id])).toHaveLength(1);
     });
 
@@ -505,7 +507,7 @@ describe('Payments, refunds and notifications (e2e)', () => {
       expect(first.body).toEqual({ received: true });
       const second = await webhook(captured(held.orderId, 'pay_dup'), { eventId: 'evt_same' }).expect(200);
       expect(second.body).toEqual({ received: true, duplicate: true });
-      expect(await queued(held.id, 'booking-confirmed')).toHaveLength(1);
+      expect(await queued(held.id, 'booking-confirmed')).toHaveLength(2);
       expect(await rows("SELECT 1 FROM payment_events WHERE event_id = 'evt_same'")).toHaveLength(1);
     });
 
@@ -514,7 +516,7 @@ describe('Payments, refunds and notifications (e2e)', () => {
       const paymentId = await payFor(held.orderId);
       await webhook(captured(held.orderId, paymentId), { eventId: 'evt_a' }).expect(200);
       await webhook({ ...captured(held.orderId, paymentId), event: 'order.paid' }, { eventId: 'evt_b' }).expect(200);
-      expect(await queued(held.id, 'booking-confirmed')).toHaveLength(1);
+      expect(await queued(held.id, 'booking-confirmed')).toHaveLength(2);
       expect(await queued(held.id, 'payment-received')).toHaveLength(1);
       expect(await refundsOf(held.id)).toHaveLength(0);
     });
@@ -809,7 +811,7 @@ describe('Payments, refunds and notifications (e2e)', () => {
       const newReminders = await queued(moved.body.id, 'reminder');
       expect(newReminders.length).toBe(2);
       expect(newReminders.every((row) => row.status === 'PENDING')).toBe(true);
-      expect(await queued(moved.body.id, 'booking-rescheduled')).toHaveLength(1);
+      expect(await queued(moved.body.id, 'booking-rescheduled')).toHaveLength(2); // the patient and the doctor
     });
   });
 
@@ -879,7 +881,7 @@ describe('Payments, refunds and notifications (e2e)', () => {
       expect(await status(booking.id)).toBe('CONFIRMED');
       const retrying = (await queued(booking.id)).filter((row) => row.status === 'PENDING' && row.attempts === 1);
       expect(retrying).toHaveLength(1);
-      expect(sentEmails).toHaveLength(1); // the other message went out in the same pass
+      expect(sentEmails).toHaveLength(2); // the other two messages (the doctor's and the receipt) went out in the same pass
 
       // Not due again yet...
       result = await notifications.dispatchDue();
@@ -998,7 +1000,7 @@ describe('Payments, refunds and notifications (e2e)', () => {
         http().post('/api/payments/verify').set(as(patientToken)).send(body),
       ]);
       expect(await status(held.id)).toBe('CONFIRMED');
-      expect(await queued(held.id, 'booking-confirmed')).toHaveLength(1);
+      expect(await queued(held.id, 'booking-confirmed')).toHaveLength(2);
       expect(await queued(held.id, 'payment-received')).toHaveLength(1);
       expect(await refundsOf(held.id)).toHaveLength(0);
     });

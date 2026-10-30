@@ -184,7 +184,31 @@ export interface NotificationItem {
   /** SENT: delivered. SCHEDULED: a reminder waiting for its time. QUEUED: due and about to go out. */
   status: 'SENT' | 'SCHEDULED' | 'QUEUED';
   at: string;
+  /** For a reminder: when it is (or was) due to go out. */
+  sendAt: string;
+  /** For a reminder: how many hours before the appointment it goes out (24, 1, ...). Null for everything else. */
+  intervalHours: number | null;
+  /** How it is delivered: by email, or as a text message (text reminders only). */
+  channel: 'email' | 'sms';
   appointmentId: string;
+  /** The appointment the message is about, for grouping and describing it. */
+  appointment: { doctorName: string; date: string; startTime: string; endTime: string } | null;
+}
+
+/** How a patient is contacted. Essential appointment emails are not a choice: they are always sent. */
+export interface NotificationPreferencesView {
+  /** Also text essential updates (the email is sent regardless). */
+  smsEnabled: boolean;
+  emailReminders: boolean;
+  smsReminders: boolean;
+  promotionalEmail: boolean;
+  promotionalSms: boolean;
+  /** When the patient ticked each promotional box, or null while it is off. */
+  promotionalEmailConsentAt: string | null;
+  promotionalSmsConsentAt: string | null;
+  /** Whether a text could reach this patient: a usable phone number on file, and an SMS service set up. */
+  smsNumberOnFile: boolean;
+  smsServiceAvailable: boolean;
 }
 
 /** The signed-in patient's own details. Null fields are ones they never gave. */

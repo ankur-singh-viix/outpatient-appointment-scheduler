@@ -150,10 +150,27 @@ erDiagram
         varchar event_id PK "Razorpay webhook event id, for de-duplication"
     }
 
+    notification_preferences {
+        uuid user_id PK
+        boolean sms_enabled "also text essential updates; the essential email is always sent"
+        boolean email_reminders
+        boolean sms_reminders
+        boolean promotional_email "off unless explicitly opted in"
+        timestamptz promotional_email_consent_at "required while promotional_email is on"
+        boolean promotional_sms
+        timestamptz promotional_sms_consent_at
+    }
+
     notifications {
         uuid id PK
         uuid appointment_id FK
-        varchar kind "booking-confirmed, reminder, refund-processed, ..."
+        varchar channel "email | sms"
+        varchar category "transactional | reminder | promotional"
+        uuid recipient_user_id FK "the patient or the doctor the message is for"
+        varchar recipient_role "PATIENT | DOCTOR"
+        varchar kind "booking-confirmed, payment-failed, refund-processed, reminder, ..."
+        varchar provider_reference "Resend email id or Twilio SID"
+        int attempts "retried with exponential backoff"
         timestamptz send_at "a reminder is a row with a future send_at"
         notification_status status "PENDING | SENT | FAILED | CANCELLED"
         varchar dedupe_key UK
@@ -184,6 +201,7 @@ erDiagram
     patients ||--o{ payments : "pays"
     payments ||--o{ refunds : "refunded by"
     appointments ||--o{ notifications : "notifies about"
+    users ||--o| notification_preferences : "chooses"
 ```
 
 Mermaid can't express composite unique keys, `CHECK` constraints or partial indexes. Columns marked "UK with …" belong to a composite unique key, and each column on its own is **not** unique. The exact constraints are written in SQL in the next section.
