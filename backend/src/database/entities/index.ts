@@ -1,7 +1,7 @@
 import { ACTIVE_STATUSES, Appointment } from './appointment.entity.js';
 import { Availability } from './availability.entity.js';
 import { Clinic } from './clinic.entity.js';
-import { Doctor } from './doctor.entity.js';
+import { Doctor, slotIntervalOf } from './doctor.entity.js';
 import { EmailVerification } from './email-verification.entity.js';
 import { ExternalIdentity } from './external-identity.entity.js';
 import { Notification } from './notification.entity.js';
@@ -28,6 +28,7 @@ export {
   PaymentEvent,
   ReceptionistAssignment,
   Refund,
+  slotIntervalOf,
   ScheduleOverride,
   Specialty,
   User,

@@ -2,7 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Between, DataSource, In, Repository } from 'typeorm';
 import { loadConfig } from '../config.js';
-import { ACTIVE_STATUSES, Appointment, Clinic, Doctor, ScheduleOverride, Specialty } from '../database/entities/index.js';
+import { ACTIVE_STATUSES, Appointment, Clinic, Doctor, ScheduleOverride, Specialty, slotIntervalOf } from '../database/entities/index.js';
 import { addDays, clinicNow } from '../scheduling/calendar.js';
 import { loadDaySchedule } from '../scheduling/day-schedule.js';
 import { findNextAvailable, type NextSlot } from '../scheduling/next-available.js';
@@ -67,7 +67,7 @@ export class DoctorsService {
       where: { doctorId: In(doctorIds), overrideDate: Between(today.date, last) },
     });
     const bookedRows = await this.dataSource.manager.find(Appointment, {
-      select: { doctorId: true, appointmentDate: true, startTime: true },
+      select: { doctorId: true, appointmentDate: true, startTime: true, endTime: true },
       where: { doctorId: In(doctorIds), appointmentDate: Between(today.date, last), status: In(ACTIVE_STATUSES) },
     });
 
@@ -82,14 +82,15 @@ export class DoctorsService {
           reason: row.reason,
         });
       }
-      const booked = new Map<string, string[]>();
+      const booked = new Map<string, { startTime: string; endTime: string }[]>();
       for (const row of bookedRows.filter((r) => r.doctorId === doctor.id)) {
-        booked.set(row.appointmentDate, [...(booked.get(row.appointmentDate) ?? []), row.startTime]);
+        booked.set(row.appointmentDate, [...(booked.get(row.appointmentDate) ?? []), { startTime: row.startTime, endTime: row.endTime }]);
       }
       result.set(
         doctor.id,
         findNextAvailable({
           consultationMinutes: doctor.consultationMinutes,
+          slotIntervalMinutes: slotIntervalOf(doctor),
           defaultCapacity: doctor.defaultDailyCapacity,
           weekly: doctor.availability.map((a) => ({ dayOfWeek: a.dayOfWeek, startTime: a.startTime, endTime: a.endTime, capacity: a.capacity })),
           overrides,
@@ -133,6 +134,7 @@ function toDoctor(doctor: Doctor) {
     bio: doctor.bio,
     consultationFee: doctor.consultationFee,
     consultationMinutes: doctor.consultationMinutes,
+    slotIntervalMinutes: slotIntervalOf(doctor),
     specialty: { id: doctor.specialty.id, name: doctor.specialty.name },
     clinic: { name: doctor.clinic.name, address: doctor.clinic.address },
     weeklyHours: doctor.availability.map((a) => ({

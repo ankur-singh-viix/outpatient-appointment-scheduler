@@ -13,7 +13,14 @@ const capacitySchema = z.int().min(1).max(200);
 const appointmentsQuery = z.object({ scope: z.enum(['upcoming', 'all']).optional() });
 
 // Slot length in minutes: long enough to be a real visit, short enough to fit a session.
-const settingsSchema = z.strictObject({ consultationMinutes: z.int().min(5).max(120) });
+const settingsSchema = z
+  .strictObject({
+    /** How long each appointment is. */
+    consultationMinutes: z.int().min(5).max(120).optional(),
+    /** How often a new slot starts; null follows the appointment length. Shorter than the length gives overlapping slots. */
+    slotIntervalMinutes: z.int().min(5).max(120).nullable().optional(),
+  })
+  .refine((value) => value.consultationMinutes !== undefined || value.slotIntervalMinutes !== undefined, { message: 'Send consultationMinutes, slotIntervalMinutes or both.' });
 
 // A doctor must say why: the patient reads this reason in their appointment history.
 const cancelSchema = z.strictObject({
@@ -105,7 +112,7 @@ export class DoctorPortalController {
     @CurrentUser() user: AuthUser,
     @Body(new ZodValidationPipe(settingsSchema)) body: z.infer<typeof settingsSchema>,
   ) {
-    return this.portal.updateSettings(user, body.consultationMinutes);
+    return this.portal.updateSettings(user, body);
   }
 
   @Put('availability/weekly')

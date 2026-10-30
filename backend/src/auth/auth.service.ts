@@ -2,7 +2,7 @@ import { Injectable, NotFoundException, UnauthorizedException } from '@nestjs/co
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { User } from '../database/entities/index.js';
+import { Patient, User } from '../database/entities/index.js';
 import { verifyPassword } from './password.js';
 import { signSession, toPublicUser, type PublicUser } from './session.js';
 import { SignupService } from './signup.service.js';
@@ -13,6 +13,7 @@ export type { PublicUser } from './session.js';
 export class AuthService {
   constructor(
     @InjectRepository(User) private readonly users: Repository<User>,
+    @InjectRepository(Patient) private readonly patients: Repository<Patient>,
     private readonly jwt: JwtService,
     private readonly signup: SignupService,
   ) {}
@@ -32,6 +33,22 @@ export class AuthService {
       throw new UnauthorizedException('Incorrect email or password.');
     }
     return signSession(this.jwt, user);
+  }
+
+  /** The signed-in patient's own details, for the My Profile page. Null fields are ones they never gave. */
+  async patientProfile(userId: string) {
+    const user = await this.users.findOneBy({ id: userId });
+    if (!user) throw new NotFoundException('User not found.');
+    const patient = await this.patients.findOneBy({ userId });
+    return {
+      name: user.name,
+      email: user.email,
+      memberSince: user.createdAt,
+      phone: patient?.phone ?? null,
+      dateOfBirth: patient?.dateOfBirth ?? null,
+      gender: patient?.gender ?? null,
+      address: patient?.address ?? null,
+    };
   }
 
   async me(userId: string): Promise<PublicUser> {

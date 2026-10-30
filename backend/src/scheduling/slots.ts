@@ -36,6 +36,17 @@ export interface Slot {
   status: SlotStatus;
 }
 
+/** The time an active appointment occupies. */
+export interface BookedWindow {
+  startTime: string;
+  endTime: string;
+}
+
+/** True when two half-open time ranges [aStart, aEnd) and [bStart, bEnd) share any time. Back-to-back ranges do not overlap. */
+export function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
+  return aStart < bEnd && bStart < aEnd;
+}
+
 /** "09:30" or "09:30:00" -> minutes after midnight. */
 export function toMinutes(time: string): number {
   const [hours, minutes] = time.split(':').map(Number);
@@ -86,18 +97,31 @@ export function resolveSessions(
 }
 
 /**
- * Splits each session into consultation-length slots (STREAM scheduling) and marks each slot:
- * - BOOKED: an active appointment already starts at that time
+ * Splits each session into appointment-length slots (STREAM scheduling) and marks each slot.
+ *
+ * A new slot STARTS every `intervalMinutes` (default: the appointment length, so slots follow one another). When the interval is
+ * shorter than the appointment, slots overlap each other: 30-minute appointments every 15 minutes give 11:00-11:30, 11:15-11:45,
+ * 11:30-12:00 and so on. Only appointments that fit entirely inside the session are offered.
+ *
+ * - BOOKED: the slot shares any time with an active appointment (so a booking blocks every overlapping window, not just its own)
  * - FULL:   the session has reached its capacity
  * - PAST:   the slot starts at or before `nowCutoff` (only set for today)
+ *
+ * `booked` entries are full windows, or just start times, which stand for one appointment length starting then.
  */
 export function buildSlots(
   sessions: Session[],
   consultationMinutes: number,
-  bookedStartTimes: string[],
+  booked: (string | BookedWindow)[],
   nowCutoff: string | null,
+  intervalMinutes: number = consultationMinutes,
 ): { sessions: SessionSummary[]; slots: Slot[] } {
-  const booked = new Set(bookedStartTimes.map(hhmm));
+  const step = Math.max(1, Math.floor(intervalMinutes));
+  const windows = booked.map((entry) =>
+    typeof entry === 'string'
+      ? { start: toMinutes(entry), end: toMinutes(entry) + consultationMinutes }
+      : { start: toMinutes(entry.startTime), end: toMinutes(entry.endTime) },
+  );
   const cutoff = nowCutoff === null ? null : toMinutes(nowCutoff);
   const summaries: SessionSummary[] = [];
   const slots: Slot[] = [];
@@ -105,17 +129,15 @@ export function buildSlots(
   for (const session of sessions) {
     const start = toMinutes(session.startTime);
     const end = toMinutes(session.endTime);
-    const bookedInSession = [...booked].filter((time) => {
-      const minutes = toMinutes(time);
-      return minutes >= start && minutes < end;
-    }).length;
+    // An appointment belongs to the session it starts in; that is what counts against the session's capacity.
+    const bookedInSession = windows.filter((window) => window.start >= start && window.start < end).length;
     const remaining = Math.max(session.capacity - bookedInSession, 0);
     summaries.push({ ...session, booked: bookedInSession, remaining });
 
-    for (let t = start; t + consultationMinutes <= end; t += consultationMinutes) {
+    for (let t = start; t + consultationMinutes <= end; t += step) {
       const startTime = fromMinutes(t);
       let status: SlotStatus = 'AVAILABLE';
-      if (booked.has(startTime)) status = 'BOOKED';
+      if (windows.some((window) => overlaps(t, t + consultationMinutes, window.start, window.end))) status = 'BOOKED';
       else if (cutoff !== null && t <= cutoff) status = 'PAST';
       else if (remaining === 0) status = 'FULL';
       slots.push({ startTime, endTime: fromMinutes(t + consultationMinutes), status });

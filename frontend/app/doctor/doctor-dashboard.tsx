@@ -9,7 +9,7 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api';
-import { clinicClock, formatDate, formatTime, relativeDay, timeAgo } from '@/lib/format';
+import { clinicClock, formatDate, formatTimeRange, relativeDay, timeAgo } from '@/lib/format';
 import { useAutoRefresh, useClinicToday, useNow, useQuery } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 import type { DoctorAppointment, Session } from '@/lib/types';
@@ -94,7 +94,7 @@ function Overview({ session }: { session: Session }) {
               <ul className="divide-y">
                 {todays.map((a) => (
                   <li key={a.id} className="flex flex-wrap items-center gap-x-4 gap-y-2 p-4">
-                    <p className="w-24 shrink-0 font-semibold text-foreground">{formatTime(a.startTime)}</p>
+                    <p className="w-40 shrink-0 font-semibold text-foreground">{formatTimeRange(a.startTime, a.endTime, true)}</p>
                     <div className="min-w-0 flex-1">
                       <p className="font-medium text-foreground">{a.patient.name}</p>
                       <p className="text-sm text-muted-foreground">Booked {timeAgo(a.bookedAt, now)}</p>
@@ -122,7 +122,7 @@ function Overview({ session }: { session: Session }) {
               <Card className="[--card-spacing:--spacing(4)]">
                 <CardContent className="space-y-1">
                   <p className="flex flex-wrap items-center gap-2 font-semibold text-foreground">
-                    {formatDate(next.date, { weekday: 'long' })} · {formatTime(next.startTime)}
+                    {formatDate(next.date, { weekday: 'long' })} · {formatTimeRange(next.startTime, next.endTime)}
                     {relativeDay(next.date, today) && (
                       <Badge variant="secondary" className="bg-primary/10 text-primary">
                         {relativeDay(next.date, today)}

@@ -19,6 +19,17 @@ export function formatPaise(paise: number): string {
   return inrExact.format(paise / 100);
 }
 
+/**
+ * A start and end time as one range: "11:00 AM – 11:30 AM". With `compact`, the AM/PM is written once when both ends share it
+ * ("11:00 – 11:30 AM"), which is what fits inside a slot button.
+ */
+export function formatTimeRange(start: string, end: string, compact = false): string {
+  const from = formatTime(start);
+  const to = formatTime(end);
+  if (compact && from.slice(-2) === to.slice(-2)) return `${from.slice(0, -3)} – ${to}`;
+  return `${from} – ${to}`;
+}
+
 /** An instant (ISO timestamp) in clinic time: "29 Oct 2026, 2:30 pm". */
 export function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString('en-IN', { timeZone: CLINIC_TIMEZONE, day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });

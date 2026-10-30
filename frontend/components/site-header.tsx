@@ -10,9 +10,9 @@ import { initials } from '@/lib/format';
 import { signOutEverywhere, useAuthState, useHydrated, useSession } from '@/lib/session';
 import { cn } from '@/lib/utils';
 
-function Brand() {
+function Brand({ href = '/' }: { href?: string }) {
   return (
-    <Link href="/" className="flex items-center gap-2 text-lg font-bold tracking-tight text-foreground">
+    <Link href={href} className="flex items-center gap-2 text-lg font-bold tracking-tight text-foreground">
       <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground" aria-hidden>
         <StethoscopeIcon className="size-4.5" />
       </span>
@@ -51,7 +51,8 @@ export function SiteHeader() {
   return (
     <header className="sticky top-0 z-30 border-b bg-card/95 backdrop-blur">
       <div className="flex h-14 items-center justify-between gap-4 px-4 lg:px-6">
-        <Brand />
+        {/* A signed-in patient's home is their dashboard (it is not in the sidebar); everyone else's is the doctor list. */}
+        <Brand href={hydrated && session?.user.role === 'PATIENT' ? '/dashboard' : '/'} />
 
         {/* Rendered only after hydration so the server and browser markup match. */}
         <div className="flex items-center gap-2 text-sm">

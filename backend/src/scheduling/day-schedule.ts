@@ -1,6 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { EntityManager, In } from 'typeorm';
-import { ACTIVE_STATUSES, Appointment, Availability, Doctor, ScheduleOverride } from '../database/entities/index.js';
+import { ACTIVE_STATUSES, Appointment, Availability, Doctor, ScheduleOverride, slotIntervalOf } from '../database/entities/index.js';
 import { addDays, clinicNow, dayOfWeek, isValidDate } from './calendar.js';
 import { buildSlots, resolveSessions, type DateOverride, type WeeklyHours } from './slots.js';
 
@@ -33,7 +33,7 @@ export async function loadDaySchedule(
   const overrideRow = await manager.findOneBy(ScheduleOverride, { doctorId, overrideDate: date });
   const weeklyRows = await manager.findBy(Availability, { doctorId, dayOfWeek: dayOfWeek(date) });
   const activeRows = await manager.find(Appointment, {
-    select: { startTime: true, status: true, holdExpiresAt: true },
+    select: { startTime: true, endTime: true, status: true, holdExpiresAt: true },
     where: { doctorId, appointmentDate: date, status: In(ACTIVE_STATUSES) },
   });
   // An unpaid hold whose time has run out no longer occupies its slot, even before the background worker cancels it, so a
@@ -65,14 +65,17 @@ export async function loadDaySchedule(
   const result = buildSlots(
     sessions,
     doctor.consultationMinutes,
-    bookedRows.map((row) => row.startTime),
+    // Full windows, so a booking blocks every slot that overlaps it, not only the one with the same start.
+    bookedRows.map((row) => ({ startTime: row.startTime, endTime: row.endTime })),
     cutoff,
+    slotIntervalOf(doctor),
   );
 
   return {
     doctorId,
     date,
     consultationMinutes: doctor.consultationMinutes,
+    slotIntervalMinutes: slotIntervalOf(doctor),
     unavailableReason: override && !override.isAvailable ? (override.reason ?? 'Not available on this date') : null,
     ...result,
   };

@@ -6,7 +6,7 @@ import { Field, controlClass, fieldProps } from '@/components/form-field';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { ApiError, api, errorMessage } from '@/lib/api';
-import { formatDate, formatTime } from '@/lib/format';
+import { formatDate, formatTimeRange } from '@/lib/format';
 import type { DoctorAppointment, Session } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { fieldErrorsFromApi } from '@/lib/validation';
@@ -90,7 +90,7 @@ function CancelForm({
         <DialogTitle>Cancel this appointment?</DialogTitle>
         <DialogDescription>
           <span className="font-medium text-foreground">{appointment.patient.name}</span> ·{' '}
-          {formatDate(appointment.date, { weekday: 'long' })}, {formatTime(appointment.startTime)}
+          {formatDate(appointment.date, { weekday: 'long' })}, {formatTimeRange(appointment.startTime, appointment.endTime)}
         </DialogDescription>
         <p className="mt-2 text-sm text-muted-foreground">
           The patient will see your reason in their appointment history, and this time becomes available to others again. If they paid online, they are refunded in full automatically.

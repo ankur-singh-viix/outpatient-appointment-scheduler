@@ -52,6 +52,8 @@ export interface Doctor {
   bio: string | null;
   consultationFee: number;
   consultationMinutes: number;
+  /** A new bookable slot starts this often. Shorter than the visit length means slots overlap (30-minute visits every 15 minutes). */
+  slotIntervalMinutes: number;
   specialty: Specialty;
   clinic: { name: string; address: string };
   weeklyHours: WeeklyWindow[];
@@ -91,6 +93,7 @@ export interface DaySchedule {
   doctorId: string;
   date: string;
   consultationMinutes: number;
+  slotIntervalMinutes: number;
   unavailableReason: string | null;
   sessions: SessionSummary[];
   slots: Slot[];
@@ -157,7 +160,42 @@ export interface PaymentSummary {
 
 /** One row of the payment history. */
 export interface PaymentHistoryItem extends PaymentSummary {
-  appointment: { id: string; date: string; startTime: string; status: AppointmentStatus; doctorName: string; clinicName: string };
+  /** When the payment was started. */
+  createdAt: string;
+  appointment: {
+    id: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    status: AppointmentStatus;
+    doctorName: string;
+    specialty: string;
+    clinicName: string;
+    clinicAddress: string;
+  };
+}
+
+/** A message CareSlot sent the patient (or a reminder still to come). */
+export interface NotificationItem {
+  id: string;
+  kind: string;
+  subject: string;
+  body: string;
+  /** SENT: delivered. SCHEDULED: a reminder waiting for its time. QUEUED: due and about to go out. */
+  status: 'SENT' | 'SCHEDULED' | 'QUEUED';
+  at: string;
+  appointmentId: string;
+}
+
+/** The signed-in patient's own details. Null fields are ones they never gave. */
+export interface PatientProfile {
+  name: string;
+  email: string;
+  memberSince: string;
+  phone: string | null;
+  dateOfBirth: string | null;
+  gender: string | null;
+  address: string | null;
 }
 
 /** What the browser needs to open Razorpay Checkout. Contains only the public key id. */
@@ -210,6 +248,10 @@ export interface DateOverride {
 
 export interface DoctorAvailability {
   consultationMinutes: number;
+  /** Minutes between the starts of slots (equals consultationMinutes unless the doctor chose a shorter interval). */
+  slotIntervalMinutes: number;
+  /** True when the doctor chose their own interval; false while it simply follows the visit length. */
+  slotIntervalCustom: boolean;
   defaultCapacity: number;
   weekly: WeeklyHours[];
   overrides: DateOverride[];

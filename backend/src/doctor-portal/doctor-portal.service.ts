@@ -5,7 +5,7 @@ import type { AuthUser } from '../auth/auth.types.js';
 import { loadConfig } from '../config.js';
 import { withDoctorTitle } from '../common/names.js';
 import { changeBlockedReason } from '../scheduling/appointment-rules.js';
-import { ACTIVE_STATUSES, Appointment, Availability, Clinic, Doctor, ScheduleOverride, Specialty, User } from '../database/entities/index.js';
+import { ACTIVE_STATUSES, Appointment, Availability, Clinic, Doctor, ScheduleOverride, Specialty, User, slotIntervalOf } from '../database/entities/index.js';
 import { clinicNow, isValidDate } from '../scheduling/calendar.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
@@ -104,6 +104,10 @@ export class DoctorPortalService {
     });
     return {
       consultationMinutes: doctor.consultationMinutes,
+      /** Minutes between the starts of slots. Equals consultationMinutes unless the doctor chose a shorter (overlapping) interval. */
+      slotIntervalMinutes: slotIntervalOf(doctor),
+      /** True when the doctor chose their own interval, false while it simply follows the appointment length. */
+      slotIntervalCustom: doctor.slotIntervalMinutes !== null,
       defaultCapacity: doctor.defaultDailyCapacity,
       weekly: weekly.map((row) => ({
         dayOfWeek: row.dayOfWeek,
@@ -183,8 +187,9 @@ export class DoctorPortalService {
    * could overlap an existing booking). The doctor row lock is the one booking takes, so a booking in flight
    * either finishes first and is counted here, or waits and sees the new length.
    */
-  async updateSettings(user: AuthUser, consultationMinutes: number) {
+  async updateSettings(user: AuthUser, settings: { consultationMinutes?: number; slotIntervalMinutes?: number | null }) {
     const doctor = await this.profileFor(user);
+    const consultationMinutes = settings.consultationMinutes ?? doctor.consultationMinutes;
     if (consultationMinutes !== doctor.consultationMinutes) {
       const today = clinicNow(this.config.clinicTimezone).date;
       const weekly = await this.availabilityRepo.findBy({ doctorId: doctor.id });
@@ -209,6 +214,11 @@ export class DoctorPortalService {
         }
         await manager.update(Doctor, { id: doctor.id }, { consultationMinutes });
       });
+    }
+    // The interval only changes WHICH start times are offered, never an existing booking, and booking refuses any overlap
+    // with what is already booked, so unlike the appointment length it can change at any time. null = follow the length.
+    if (settings.slotIntervalMinutes !== undefined && settings.slotIntervalMinutes !== doctor.slotIntervalMinutes) {
+      await this.doctors.update({ id: doctor.id }, { slotIntervalMinutes: settings.slotIntervalMinutes });
     }
     return this.availability(user);
   }

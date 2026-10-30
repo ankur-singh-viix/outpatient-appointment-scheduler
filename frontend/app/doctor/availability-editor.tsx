@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { api, errorMessage } from '@/lib/api';
-import { DAY_LONG, WEEK_ORDER, formatDate, formatTime } from '@/lib/format';
+import { DAY_LONG, WEEK_ORDER, formatDate, formatTime, formatTimeRange } from '@/lib/format';
 import { useClinicToday } from '@/lib/hooks';
 import type { DoctorAvailability, Session, WeeklyHours } from '@/lib/types';
 
@@ -21,15 +21,37 @@ interface EditorProps {
 type Feedback = { tone: 'success' | 'error'; message: string } | null;
 
 const SLOT_LENGTHS = [10, 15, 20, 30, 45, 60];
+const SLOT_INTERVALS = [5, 10, 15, 20, 30, 45, 60];
+const FOLLOW = 'follow';
 
-/** Edits how long each appointment slot is (the doctor's consultation length). */
+const toClock = (total: number) => `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+
+/** What the doctor's patients would see from 11:00: the first few slot windows for this length and interval. */
+function previewWindows(length: number, interval: number): string[] {
+  return [0, 1, 2, 3].map((n) => {
+    const start = 11 * 60 + n * interval;
+    return formatTimeRange(toClock(start), toClock(start + length));
+  });
+}
+
+/** Edits how long each appointment is, and how often a new slot starts (shorter than the length makes slots overlap). */
 export function SlotLengthEditor({ session, availability, onSaved }: EditorProps) {
   const [minutes, setMinutes] = useState(availability.consultationMinutes);
+  const [interval, setIntervalChoice] = useState<number | typeof FOLLOW>(availability.slotIntervalCustom ? availability.slotIntervalMinutes : FOLLOW);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
-  const options = SLOT_LENGTHS.includes(availability.consultationMinutes)
+  const lengths = SLOT_LENGTHS.includes(availability.consultationMinutes)
     ? SLOT_LENGTHS
     : [...SLOT_LENGTHS, availability.consultationMinutes].sort((a, b) => a - b);
+  const intervals =
+    availability.slotIntervalCustom && !SLOT_INTERVALS.includes(availability.slotIntervalMinutes)
+      ? [...SLOT_INTERVALS, availability.slotIntervalMinutes].sort((a, b) => a - b)
+      : SLOT_INTERVALS;
+
+  const effectiveInterval = interval === FOLLOW ? minutes : interval;
+  const lengthChanged = minutes !== availability.consultationMinutes;
+  const intervalChanged = (interval === FOLLOW ? null : interval) !== (availability.slotIntervalCustom ? availability.slotIntervalMinutes : null);
+  const overlapping = effectiveInterval < minutes;
 
   const save = async () => {
     setSaving(true);
@@ -38,9 +60,15 @@ export function SlotLengthEditor({ session, availability, onSaved }: EditorProps
       await api('/doctor-portal/settings', {
         method: 'PUT',
         token: session.accessToken,
-        body: { consultationMinutes: minutes },
+        body: {
+          ...(lengthChanged && { consultationMinutes: minutes }),
+          ...(intervalChanged && { slotIntervalMinutes: interval === FOLLOW ? null : interval }),
+        },
       });
-      setFeedback({ tone: 'success', message: `Slot length set to ${minutes} minutes. Patients now see ${minutes}-minute slots.` });
+      setFeedback({
+        tone: 'success',
+        message: `Saved. Patients now see ${minutes}-minute appointments, with a new slot starting every ${effectiveInterval} minutes.`,
+      });
       onSaved();
     } catch (error) {
       setFeedback({ tone: 'error', message: errorMessage(error) });
@@ -49,39 +77,60 @@ export function SlotLengthEditor({ session, availability, onSaved }: EditorProps
     }
   };
 
+  const selectClass =
+    'h-9 w-full rounded-lg border border-input bg-card px-2.5 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50';
+
   return (
     <Card className="[--card-spacing:--spacing(5)]">
       <CardHeader>
         <CardTitle as="h2" className="text-lg font-semibold">
-          Slot length
+          Appointment length and slot interval
         </CardTitle>
         <CardDescription>
-          How long each appointment slot is. It can only change when you have no upcoming appointments, because existing
-          bookings would no longer line up with the new slots.
+          Each appointment has a start and an end time. The interval is how often a new slot starts: when it is shorter than the
+          appointment, slots overlap, and booking one blocks every window that shares time with it. The appointment length can only
+          change when you have no upcoming appointments; the interval can change at any time.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {feedback && <Alert tone={feedback.tone}>{feedback.message}</Alert>}
-        <div className="flex flex-wrap items-end gap-3">
+        <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
-            <Label htmlFor="slot-length">Minutes per appointment</Label>
-            <select
-              id="slot-length"
-              value={minutes}
-              onChange={(event) => setMinutes(Number(event.target.value))}
-              className="h-9 w-40 rounded-lg border border-input bg-card px-2.5 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-            >
-              {options.map((m) => (
+            <Label htmlFor="slot-length">Appointment length</Label>
+            <select id="slot-length" value={minutes} onChange={(event) => setMinutes(Number(event.target.value))} className={selectClass}>
+              {lengths.map((m) => (
                 <option key={m} value={m}>
                   {m} minutes
                 </option>
               ))}
             </select>
           </div>
-          <Button size="lg" onClick={save} disabled={saving || minutes === availability.consultationMinutes}>
-            {saving ? 'Saving…' : 'Save slot length'}
-          </Button>
+          <div className="space-y-2">
+            <Label htmlFor="slot-interval">Start a new slot every</Label>
+            <select
+              id="slot-interval"
+              value={interval}
+              onChange={(event) => setIntervalChoice(event.target.value === FOLLOW ? FOLLOW : Number(event.target.value))}
+              className={selectClass}
+            >
+              <option value={FOLLOW}>Same as appointment length ({minutes} min)</option>
+              {intervals.map((m) => (
+                <option key={m} value={m}>
+                  {m} minutes
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
+        <div className="rounded-lg bg-muted p-3 text-sm" aria-live="polite">
+          <p className="font-medium text-foreground">
+            Example from 11:00 AM {overlapping ? '(slots overlap)' : effectiveInterval > minutes ? '(gaps between slots)' : '(back to back)'}
+          </p>
+          <p className="mt-1 text-muted-foreground">{previewWindows(minutes, effectiveInterval).join(', ')}, …</p>
+        </div>
+        <Button size="lg" onClick={save} disabled={saving || (!lengthChanged && !intervalChanged)}>
+          {saving ? 'Saving…' : 'Save'}
+        </Button>
       </CardContent>
     </Card>
   );
@@ -128,8 +177,8 @@ export function WeeklyHoursEditor({ session, availability, onSaved }: EditorProp
           Weekly working hours
         </CardTitle>
         <CardDescription>
-          Patients book {availability.consultationMinutes}-minute slots inside these hours. Capacity is the maximum number of
-          bookings per session.
+          Patients book {availability.consultationMinutes}-minute appointments inside these hours, with a new slot starting every{' '}
+          {availability.slotIntervalMinutes} minutes. Capacity is the maximum number of bookings per session.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

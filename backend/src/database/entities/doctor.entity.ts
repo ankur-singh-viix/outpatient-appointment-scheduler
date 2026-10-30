@@ -44,6 +44,13 @@ export class Doctor {
   @Column({ name: 'consultation_minutes', type: 'integer', default: 15 })
   consultationMinutes: number;
 
+  /**
+   * How often a new bookable slot starts. Null (the default, and every doctor from before this existed) means the same as
+   * `consultationMinutes`, so slots follow one another. Shorter than the appointment length gives overlapping slots.
+   */
+  @Column({ name: 'slot_interval_minutes', type: 'integer', nullable: true })
+  slotIntervalMinutes: number | null;
+
   @Column({ name: 'default_daily_capacity', type: 'integer', default: 20 })
   defaultDailyCapacity: number;
 
@@ -56,4 +63,9 @@ export class Doctor {
 
   @OneToMany(() => Availability, (availability) => availability.doctor)
   availability: Relation<Availability[]>;
+}
+
+/** Minutes between the starts of consecutive slots: the doctor's own setting, or the appointment length when none is set. */
+export function slotIntervalOf(doctor: Pick<Doctor, 'consultationMinutes' | 'slotIntervalMinutes'>): number {
+  return doctor.slotIntervalMinutes ?? doctor.consultationMinutes;
 }

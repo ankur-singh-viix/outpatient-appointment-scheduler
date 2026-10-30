@@ -1,5 +1,5 @@
 import { addDays, dayOfWeek } from './calendar.js';
-import { buildSlots, resolveSessions, type DateOverride, type WeeklyHours } from './slots.js';
+import { buildSlots, resolveSessions, type BookedWindow, type DateOverride, type WeeklyHours } from './slots.js';
 
 export interface NextSlot {
   date: string;
@@ -9,13 +9,15 @@ export interface NextSlot {
 
 export interface NextAvailableInput {
   consultationMinutes: number;
+  /** A new slot starts this often. Defaults to the appointment length. */
+  slotIntervalMinutes?: number;
   defaultCapacity: number;
   /** The doctor's weekly sessions, for any day of the week. */
   weekly: (WeeklyHours & { dayOfWeek: number })[];
   /** Date exceptions, keyed by YYYY-MM-DD. */
   overrides: Map<string, DateOverride>;
-  /** Start times of ACTIVE appointments, keyed by YYYY-MM-DD. */
-  booked: Map<string, string[]>;
+  /** ACTIVE appointments, keyed by YYYY-MM-DD: their start times, or full start-end windows. */
+  booked: Map<string, (string | BookedWindow)[]>;
   /** The current date and time in the clinic time zone. */
   today: { date: string; time: string };
   /** How many days to look through, counting today. */
@@ -39,6 +41,7 @@ export function findNextAvailable(input: NextAvailableInput): NextSlot | null {
       input.consultationMinutes,
       input.booked.get(date) ?? [],
       offset === 0 ? input.today.time : null,
+      input.slotIntervalMinutes ?? input.consultationMinutes,
     );
     const free = slots.find((slot) => slot.status === 'AVAILABLE');
     if (free) return { date, startTime: free.startTime, endTime: free.endTime };

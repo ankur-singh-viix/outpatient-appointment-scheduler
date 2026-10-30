@@ -64,3 +64,23 @@ describe('findNextAvailable', () => {
     expect(findNextAvailable(input({ days: 1, today: { date: '2026-11-04', time: '12:00' } }))).toBeNull();
   });
 });
+
+describe('findNextAvailable with overlapping slots', () => {
+  it('offers overlapping starts, and skips every window that shares time with a booking', () => {
+    // 30-minute appointments every 15 minutes in 10:00-11:00: starts 10:00, 10:15, 10:30.
+    const base = { consultationMinutes: 30, slotIntervalMinutes: 15 };
+    expect(findNextAvailable(input(base))).toEqual({ date: '2026-11-04', startTime: '10:00', endTime: '10:30' });
+    // 10:00-10:30 is booked, which also blocks 10:15-10:45; the next free window is 10:30-11:00.
+    expect(findNextAvailable(input({ ...base, booked: new Map([['2026-11-04', [{ startTime: '10:00', endTime: '10:30' }]]]) }))).toEqual({
+      date: '2026-11-04',
+      startTime: '10:30',
+      endTime: '11:00',
+    });
+  });
+
+  it('moves to the next day when the overlaps leave nothing free today', () => {
+    const booked = new Map([['2026-11-04', [{ startTime: '10:15', endTime: '10:45' }]]]);
+    // 10:15-10:45 blocks 10:00-10:30, 10:15-10:45 and 10:30-11:00: the whole session.
+    expect(findNextAvailable(input({ consultationMinutes: 30, slotIntervalMinutes: 15, booked }))?.date).toBe('2026-11-05');
+  });
+});

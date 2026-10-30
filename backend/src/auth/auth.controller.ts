@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, HttpCode, Post, UseGuards } from '@nest
 import { z } from 'zod';
 import { ZodValidationPipe } from '../common/zod-validation.pipe.js';
 import { profileSchema } from './auth.schemas.js';
-import { CurrentUser } from './auth.decorators.js';
+import { CurrentUser, Roles } from './auth.decorators.js';
 import { AuthGuard } from './auth.guard.js';
 import { AuthService } from './auth.service.js';
 import type { AuthUser } from './auth.types.js';
@@ -72,5 +72,13 @@ export class AuthController {
   @UseGuards(AuthGuard)
   me(@CurrentUser() user: AuthUser) {
     return this.auth.me(user.id);
+  }
+
+  /** The patient's own details (read only), for the My Profile page. */
+  @Get('me/profile')
+  @UseGuards(AuthGuard)
+  @Roles('PATIENT')
+  profile(@CurrentUser() user: AuthUser) {
+    return this.auth.patientProfile(user.id);
   }
 }

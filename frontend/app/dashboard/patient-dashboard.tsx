@@ -3,7 +3,7 @@
 import { ArrowRightIcon, CalendarCheckIcon, CalendarPlusIcon, ClockIcon, MapPinIcon, SearchIcon } from 'lucide-react';
 import Link from 'next/link';
 import { Alert, EmptyState, PageHeader, StatusBadge } from '@/components/common';
-import { PaymentInfo } from '@/components/payment-info';
+import { PaymentChip } from '@/components/payment-info';
 import { PaymentStep } from '@/components/payment-step';
 import { RequireRole } from '@/components/require-role';
 import { Badge } from '@/components/ui/badge';
@@ -11,7 +11,7 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api';
-import { formatDate, formatFee, formatTime, relativeDay } from '@/lib/format';
+import { formatDate, formatFee, formatTimeRange, relativeDay } from '@/lib/format';
 import { useClinicToday, useQuery } from '@/lib/hooks';
 import type { PatientAppointment, Session } from '@/lib/types';
 
@@ -67,7 +67,7 @@ function Dashboard({ session }: { session: Session }) {
 
       {doctorCancelled.map((a) => (
         <Alert key={a.id}>
-          {a.doctor.name} cancelled your appointment on {formatDate(a.date, { weekday: 'long' })} at {formatTime(a.startTime)}.
+          {a.doctor.name} cancelled your appointment on {formatDate(a.date, { weekday: 'long' })}, {formatTimeRange(a.startTime, a.endTime)}.
           {a.cancelReason && <> Reason: {a.cancelReason}</>} ·{' '}
           <Link href={`/doctors/${a.doctor.id}`} className="font-semibold underline underline-offset-2">
             Book another time
@@ -121,7 +121,7 @@ function Dashboard({ session }: { session: Session }) {
                 </div>
                 <div className="min-w-0 flex-1 space-y-1">
                   <p className="flex flex-wrap items-center gap-2 font-semibold text-foreground">
-                    {formatDate(next.date, { weekday: 'long' })} · {formatTime(next.startTime)}
+                    {formatDate(next.date, { weekday: 'long' })} · {formatTimeRange(next.startTime, next.endTime)}
                     {relativeDay(next.date, today) && (
                       <Badge variant="secondary" className="bg-primary/10 text-primary">
                         {relativeDay(next.date, today)}
@@ -141,7 +141,7 @@ function Dashboard({ session }: { session: Session }) {
               {next.status === 'PENDING' && next.holdExpiresAt && (
                 <PaymentStep appointment={next} session={session} onPaid={appointments.reload} onCancelled={appointments.reload} onExpired={appointments.reload} />
               )}
-              {next.payment && <PaymentInfo payment={next.payment} />}
+              {next.payment && <PaymentChip payment={next.payment} />}
               <div className="flex flex-wrap gap-2 border-t pt-4">
                 {next.status === 'CONFIRMED' && (
                   <Link

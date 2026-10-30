@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { Badge } from '@/components/ui/badge';
 import { formatDateTime, formatPaise } from '@/lib/format';
 import { cn } from '@/lib/utils';
@@ -8,8 +9,8 @@ const LABELS: Record<PaymentDisplayStatus, { text: string; style: string }> = {
   REFUND_PENDING: { text: 'Refund in progress', style: 'bg-amber-50 text-amber-700' },
   PARTIALLY_REFUNDED: { text: 'Partly refunded', style: 'bg-sky-50 text-sky-700' },
   REFUNDED: { text: 'Refunded', style: 'bg-sky-50 text-sky-700' },
-  PAYMENT_PENDING: { text: 'Payment pending', style: 'bg-amber-50 text-amber-700' },
-  PAYMENT_FAILED: { text: 'Payment failed', style: 'bg-red-50 text-red-700' },
+  PAYMENT_PENDING: { text: 'Pending', style: 'bg-amber-50 text-amber-700' },
+  PAYMENT_FAILED: { text: 'Failed', style: 'bg-red-50 text-red-700' },
   EXPIRED: { text: 'Not paid', style: 'bg-slate-100 text-slate-600' },
 };
 
@@ -19,6 +20,23 @@ export function PaymentBadge({ status }: { status: PaymentDisplayStatus }) {
     <Badge variant="secondary" className={cn('font-semibold', style)}>
       {text}
     </Badge>
+  );
+}
+
+/**
+ * A one-line payment indicator for appointment cards: the status, the amount and a link to the full record. The refund history,
+ * receipt and transaction details live on the Payments & Receipts page, not here.
+ */
+export function PaymentChip({ payment }: { payment: PaymentSummary }) {
+  if (payment.displayStatus === 'EXPIRED' || payment.displayStatus === 'PAYMENT_PENDING') return null;
+  return (
+    <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm" data-testid="payment-chip">
+      <PaymentBadge status={payment.displayStatus} />
+      <span className="text-foreground/80">{formatPaise(payment.amountPaise)}</span>
+      <Link href="/payments" className="rounded font-medium text-primary hover:underline focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none">
+        {payment.receiptNumber ? 'Receipt and details' : 'Payment details'}
+      </Link>
+    </p>
   );
 }
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { CalendarCheckIcon, CalendarClockIcon, LayoutDashboardIcon, SearchIcon, UserRoundIcon, type LucideIcon } from 'lucide-react';
+import { BellIcon, CalendarCheckIcon, CalendarClockIcon, LayoutDashboardIcon, ReceiptIcon, SearchIcon, UserRoundIcon, type LucideIcon } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import { useHydrated, useSession } from '@/lib/session';
 import type { Role } from '@/lib/types';
@@ -21,10 +21,13 @@ interface NavDefinition {
 }
 
 const NAV: Partial<Record<Role, NavDefinition[]>> = {
+  // Sign out is the last item of the patient sidebar too; it is an action, not a page, so the sidebar adds it itself.
   PATIENT: [
-    { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboardIcon, match: (p) => p === '/dashboard' },
-    { href: '/', label: 'Find doctors', icon: SearchIcon, match: (p) => p === '/' || p.startsWith('/doctors') },
-    { href: '/appointments', label: 'My appointments', icon: CalendarCheckIcon, match: (p) => p.startsWith('/appointments') },
+    { href: '/', label: 'Find Doctors', icon: SearchIcon, match: (p) => p === '/' || p.startsWith('/doctors') },
+    { href: '/appointments', label: 'My Appointments', icon: CalendarCheckIcon, match: (p) => p.startsWith('/appointments') },
+    { href: '/payments', label: 'Payments & Receipts', icon: ReceiptIcon, match: (p) => p.startsWith('/payments') },
+    { href: '/notifications', label: 'Notifications', icon: BellIcon, match: (p) => p.startsWith('/notifications') },
+    { href: '/profile', label: 'My Profile', icon: UserRoundIcon, match: (p) => p.startsWith('/profile') },
   ],
   DOCTOR: [
     { href: '/doctor', label: 'Dashboard', icon: LayoutDashboardIcon, match: (p) => p === '/doctor' },

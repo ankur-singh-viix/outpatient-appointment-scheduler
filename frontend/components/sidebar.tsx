@@ -1,8 +1,9 @@
 'use client';
 
+import { LogOutIcon } from 'lucide-react';
 import Link from 'next/link';
 import { useNavItems } from '@/components/nav';
-import { useSession } from '@/lib/session';
+import { signOutEverywhere, useSession } from '@/lib/session';
 import { cn } from '@/lib/utils';
 
 /** The persistent left workspace sidebar. Large screens only; phones get the strip under the top bar instead. */
@@ -40,6 +41,16 @@ export function Sidebar() {
           ))}
         </ul>
       </nav>
+      {session.user.role === 'PATIENT' && (
+        <button
+          type="button"
+          onClick={() => void signOutEverywhere()}
+          className="mt-3 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium text-sidebar-foreground/90 outline-none transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+        >
+          <LogOutIcon className="size-4.5 shrink-0" aria-hidden />
+          Sign out
+        </button>
+      )}
       <p className="mt-auto rounded-lg bg-sidebar-accent/60 px-3 py-2 text-xs text-sidebar-foreground/90">
         Times are shown in the clinic&apos;s time zone (IST).
       </p>

@@ -10,7 +10,7 @@ import { DataSource, EntityManager, Repository } from 'typeorm';
 import type { AuthUser } from '../auth/auth.types.js';
 import { loadConfig } from '../config.js';
 import { Appointment, Doctor, Patient } from '../database/entities/index.js';
-import { isUniqueViolation } from '../database/errors.js';
+import { isSlotConflict } from '../database/errors.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import type { PaymentSummary } from '../payments/payment-summary.js';
@@ -102,7 +102,7 @@ export class AppointmentsService {
         return saved.id;
       });
     } catch (error) {
-      if (isUniqueViolation(error)) throw new ConflictException(SLOT_TAKEN);
+      if (isSlotConflict(error)) throw new ConflictException(SLOT_TAKEN);
       throw error;
     }
 
@@ -207,7 +207,7 @@ export class AppointmentsService {
       this.notifications.kick();
       return this.findOne(newId);
     } catch (error) {
-      if (isUniqueViolation(error)) throw new ConflictException(SLOT_TAKEN);
+      if (isSlotConflict(error)) throw new ConflictException(SLOT_TAKEN);
       throw error;
     }
   }

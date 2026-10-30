@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { api } from '@/lib/api';
-import { addDays, clinicClock, dayOfWeek, DAY_SHORT, formatDate, formatTime, relativeDay, timeAgo } from '@/lib/format';
+import { addDays, clinicClock, DAY_SHORT, dayOfWeek, formatDate, formatTimeRange, relativeDay, timeAgo } from '@/lib/format';
 import { useAutoRefresh, useClinicToday, useNow, useQuery } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 import type { DoctorAppointment, Session } from '@/lib/types';
@@ -157,9 +157,10 @@ function AppointmentsView({ session }: { session: Session }) {
                     const cancelled = a.status === 'CANCELLED';
                     return (
                       <li key={a.id} className={cn('flex flex-wrap items-center gap-x-4 gap-y-3 p-4 sm:flex-nowrap', cancelled && 'bg-muted/40')}>
-                        <div className="w-20 shrink-0 sm:w-24">
-                          <p className={cn('font-semibold text-foreground', cancelled && 'text-muted-foreground line-through')}>{formatTime(a.startTime)}</p>
-                          <p className="text-xs text-muted-foreground">until {formatTime(a.endTime)}</p>
+                        <div className="w-full shrink-0 sm:w-44">
+                          <p className={cn('font-semibold text-foreground', cancelled && 'text-muted-foreground line-through')}>
+                            {formatTimeRange(a.startTime, a.endTime, true)}
+                          </p>
                         </div>
                         <div className="min-w-0 flex-1 basis-40">
                           <p className="flex flex-wrap items-center gap-2 font-medium text-foreground">
@@ -188,7 +189,7 @@ function AppointmentsView({ session }: { session: Session }) {
                               variant="outline"
                               size="sm"
                               className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
-                              aria-label={`Cancel appointment with ${a.patient.name} at ${formatTime(a.startTime)}`}
+                              aria-label={`Cancel appointment with ${a.patient.name} at ${formatTimeRange(a.startTime, a.endTime)}`}
                               onClick={() => setCancelling(a)}
                             >
                               Cancel

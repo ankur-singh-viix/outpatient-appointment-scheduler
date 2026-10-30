@@ -12,7 +12,7 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { api, errorMessage } from '@/lib/api';
 import { BOOKING_DAYS_SHOWN } from '@/lib/config';
-import { addDays, dayOfWeek, DAY_SHORT, formatDate, formatFee, formatTime, initials, summariseWeeklyHours } from '@/lib/format';
+import { addDays, DAY_SHORT, dayOfWeek, formatDate, formatFee, formatTime, formatTimeRange, initials, summariseWeeklyHours } from '@/lib/format';
 import { useClinicToday, useQuery } from '@/lib/hooks';
 import { useHydrated, useSession } from '@/lib/session';
 import { cn } from '@/lib/utils';
@@ -86,7 +86,7 @@ export function BookingFlow() {
       {held && session ? (
         <div className="mx-auto max-w-xl space-y-4">
           <Alert tone="info">
-            Your slot with {held.doctor.name} on {formatDate(held.date, { weekday: 'long' })} at {formatTime(held.startTime)} is reserved.
+            Your slot with {held.doctor.name} on {formatDate(held.date, { weekday: 'long' })}, {formatTimeRange(held.startTime, held.endTime)}, is reserved.
             Complete the payment to confirm it.
           </Alert>
           <PaymentStep
@@ -290,7 +290,7 @@ function SlotPicker({
         <div className="lg:col-span-2">
           <Alert tone="info">
             Rescheduling your appointment on {formatDate(rescheduling.date, { weekday: 'long' })} at{' '}
-            {formatTime(rescheduling.startTime)}. Pick a new time below. Your current appointment is kept until you confirm.
+            {formatTimeRange(rescheduling.startTime, rescheduling.endTime)}. Pick a new time below. Your current appointment is kept until you confirm.
           </Alert>
         </div>
       )}
@@ -385,7 +385,7 @@ function SlotPicker({
                           {s.remaining === 0 ? 'Session full' : `${s.remaining} of ${s.capacity} bookings left`}
                         </span>
                       </div>
-                      <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5">
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                         {sessionSlots.map((slot) => {
                           const isSelected = selected?.startTime === slot.startTime;
                           const bookable = slot.status === 'AVAILABLE';
@@ -395,7 +395,7 @@ function SlotPicker({
                               variant="outline"
                               disabled={!bookable}
                               aria-pressed={isSelected}
-                              aria-label={`${formatTime(slot.startTime)}, ${isSelected ? 'selected' : SLOT_LABEL[slot.status].toLowerCase()}`}
+                              aria-label={`${formatTimeRange(slot.startTime, slot.endTime)}, ${isSelected ? 'selected' : SLOT_LABEL[slot.status].toLowerCase()}`}
                               onClick={() => chooseSlot(slot)}
                               className={cn(
                                 'h-12 flex-col gap-0 font-semibold transition-all disabled:opacity-100',
@@ -406,7 +406,7 @@ function SlotPicker({
                             >
                               <span className={cn('flex items-center gap-1', slot.status === 'BOOKED' && 'line-through')}>
                                 {isSelected && <CheckIcon className="size-3.5" aria-hidden />}
-                                {formatTime(slot.startTime)}
+                                {formatTimeRange(slot.startTime, slot.endTime, true)}
                               </span>
                               {!bookable && <span className="text-[10px] font-medium tracking-wide uppercase">{SLOT_LABEL[slot.status]}</span>}
                             </Button>

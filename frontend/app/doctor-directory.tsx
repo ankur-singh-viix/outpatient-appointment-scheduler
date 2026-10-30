@@ -10,7 +10,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api';
-import { formatDate, formatFee, formatTime, initials, relativeDay, summariseWeeklyHours } from '@/lib/format';
+import { formatDate, formatFee, formatTimeRange, initials, relativeDay, summariseWeeklyHours } from '@/lib/format';
 import { useClinicToday, useDebounced, useQuery } from '@/lib/hooks';
 import type { Doctor, Specialty } from '@/lib/types';
 
@@ -226,7 +226,7 @@ function DoctorCard({ doctor }: { doctor: Doctor }) {
               <span>
                 Next available:{' '}
                 <span className="font-semibold">
-                  {relativeDay(next.date, today) ?? formatDate(next.date, { year: undefined })}, {formatTime(next.startTime)}
+                  {relativeDay(next.date, today) ?? formatDate(next.date, { year: undefined })}, {formatTimeRange(next.startTime, next.endTime, true)}
                 </span>
               </span>
             ) : (

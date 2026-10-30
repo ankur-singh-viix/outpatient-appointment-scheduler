@@ -929,16 +929,47 @@ describe('Payments, refunds and notifications (e2e)', () => {
       expect(history[0].refunds[0]).toMatchObject({ status: 'PROCESSED', reference: refund.razorpay_refund_id });
     });
 
-    it("shows another patient's payments to nobody, and hides abandoned never-paid orders", async () => {
+    it("shows another patient's payments to nobody", async () => {
       const paid = await hold();
       await payFor(paid.orderId);
-      await hold(patientToken, '10:15'); // an unpaid hold: not part of the history
       const mine = (await http().get('/api/payments/mine').set(as(patientToken)).expect(200)).body;
       expect(mine).toHaveLength(1);
       const theirs = (await http().get('/api/payments/mine').set(as(otherPatientToken)).expect(200)).body;
       expect(theirs).toHaveLength(0);
       await http().get('/api/payments/mine').expect(401);
       await http().get('/api/payments/mine').set(as(doctorToken)).expect(403);
+    });
+
+    it('lists a booking still waiting for payment as pending, a failed attempt as failed, and drops abandoned orders', async () => {
+      const waiting = await hold(patientToken, '10:00');
+      const failing = await hold(patientToken, '10:15');
+      await webhook({ event: 'payment.failed', payload: { payment: { entity: { id: 'pay_x', order_id: failing.orderId, error_description: 'Card declined' } } } }).expect(200);
+      const abandoned = await hold(patientToken, '10:30');
+      await db.query("UPDATE appointments SET hold_expires_at = now() - interval '1 minute' WHERE id = $1", [abandoned.id]);
+      await paymentsService.expireHolds();
+
+      const history = (await http().get('/api/payments/mine').set(as(patientToken)).expect(200)).body as { displayStatus: string; appointment: { id: string } }[];
+      const byAppointment = Object.fromEntries(history.map((item) => [item.appointment.id, item.displayStatus]));
+      expect(byAppointment[waiting.id]).toBe('PAYMENT_PENDING');
+      expect(byAppointment[failing.id]).toBe('PAYMENT_FAILED');
+      expect(byAppointment[abandoned.id]).toBeUndefined(); // the hold ran out and nothing was ever paid
+    });
+
+    it('gives each record what a receipt needs: doctor, specialty, clinic, the full time range and the payment details', async () => {
+      const held = await hold();
+      const paymentId = await payFor(held.orderId);
+      const [record] = (await http().get('/api/payments/mine').set(as(patientToken)).expect(200)).body;
+      expect(record).toMatchObject({
+        status: 'PAID',
+        displayStatus: 'PAID',
+        amountPaise: FEE_PAISE,
+        receiptNumber: paymentId,
+        orderId: held.orderId,
+        refundedPaise: 0,
+        appointment: { date: held.date, startTime: '10:00', endTime: '10:15', doctorName: 'Dr. Paid Doctor', specialty: 'ENT', clinicName: 'Test Clinic', clinicAddress: '1 Test St' },
+      });
+      expect(record.paidAt).toBeTruthy();
+      expect(record.createdAt).toBeTruthy();
     });
 
     it('includes the payment and its refunds on the appointment itself', async () => {
@@ -983,6 +1014,45 @@ describe('Payments, refunds and notifications (e2e)', () => {
       const payment = await paymentOf(held.id);
       if (appointment === 'CANCELLED' && payment.status === 'PAID') expect((await refundsOf(held.id)).length).toBeGreaterThan(0);
       if (appointment === 'CONFIRMED') expect(payment.status).toBe('PAID');
+    });
+  });
+
+  describe("a patient's notifications and profile", () => {
+    it('lists the messages sent about their appointments and the reminders still to come, and nobody else’s', async () => {
+      const held = await hold();
+      await payFor(held.orderId);
+      await notifications.dispatchDue();
+
+      const mine = (await http().get('/api/notifications/mine').set(as(patientToken)).expect(200)).body as { kind: string; status: string; subject: string; appointmentId: string }[];
+      const sent = mine.filter((item) => item.status === 'SENT').map((item) => item.kind).sort();
+      expect(sent).toEqual(['booking-confirmed', 'payment-received']);
+      expect(mine.filter((item) => item.status === 'SCHEDULED').map((item) => item.kind)).toEqual(['reminder', 'reminder']);
+      expect(mine.every((item) => item.appointmentId === held.id)).toBe(true);
+
+      expect((await http().get('/api/notifications/mine').set(as(otherPatientToken)).expect(200)).body).toEqual([]);
+      await http().get('/api/notifications/mine').expect(401);
+      await http().get('/api/notifications/mine').set(as(doctorToken)).expect(403);
+    });
+
+    it('leaves out withdrawn reminders and failed deliveries', async () => {
+      const held = await hold();
+      await payFor(held.orderId);
+      await http().post(`/api/appointments/${held.id}/cancel`).set(as(patientToken)).send({}).expect(200);
+      await db.query("UPDATE notifications SET status = 'FAILED' WHERE kind = 'payment-received'");
+      const mine = (await http().get('/api/notifications/mine').set(as(patientToken)).expect(200)).body as { kind: string; status: string }[];
+      expect(mine.some((item) => item.kind === 'reminder')).toBe(false); // cancelled with the appointment
+      expect(mine.some((item) => item.kind === 'payment-received')).toBe(false); // failed deliveries are not shown
+    });
+
+    it("shows the patient's own details, read only, to patients only", async () => {
+      await db.query("UPDATE patients SET phone = '+91 98765 43210', gender = 'Female' WHERE user_id = (SELECT id FROM users WHERE email = 'patient1@test.local')");
+      const profile = (await http().get('/api/auth/me/profile').set(as(patientToken)).expect(200)).body;
+      expect(profile).toMatchObject({ name: 'Pat One', email: 'patient1@test.local', phone: '+91 98765 43210', gender: 'Female', dateOfBirth: null, address: null });
+      expect(profile.memberSince).toBeTruthy();
+      expect(JSON.stringify(profile)).not.toMatch(/password|hash/i);
+      expect((await http().get('/api/auth/me/profile').set(as(otherPatientToken)).expect(200)).body.email).toBe('patient2@test.local');
+      await http().get('/api/auth/me/profile').expect(401);
+      await http().get('/api/auth/me/profile').set(as(doctorToken)).expect(403);
     });
   });
 

@@ -46,6 +46,7 @@ erDiagram
         uuid clinic_id FK "primary clinic"
         uuid specialty_id FK
         int consultation_minutes
+        int slot_interval_minutes "how often a slot starts; null = same as consultation_minutes; shorter gives overlapping slots"
         int default_daily_capacity
         int consultation_fee "whole rupees, shown to patients"
         text bio

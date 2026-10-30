@@ -5,15 +5,14 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { RequireRole } from '@/components/require-role';
 import { Alert, EmptyState, Spinner, StatusBadge } from '@/components/common';
-import { PaymentHistory } from '@/components/payment-history';
-import { PaymentInfo } from '@/components/payment-info';
+import { PaymentChip } from '@/components/payment-info';
 import { PaymentStep } from '@/components/payment-step';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api, errorMessage } from '@/lib/api';
-import { formatDate, formatFee, formatTime, relativeDay } from '@/lib/format';
+import { formatDate, formatFee, formatTimeRange, relativeDay } from '@/lib/format';
 import { useClinicToday, useQuery } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 import type { PatientAppointment, PaymentsConfig, Session } from '@/lib/types';
@@ -34,8 +33,6 @@ const isActive = (a: PatientAppointment) => a.status === 'CONFIRMED' || a.status
 function AppointmentList({ session }: { session: Session }) {
   const today = useClinicToday();
   const [notice, setNotice] = useState<string | null>(null);
-  // Bumped after anything that changes money, so the payment list below reloads too.
-  const [moneyVersion, setMoneyVersion] = useState(0);
   const appointments = useQuery(`mine:${session.user.id}`, () =>
     api<PatientAppointment[]>('/appointments/mine', { token: session.accessToken }),
   );
@@ -93,12 +90,10 @@ function AppointmentList({ session }: { session: Session }) {
             policy={config.data ?? null}
             onCancelled={() => {
               setNotice('Appointment cancelled. The slot is now free for other patients.');
-              setMoneyVersion((version) => version + 1);
               appointments.reload();
             }}
             onPaid={() => {
               setNotice('Payment received. Your appointment is confirmed.');
-              setMoneyVersion((version) => version + 1);
               appointments.reload();
             }}
             empty={
@@ -119,7 +114,6 @@ function AppointmentList({ session }: { session: Session }) {
           />
         </TabsContent>
       </Tabs>
-      <PaymentHistory session={session} reloadKey={moneyVersion} />
     </div>
   );
 }
@@ -211,7 +205,7 @@ function AppointmentCard({
           </div>
           <div className="min-w-0 flex-1 space-y-1">
             <p className={cn('flex flex-wrap items-center gap-2 font-semibold text-foreground', cancelled && 'text-muted-foreground')}>
-              {formatDate(a.date, { weekday: 'long' })} · {formatTime(a.startTime)}
+              {formatDate(a.date, { weekday: 'long' })} · {formatTimeRange(a.startTime, a.endTime)}
               {when && (
                 <Badge variant="secondary" className="bg-primary/10 text-primary">
                   {when}
@@ -241,9 +235,9 @@ function AppointmentCard({
           <PaymentStep appointment={a} session={session} onPaid={() => onPaid?.()} onCancelled={onCancelled} onExpired={onCancelled} />
         )}
 
-        {a.payment && (
+        {a.payment && a.payment.displayStatus !== 'EXPIRED' && a.payment.displayStatus !== 'PAYMENT_PENDING' && (
           <div className="border-t pt-4">
-            <PaymentInfo payment={a.payment} />
+            <PaymentChip payment={a.payment} />
           </div>
         )}
 

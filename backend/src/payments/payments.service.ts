@@ -555,25 +555,38 @@ export class PaymentsService {
     return map;
   }
 
-  /** The signed-in patient's payments with their refunds and receipts, newest first. Abandoned, never-paid orders are left out. */
+  /**
+   * The signed-in patient's payments with their refunds and receipts, newest first: paid and refunded ones, failed attempts, and
+   * a booking still waiting for payment. Orders that were abandoned and never paid (the hold ran out) are left out.
+   */
   async listForPatient(user: AuthUser) {
     const patientId = await this.patientIdFor(user.id);
     const rows = await this.payments.find({
       where: { patientId },
-      relations: { refunds: true, appointment: { doctor: { user: true, clinic: true } } },
+      relations: { refunds: true, appointment: { doctor: { user: true, clinic: true, specialty: true } } },
       order: { createdAt: 'DESC' },
     });
     return rows
-      .filter((row) => row.status === 'PAID' || row.status === 'FAILED' || row.razorpayPaymentId !== null)
+      .filter(
+        (row) =>
+          row.status === 'PAID' ||
+          row.status === 'FAILED' ||
+          row.razorpayPaymentId !== null ||
+          (row.status === 'CREATED' && row.appointment.status === 'PENDING'),
+      )
       .map((row) => ({
         ...toPaymentSummary(row),
+        createdAt: row.createdAt,
         appointment: {
           id: row.appointment.id,
           date: row.appointment.appointmentDate,
           startTime: hhmm(row.appointment.startTime),
+          endTime: hhmm(row.appointment.endTime),
           status: row.appointment.status,
           doctorName: row.appointment.doctor.user.name,
+          specialty: row.appointment.doctor.specialty.name,
           clinicName: row.appointment.doctor.clinic.name,
+          clinicAddress: row.appointment.doctor.clinic.address,
         },
       }));
   }
