@@ -183,6 +183,25 @@ const SLOT_STYLES: Record<Slot['status'], string> = {
   PAST: 'border-border bg-muted/50 text-muted-foreground/60',
 };
 
+/** Whole minutes between two HH:MM times. */
+function minutesBetween(start: string, end: string) {
+  const toMin = (time: string) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3, 5));
+  return toMin(end) - toMin(start);
+}
+
+/** A WAVE slot takes several patients; a STREAM slot (or one from an older answer) takes one. */
+const isWave = (slot: Pick<Slot, 'capacityPerSlot'>) => (slot.capacityPerSlot ?? 1) > 1;
+
+/** What a slot says about itself besides its time: "Booked" for one-patient slots, "2 of 3 places left" or "Full" for shared ones. */
+function slotNote(slot: Slot): string | null {
+  if (isWave(slot)) {
+    const left = slot.remaining ?? 0;
+    if (slot.status === 'AVAILABLE') return `${left} of ${slot.capacityPerSlot} left`;
+    return slot.status === 'BOOKED' ? 'Full' : SLOT_LABEL[slot.status];
+  }
+  return slot.status === 'AVAILABLE' ? null : SLOT_LABEL[slot.status];
+}
+
 function sessionLabel(startTime: string) {
   const hour = Number(startTime.slice(0, 2));
   if (hour < 12) return 'Morning';
@@ -373,17 +392,28 @@ function SlotPicker({
             {schedule.data && slots.length > 0 && (
               <div className="mt-4 space-y-6 animate-in fade-in-0 duration-300">
                 {availableCount === 0 && <Alert tone="info">All slots on this date are taken. Please choose another date.</Alert>}
-                {schedule.data.sessions.map((s) => {
-                  const sessionSlots = slots.filter((slot) => slot.startTime >= s.startTime && slot.startTime < s.endTime);
+                {schedule.data.sessions.map((s, sessionIndex) => {
+                  // A slot belongs to the session it was cut from (sessions can overlap in time: a one-time session inside a weekly one).
+                  const sessionSlots = slots.filter(
+                    (slot) => slot.startTime >= s.startTime && slot.startTime < s.endTime && (slot.availabilityId ?? null) === (s.availabilityId ?? null),
+                  );
+                  if (sessionSlots.length === 0) return null;
+                  const wave = s.mode === 'WAVE';
                   return (
-                    <div key={s.startTime}>
+                    <div key={`${s.availabilityId ?? 'exception'}:${s.startTime}:${sessionIndex}`}>
                       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2 text-sm">
                         <h3 className="font-semibold text-foreground">
                           {sessionLabel(s.startTime)} · {formatTime(s.startTime)}–{formatTime(s.endTime)}
                         </h3>
-                        <span className={s.remaining === 0 ? 'font-medium text-amber-700' : 'text-muted-foreground'}>
-                          {s.remaining === 0 ? 'Session full' : `${s.remaining} of ${s.capacity} bookings left`}
-                        </span>
+                        {wave ? (
+                          <span className="text-muted-foreground">
+                            {s.slotMinutes ?? minutesBetween(sessionSlots[0].startTime, sessionSlots[0].endTime)}-minute slots · up to {s.capacityPerSlot} patients each
+                          </span>
+                        ) : (
+                          <span className={s.remaining === 0 ? 'font-medium text-amber-700' : 'text-muted-foreground'}>
+                            {s.remaining === 0 ? 'Session full' : `${s.remaining} of ${s.capacity} bookings left`}
+                          </span>
+                        )}
                       </div>
                       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                         {sessionSlots.map((slot) => {
@@ -395,7 +425,7 @@ function SlotPicker({
                               variant="outline"
                               disabled={!bookable}
                               aria-pressed={isSelected}
-                              aria-label={`${formatTimeRange(slot.startTime, slot.endTime)}, ${isSelected ? 'selected' : SLOT_LABEL[slot.status].toLowerCase()}`}
+                              aria-label={`${formatTimeRange(slot.startTime, slot.endTime, true)}, ${isSelected ? 'selected' : (slotNote(slot) ?? SLOT_LABEL[slot.status]).toLowerCase()}`}
                               onClick={() => chooseSlot(slot)}
                               className={cn(
                                 'h-12 flex-col gap-0 font-semibold transition-all disabled:opacity-100',
@@ -408,7 +438,11 @@ function SlotPicker({
                                 {isSelected && <CheckIcon className="size-3.5" aria-hidden />}
                                 {formatTimeRange(slot.startTime, slot.endTime, true)}
                               </span>
-                              {!bookable && <span className="text-[10px] font-medium tracking-wide uppercase">{SLOT_LABEL[slot.status]}</span>}
+                              {slotNote(slot) && (
+                                <span className={cn('text-[10px] font-medium', !isWave(slot) && 'tracking-wide uppercase', isSelected && 'opacity-90')}>
+                                  {slotNote(slot)}
+                                </span>
+                              )}
                             </Button>
                           );
                         })}
@@ -437,7 +471,7 @@ function SlotPicker({
                 <SummaryRow label="Date" value={formatDate(date, { weekday: 'long' })} />
                 <SummaryRow
                   label="Time"
-                  value={`${formatTime(selected.startTime)} – ${formatTime(selected.endTime)} (${doctor.consultationMinutes} min)`}
+                  value={`${formatTime(selected.startTime)} – ${formatTime(selected.endTime)} (${minutesBetween(selected.startTime, selected.endTime)} min)`}
                 />
                 <SummaryRow label="Clinic" value={`${doctor.clinic.name}, ${doctor.clinic.address}`} />
                 <SummaryRow label="Fee (pay at clinic)" value={formatFee(doctor.consultationFee)} />

@@ -11,7 +11,8 @@ const listDoctorsQuery = z.object({
   specialtyId: z.uuid().optional(),
 });
 
-const slotsQuery = z.object({ date: dateSchema });
+// `availableOnly=true` lists just the slots that can be booked now. Anything else (or nothing) lists every slot with its status.
+const slotsQuery = z.object({ date: dateSchema, availableOnly: z.enum(['true', 'false']).optional() });
 
 // Public: patients can browse doctors and open slots before signing in.
 @Controller()
@@ -43,6 +44,6 @@ export class DoctorsController {
     @Param('id', ParseUUIDPipe) id: string,
     @Query(new ZodValidationPipe(slotsQuery)) query: z.infer<typeof slotsQuery>,
   ) {
-    return this.doctors.slots(id, query.date);
+    return this.doctors.slots(id, query.date, query.availableOnly === 'true');
   }
 }

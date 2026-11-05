@@ -178,7 +178,7 @@ describe('Appointment booking (e2e)', () => {
 
     it('returns consultation-length slots and session capacity for a date', async () => {
       const day = await slotsFor(DAY_A);
-      expect(day.slots).toEqual([
+      expect(day.slots).toMatchObject([
         { startTime: '10:00', endTime: '10:15', status: 'AVAILABLE' },
         { startTime: '10:15', endTime: '10:30', status: 'AVAILABLE' },
         { startTime: '10:30', endTime: '10:45', status: 'AVAILABLE' },
@@ -342,7 +342,7 @@ describe('Appointment booking (e2e)', () => {
         .set('Authorization', `Bearer ${doctorToken}`)
         .send({ hours: [{ dayOfWeek: 1, startTime: '09:00', endTime: '10:00', capacity: 2 }] })
         .expect(200);
-      expect(saved.body.weekly).toEqual([{ dayOfWeek: 1, startTime: '09:00', endTime: '10:00', capacity: 2 }]);
+      expect(saved.body.weekly).toMatchObject([{ dayOfWeek: 1, startTime: '09:00', endTime: '10:00', capacity: 2 }]);
     });
   });
 
@@ -652,7 +652,7 @@ describe('Appointment booking (e2e)', () => {
           const saved = (await http().get('/api/doctor-portal/availability').set(auth(doctorToken)).expect(200)).body as {
             weekly: { dayOfWeek: number; startTime: string; endTime: string; capacity: number }[];
           };
-          expect(saved.weekly.filter((hours) => hours.dayOfWeek === dow)).toEqual([
+          expect(saved.weekly.filter((hours) => hours.dayOfWeek === dow)).toMatchObject([
             { dayOfWeek: dow, startTime: '09:00', endTime: '10:00', capacity: 1 },
             { dayOfWeek: dow, startTime: '14:00', endTime: '15:00', capacity: 3 },
           ]);

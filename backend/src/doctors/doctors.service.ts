@@ -4,7 +4,7 @@ import { Between, DataSource, In, Repository } from 'typeorm';
 import { loadConfig } from '../config.js';
 import { ACTIVE_STATUSES, Appointment, Clinic, Doctor, ScheduleOverride, Specialty, slotIntervalOf } from '../database/entities/index.js';
 import { addDays, clinicNow } from '../scheduling/calendar.js';
-import { loadDaySchedule } from '../scheduling/day-schedule.js';
+import { loadDaySchedule, toRule } from '../scheduling/day-schedule.js';
 import { findNextAvailable, type NextSlot } from '../scheduling/next-available.js';
 import { hhmm, type DateOverride } from '../scheduling/slots.js';
 
@@ -92,7 +92,8 @@ export class DoctorsService {
           consultationMinutes: doctor.consultationMinutes,
           slotIntervalMinutes: slotIntervalOf(doctor),
           defaultCapacity: doctor.defaultDailyCapacity,
-          weekly: doctor.availability.map((a) => ({ dayOfWeek: a.dayOfWeek, startTime: a.startTime, endTime: a.endTime, capacity: a.capacity })),
+          weekly: [],
+          rules: doctor.availability.map(toRule),
           overrides,
           booked,
           today,
@@ -114,11 +115,13 @@ export class DoctorsService {
     return { ...toDoctor(doctor), nextAvailable: next.get(doctor.id) ?? null };
   }
 
-  slots(id: string, date: string) {
-    return loadDaySchedule(this.dataSource.manager, id, date, {
+  /** The day's slots with their status. `availableOnly` keeps just the slots that can be booked right now (a free seat, not past, not full). */
+  async slots(id: string, date: string, availableOnly = false) {
+    const { booked: _booked, ...schedule } = await loadDaySchedule(this.dataSource.manager, id, date, {
       timeZone: this.config.clinicTimezone,
       bookingWindowDays: this.config.bookingWindowDays,
     });
+    return availableOnly ? { ...schedule, slots: schedule.slots.filter((slot) => slot.status === 'AVAILABLE') } : schedule;
   }
 
   async specialties() {
@@ -137,7 +140,10 @@ function toDoctor(doctor: Doctor) {
     slotIntervalMinutes: slotIntervalOf(doctor),
     specialty: { id: doctor.specialty.id, name: doctor.specialty.name },
     clinic: { name: doctor.clinic.name, address: doctor.clinic.address },
-    weeklyHours: doctor.availability.map((a) => ({
+    // Repeating weekly hours only: a one-time session is for one date and has no weekday.
+    weeklyHours: doctor.availability
+      .filter((a) => a.recurrenceType === 'WEEKLY')
+      .map((a) => ({
       dayOfWeek: a.dayOfWeek,
       startTime: hhmm(a.startTime),
       endTime: hhmm(a.endTime),

@@ -74,10 +74,20 @@ export interface DoctorProfile {
 
 export type SlotStatus = 'AVAILABLE' | 'BOOKED' | 'FULL' | 'PAST';
 
+/** STREAM: one patient per slot. WAVE: several patients per slot, up to capacityPerSlot. */
+export type SchedulingMode = 'STREAM' | 'WAVE';
+
 export interface Slot {
   startTime: string;
   endTime: string;
   status: SlotStatus;
+  /** How many patients the slot takes (1 for STREAM), how many hold it, and how many places are left. */
+  capacityPerSlot?: number;
+  booked?: number;
+  remaining?: number;
+  mode?: SchedulingMode;
+  /** The availability row the slot comes from; null on a date exception. Matches SessionSummary.availabilityId. */
+  availabilityId?: string | null;
 }
 
 export interface SessionSummary {
@@ -86,7 +96,12 @@ export interface SessionSummary {
   capacity: number;
   booked: number;
   remaining: number;
-  source: 'OVERRIDE' | 'WEEKLY';
+  source: 'OVERRIDE' | 'ONE_TIME' | 'WEEKLY';
+  availabilityId?: string | null;
+  mode?: SchedulingMode;
+  /** Slot length for this session, which can differ from the doctor's default. */
+  slotMinutes?: number;
+  capacityPerSlot?: number;
 }
 
 export interface DaySchedule {
@@ -254,11 +269,30 @@ export interface DoctorAppointment {
   patient: { name: string; phone: string | null };
 }
 
-export interface WeeklyHours {
-  dayOfWeek: number;
+/** What every availability row says: its hours, and how they are cut into slots. */
+export interface AvailabilityRow {
+  /** Absent on a row that has not been saved yet. */
+  id?: string;
   startTime: string;
   endTime: string;
-  capacity: number;
+  /** STREAM only: the most bookings in the whole session. Null for WAVE, which limits each slot instead. */
+  capacity: number | null;
+  schedulingMode: SchedulingMode;
+  /** Null follows the doctor's appointment length. */
+  slotDurationMinutes: number | null;
+  /** Always 1 for STREAM. */
+  capacityPerSlot: number;
+  effectiveFrom: string | null;
+  effectiveTo: string | null;
+}
+
+export interface WeeklyHours extends AvailabilityRow {
+  dayOfWeek: number;
+}
+
+/** Hours for one date only. They take priority over the weekly hours for the time they overlap. */
+export interface OneTimeSession extends AvailabilityRow {
+  date: string;
 }
 
 export interface DateOverride {
@@ -278,5 +312,6 @@ export interface DoctorAvailability {
   slotIntervalCustom: boolean;
   defaultCapacity: number;
   weekly: WeeklyHours[];
+  oneTime: OneTimeSession[];
   overrides: DateOverride[];
 }

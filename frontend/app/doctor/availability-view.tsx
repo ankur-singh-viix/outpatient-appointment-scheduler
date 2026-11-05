@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { useQuery } from '@/lib/hooks';
 import type { DoctorAvailability, Session } from '@/lib/types';
 import { DateOverridesEditor, SlotLengthEditor, WeeklyHoursEditor } from './availability-editor';
+import { OneTimeSessionsEditor } from './availability-sessions';
 
 export function DoctorAvailabilityPage() {
   return (
@@ -23,7 +24,7 @@ function AvailabilityView({ session }: { session: Session }) {
   const data = availability.data ?? availability.previous;
   return (
     <div className="animate-in fade-in-0 duration-300">
-      <PageHeader title="Availability" description="Your weekly sessions, capacity, slot length and days off. Patients see changes straight away." />
+      <PageHeader title="Availability" description="Your weekly and one-time sessions, Stream or Wave scheduling, slot length and days off. Patients see changes straight away." />
       {availability.loading && !data && <Spinner label="Loading availability…" />}
       {availability.error && <Alert>{availability.error}</Alert>}
       {data && (
@@ -31,6 +32,7 @@ function AvailabilityView({ session }: { session: Session }) {
           {/* No keys on the editors: remounting after a save would wipe their "saved" messages. */}
           <SlotLengthEditor session={session} availability={data} onSaved={availability.reload} />
           <WeeklyHoursEditor session={session} availability={data} onSaved={availability.reload} />
+          <OneTimeSessionsEditor session={session} availability={data} onSaved={availability.reload} />
           <DateOverridesEditor session={session} availability={data} onSaved={availability.reload} />
         </div>
       )}

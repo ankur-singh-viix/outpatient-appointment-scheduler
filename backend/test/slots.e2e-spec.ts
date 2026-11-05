@@ -105,7 +105,7 @@ describe('Slot windows, intervals and overlap protection (e2e)', () => {
       const result = await day(nextDay());
       expect(result.consultationMinutes).toBe(30);
       expect(result.slotIntervalMinutes).toBe(15);
-      expect(result.slots).toEqual([
+      expect(result.slots).toMatchObject([
         { startTime: '11:00', endTime: '11:30', status: 'AVAILABLE' },
         { startTime: '11:15', endTime: '11:45', status: 'AVAILABLE' },
         { startTime: '11:30', endTime: '12:00', status: 'AVAILABLE' },

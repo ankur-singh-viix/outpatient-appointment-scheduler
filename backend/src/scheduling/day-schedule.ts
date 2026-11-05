@@ -1,8 +1,27 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { EntityManager, In } from 'typeorm';
 import { ACTIVE_STATUSES, Appointment, Availability, Doctor, ScheduleOverride, slotIntervalOf } from '../database/entities/index.js';
-import { addDays, clinicNow, dayOfWeek, isValidDate } from './calendar.js';
-import { buildSlots, resolveSessions, type DateOverride, type WeeklyHours } from './slots.js';
+import { addDays, clinicNow, isValidDate } from './calendar.js';
+import { resolveDay, type AvailabilityRule } from './availability-rules.js';
+import { buildSlots, type BookedWindow, type DateOverride } from './slots.js';
+
+/** An availability row as the pure scheduling rules see it. */
+export function toRule(row: Availability): AvailabilityRule {
+  return {
+    id: row.id,
+    recurrenceType: row.recurrenceType,
+    dayOfWeek: row.dayOfWeek,
+    specificDate: row.specificDate,
+    startTime: row.startTime,
+    endTime: row.endTime,
+    capacity: row.capacity,
+    schedulingMode: row.schedulingMode,
+    slotDurationMinutes: row.slotDurationMinutes,
+    capacityPerSlot: row.capacityPerSlot,
+    effectiveFrom: row.effectiveFrom,
+    effectiveTo: row.effectiveTo,
+  };
+}
 
 /**
  * Loads one doctor's schedule for one date and computes its sessions and slots.
@@ -31,9 +50,9 @@ export async function loadDaySchedule(
 
   // Sequential on purpose: `manager` may be a single transaction connection, which can't run queries in parallel.
   const overrideRow = await manager.findOneBy(ScheduleOverride, { doctorId, overrideDate: date });
-  const weeklyRows = await manager.findBy(Availability, { doctorId, dayOfWeek: dayOfWeek(date) });
+  const ruleRows = await manager.findBy(Availability, { doctorId });
   const activeRows = await manager.find(Appointment, {
-    select: { startTime: true, endTime: true, status: true, holdExpiresAt: true },
+    select: { startTime: true, endTime: true, slotNumber: true, status: true, holdExpiresAt: true },
     where: { doctorId, appointmentDate: date, status: In(ACTIVE_STATUSES) },
   });
   // An unpaid hold whose time has run out no longer occupies its slot, even before the background worker cancels it, so a
@@ -42,6 +61,8 @@ export async function loadDaySchedule(
   const bookedRows = activeRows.filter(
     (row) => !(row.status === 'PENDING' && row.holdExpiresAt !== null && row.holdExpiresAt.getTime() <= nowMs),
   );
+
+  const booked: BookedWindow[] = bookedRows.map((row) => ({ startTime: row.startTime, endTime: row.endTime, slotNumber: row.slotNumber }));
 
   const override: DateOverride | null = overrideRow
     ? {
@@ -52,13 +73,11 @@ export async function loadDaySchedule(
         reason: overrideRow.reason,
       }
     : null;
-  const weekly: WeeklyHours[] = weeklyRows.map((row) => ({
-    startTime: row.startTime,
-    endTime: row.endTime,
-    capacity: row.capacity,
-  }));
 
-  const sessions = resolveSessions(override, weekly, doctor.defaultDailyCapacity);
+  const sessions = resolveDay(override, ruleRows.map(toRule), date, {
+    consultationMinutes: doctor.consultationMinutes,
+    defaultCapacity: doctor.defaultDailyCapacity,
+  });
   const isPastDate = date < today.date;
   // For past dates every slot is in the past; for today, slots up to "now" are.
   const cutoff = isPastDate ? '23:59' : date === today.date ? today.time : null;
@@ -66,7 +85,7 @@ export async function loadDaySchedule(
     sessions,
     doctor.consultationMinutes,
     // Full windows, so a booking blocks every slot that overlaps it, not only the one with the same start.
-    bookedRows.map((row) => ({ startTime: row.startTime, endTime: row.endTime })),
+    booked,
     cutoff,
     slotIntervalOf(doctor),
   );
@@ -76,6 +95,8 @@ export async function loadDaySchedule(
     date,
     consultationMinutes: doctor.consultationMinutes,
     slotIntervalMinutes: slotIntervalOf(doctor),
+    /** The active appointments that day, with the seat each holds. Booking uses it to pick a free seat; it is not part of the public answer. */
+    booked,
     unavailableReason: override && !override.isAvailable ? (override.reason ?? 'Not available on this date') : null,
     ...result,
   };

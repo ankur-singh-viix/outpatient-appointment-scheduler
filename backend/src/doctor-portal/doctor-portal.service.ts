@@ -6,16 +6,32 @@ import { loadConfig } from '../config.js';
 import { withDoctorTitle } from '../common/names.js';
 import { changeBlockedReason } from '../scheduling/appointment-rules.js';
 import { ACTIVE_STATUSES, Appointment, Availability, Clinic, Doctor, ScheduleOverride, Specialty, User, slotIntervalOf } from '../database/entities/index.js';
+import { effectiveRangesIntersect, inheritedSettings, ruleProblem } from '../scheduling/availability-rules.js';
 import { clinicNow, isValidDate } from '../scheduling/calendar.js';
+import { toRule } from '../scheduling/day-schedule.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import { hhmm, toMinutes } from '../scheduling/slots.js';
 
-export interface WeeklyHoursInput {
-  dayOfWeek: number;
+/** What every availability row (weekly or one-time) can say. Everything but the times is optional: a plain row is STREAM, one patient per slot, the doctor's slot length. */
+export interface AvailabilityInput {
   startTime: string;
   endTime: string;
-  capacity: number;
+  /** STREAM only: the most bookings in the whole session. */
+  capacity?: number | null;
+  schedulingMode?: 'STREAM' | 'WAVE';
+  slotDurationMinutes?: number | null;
+  capacityPerSlot?: number;
+  effectiveFrom?: string | null;
+  effectiveTo?: string | null;
+}
+
+export interface WeeklyHoursInput extends AvailabilityInput {
+  dayOfWeek: number;
+}
+
+export interface OneTimeInput extends AvailabilityInput {
+  date: string;
 }
 
 export interface DateOverrideInput {
@@ -95,8 +111,12 @@ export class DoctorPortalService {
     const doctor = await this.profileFor(user);
     const today = clinicNow(this.config.clinicTimezone).date;
     const weekly = await this.availabilityRepo.find({
-      where: { doctorId: doctor.id },
+      where: { doctorId: doctor.id, recurrenceType: 'WEEKLY' },
       order: { dayOfWeek: 'ASC', startTime: 'ASC' },
+    });
+    const oneTime = await this.availabilityRepo.find({
+      where: { doctorId: doctor.id, recurrenceType: 'ONE_TIME', specificDate: MoreThanOrEqual(today) },
+      order: { specificDate: 'ASC', startTime: 'ASC' },
     });
     const overrides = await this.overrides.find({
       where: { doctorId: doctor.id, overrideDate: MoreThanOrEqual(today) },
@@ -109,12 +129,9 @@ export class DoctorPortalService {
       /** True when the doctor chose their own interval, false while it simply follows the appointment length. */
       slotIntervalCustom: doctor.slotIntervalMinutes !== null,
       defaultCapacity: doctor.defaultDailyCapacity,
-      weekly: weekly.map((row) => ({
-        dayOfWeek: row.dayOfWeek,
-        startTime: hhmm(row.startTime),
-        endTime: hhmm(row.endTime),
-        capacity: row.capacity,
-      })),
+      weekly: weekly.map((row) => ({ id: row.id, dayOfWeek: row.dayOfWeek, ...describeRow(row) })),
+      /** Sessions for one date only, from today on. They take priority over the weekly hours for the time they overlap. */
+      oneTime: oneTime.map((row) => ({ id: row.id, date: row.specificDate, ...describeRow(row) })),
       overrides: overrides.map((row) => ({
         date: row.overrideDate,
         isAvailable: row.isAvailable,
@@ -192,8 +209,11 @@ export class DoctorPortalService {
     const consultationMinutes = settings.consultationMinutes ?? doctor.consultationMinutes;
     if (consultationMinutes !== doctor.consultationMinutes) {
       const today = clinicNow(this.config.clinicTimezone).date;
-      const weekly = await this.availabilityRepo.findBy({ doctorId: doctor.id });
-      for (const row of weekly) checkWindow(row.startTime, row.endTime, consultationMinutes, DAY_NAMES[row.dayOfWeek]);
+      const rows = await this.availabilityRepo.findBy({ doctorId: doctor.id });
+      // Rows with a slot length of their own are not affected; the rest follow the doctor's length and must still fit it.
+      for (const row of rows.filter((r) => r.slotDurationMinutes === null || r.slotDurationMinutes === doctor.consultationMinutes)) {
+        checkWindow(row.startTime, row.endTime, consultationMinutes, rowLabel(row));
+      }
       const overrides = await this.overrides.find({
         where: { doctorId: doctor.id, overrideDate: MoreThanOrEqual(today), isAvailable: true },
       });
@@ -213,6 +233,7 @@ export class DoctorPortalService {
           );
         }
         await manager.update(Doctor, { id: doctor.id }, { consultationMinutes });
+        await manager.update(Availability, { doctorId: doctor.id, slotDurationMinutes: doctor.consultationMinutes }, { slotDurationMinutes: consultationMinutes });
       });
     }
     // The interval only changes WHICH start times are offered, never an existing booking, and booking refuses any overlap
@@ -223,20 +244,91 @@ export class DoctorPortalService {
     return this.availability(user);
   }
 
-  /** Replaces the doctor's whole weekly schedule. Existing appointments are not changed. */
+  /**
+   * Replaces the doctor's whole weekly schedule (one-time sessions are not touched). Existing appointments are not changed. Rows
+   * that come back unchanged keep their id, so the appointments booked from them keep pointing at them.
+   */
   async replaceWeekly(user: AuthUser, hours: WeeklyHoursInput[]) {
     const doctor = await this.profileFor(user);
-    validateWeeklyHours(hours, doctor.consultationMinutes);
+    const wanted = hours.map((row) => ({
+      ...this.completeRow(doctor, row),
+      recurrenceType: 'WEEKLY' as const,
+      dayOfWeek: row.dayOfWeek,
+      specificDate: null,
+    }));
+    for (const row of wanted) this.assertRowValid(row, DAY_NAMES[row.dayOfWeek]);
+    assertNoOverlap(wanted.map((row) => ({ ...row, label: DAY_NAMES[row.dayOfWeek], group: String(row.dayOfWeek) })));
+
     await this.dataSource.transaction(async (manager) => {
-      await manager.delete(Availability, { doctorId: doctor.id });
-      if (hours.length) {
-        await manager.insert(
-          Availability,
-          hours.map((row) => ({ ...row, doctorId: doctor.id, schedulingMode: 'STREAM' as const })),
-        );
+      await manager.findOne(Doctor, { where: { id: doctor.id }, lock: { mode: 'pessimistic_write' } });
+      const existing = await manager.find(Availability, { where: { doctorId: doctor.id, recurrenceType: 'WEEKLY' } });
+      const unused = new Map<string, Availability[]>();
+      for (const row of existing) unused.set(rowKey(row), [...(unused.get(rowKey(row)) ?? []), row]);
+      const toInsert = [];
+      for (const row of wanted) {
+        const same = unused.get(rowKey(row));
+        if (same?.length) same.pop();
+        else toInsert.push(row);
       }
+      const toDelete = [...unused.values()].flat().map((row) => row.id);
+      if (toDelete.length) await manager.delete(Availability, { id: In(toDelete) });
+      if (toInsert.length) await manager.insert(Availability, toInsert.map((row) => ({ ...row, doctorId: doctor.id })));
     });
     return this.availability(user);
+  }
+
+  /** Adds a session for one date only. It takes priority over the weekly hours for the time it overlaps. */
+  async addOneTime(user: AuthUser, input: OneTimeInput) {
+    const doctor = await this.profileFor(user);
+    if (!isValidDate(input.date)) throw new BadRequestException('Date must be a valid YYYY-MM-DD date.');
+    if (input.date < clinicNow(this.config.clinicTimezone).date) throw new BadRequestException('You can only add sessions for today or future dates.');
+    const row = { ...this.completeRow(doctor, input), recurrenceType: 'ONE_TIME' as const, dayOfWeek: null, specificDate: input.date };
+    this.assertRowValid(row, input.date);
+
+    await this.dataSource.transaction(async (manager) => {
+      await manager.findOne(Doctor, { where: { id: doctor.id }, lock: { mode: 'pessimistic_write' } });
+      const sameDay = await manager.find(Availability, { where: { doctorId: doctor.id, recurrenceType: 'ONE_TIME', specificDate: input.date } });
+      assertNoOverlap([
+        ...sameDay.map((other) => ({ ...rowFields(other), label: input.date, group: input.date })),
+        { ...row, label: input.date, group: input.date },
+      ]);
+      await manager.insert(Availability, { ...row, doctorId: doctor.id });
+    });
+    return this.availability(user);
+  }
+
+  async deleteOneTime(user: AuthUser, id: string) {
+    const doctor = await this.profileFor(user);
+    const result = await this.availabilityRepo.delete({ id, doctorId: doctor.id, recurrenceType: 'ONE_TIME' });
+    if (!result.affected) throw new NotFoundException('No one-time session exists with that id.');
+    return this.availability(user);
+  }
+
+  /** Fills in what a request left out: STREAM, the doctor's slot length, one patient per slot. WAVE has no session-wide cap. */
+  private completeRow(doctor: Doctor, input: AvailabilityInput) {
+    const schedulingMode = input.schedulingMode ?? 'STREAM';
+    return {
+      startTime: input.startTime,
+      endTime: input.endTime,
+      schedulingMode,
+      slotDurationMinutes: input.slotDurationMinutes ?? doctor.consultationMinutes,
+      capacityPerSlot: input.capacityPerSlot ?? 1,
+      capacity: schedulingMode === 'WAVE' ? null : (input.capacity ?? null),
+      effectiveFrom: input.effectiveFrom ?? null,
+      effectiveTo: input.effectiveTo ?? null,
+    };
+  }
+
+  private assertRowValid(
+    row: ReturnType<DoctorPortalService['completeRow']> & { recurrenceType: 'WEEKLY' | 'ONE_TIME'; dayOfWeek: number | null; specificDate: string | null },
+    label: string,
+  ) {
+    for (const date of [row.effectiveFrom, row.effectiveTo]) {
+      if (date !== null && !isValidDate(date)) throw new BadRequestException(`${label}: effective dates must be valid YYYY-MM-DD dates.`);
+    }
+    checkWindow(row.startTime, row.endTime, row.slotDurationMinutes, label);
+    const problem = ruleProblem(row);
+    if (problem) throw new BadRequestException(`${label}: ${problem}`);
   }
 
   /** Creates or replaces the exception for one date (a day off, or different hours). */
@@ -250,15 +342,22 @@ export class DoctorPortalService {
       if (!input.startTime || !input.endTime || !input.capacity) {
         throw new BadRequestException('Start time, end time and capacity are required when you are available.');
       }
-      checkWindow(input.startTime, input.endTime, doctor.consultationMinutes, input.date);
+      // The new hours replace the day and use the slot length the day would otherwise have had.
+      const rules = (await this.availabilityRepo.findBy({ doctorId: doctor.id })).map(toRule);
+      const inherited = inheritedSettings(rules, input.date, { consultationMinutes: doctor.consultationMinutes, defaultCapacity: doctor.defaultDailyCapacity });
+      checkWindow(input.startTime, input.endTime, inherited.slotMinutes, input.date);
+    } else if (input.startTime || input.endTime) {
+      // A day off with times blocks only that part of the day.
+      if (!input.startTime || !input.endTime) throw new BadRequestException('Give both a start and an end time to block part of the day, or neither to block all of it.');
+      if (toMinutes(input.endTime) <= toMinutes(input.startTime)) throw new BadRequestException('The end of the blocked time must be after its start.');
     }
     await this.overrides.upsert(
       {
         doctorId: doctor.id,
         overrideDate: input.date,
         isAvailable: input.isAvailable,
-        startTime: input.isAvailable ? (input.startTime ?? null) : null,
-        endTime: input.isAvailable ? (input.endTime ?? null) : null,
+        startTime: input.startTime ?? null,
+        endTime: input.endTime ?? null,
         capacity: input.isAvailable ? (input.capacity ?? null) : null,
         reason: input.reason?.trim() || null,
       },
@@ -308,18 +407,43 @@ function checkWindow(startTime: string, endTime: string, consultationMinutes: nu
   }
 }
 
-function validateWeeklyHours(hours: WeeklyHoursInput[], consultationMinutes: number) {
-  for (const row of hours) checkWindow(row.startTime, row.endTime, consultationMinutes, DAY_NAMES[row.dayOfWeek]);
-
-  // Sessions on the same day must not overlap, or a slot could belong to two sessions.
-  for (let day = 0; day < 7; day++) {
-    const sessions = hours
-      .filter((row) => row.dayOfWeek === day)
-      .sort((a, b) => toMinutes(a.startTime) - toMinutes(b.startTime));
-    for (let i = 1; i < sessions.length; i++) {
-      if (toMinutes(sessions[i].startTime) < toMinutes(sessions[i - 1].endTime)) {
-        throw new BadRequestException(`${DAY_NAMES[day]}: sessions overlap.`);
+/** Availability rows in the same group (a weekday, or a date) must not overlap in time while their effective dates also overlap. */
+function assertNoOverlap(
+  rows: { startTime: string; endTime: string; effectiveFrom: string | null; effectiveTo: string | null; label: string; group: string }[],
+) {
+  for (const group of new Set(rows.map((row) => row.group))) {
+    const sessions = rows.filter((row) => row.group === group).sort((a, b) => toMinutes(a.startTime) - toMinutes(b.startTime));
+    for (let i = 0; i < sessions.length; i++) {
+      for (let j = i + 1; j < sessions.length; j++) {
+        if (toMinutes(sessions[j].startTime) < toMinutes(sessions[i].endTime) && effectiveRangesIntersect(sessions[i], sessions[j])) {
+          throw new BadRequestException(`${sessions[i].label}: sessions overlap.`);
+        }
       }
     }
   }
 }
+
+const rowLabel = (row: Availability) => (row.dayOfWeek !== null ? DAY_NAMES[row.dayOfWeek] : (row.specificDate ?? 'One-time session'));
+
+/** The row fields that decide whether two rows are "the same", normalised so a row from the database and one from a request compare. */
+function rowFields(
+  row: Pick<Availability, 'startTime' | 'endTime' | 'capacity' | 'schedulingMode' | 'slotDurationMinutes' | 'capacityPerSlot' | 'effectiveFrom' | 'effectiveTo'>,
+) {
+  return {
+    startTime: hhmm(row.startTime),
+    endTime: hhmm(row.endTime),
+    capacity: row.capacity,
+    schedulingMode: row.schedulingMode,
+    slotDurationMinutes: row.slotDurationMinutes,
+    capacityPerSlot: row.capacityPerSlot,
+    effectiveFrom: row.effectiveFrom,
+    effectiveTo: row.effectiveTo,
+  };
+}
+
+function rowKey(row: Parameters<typeof rowFields>[0] & { dayOfWeek: number | null }): string {
+  return JSON.stringify([row.dayOfWeek, ...Object.values(rowFields(row))]);
+}
+
+/** How one availability row is shown to the doctor. */
+const describeRow = (row: Availability) => rowFields(row);

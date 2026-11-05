@@ -11,6 +11,7 @@ import { api, errorMessage } from '@/lib/api';
 import { DAY_LONG, WEEK_ORDER, formatDate, formatTime, formatTimeRange } from '@/lib/format';
 import { useClinicToday } from '@/lib/hooks';
 import type { DoctorAvailability, Session, WeeklyHours } from '@/lib/types';
+import { SessionFields, plainSettings, selectClass, sessionBody } from './availability-sessions';
 
 interface EditorProps {
   session: Session;
@@ -76,9 +77,6 @@ export function SlotLengthEditor({ session, availability, onSaved }: EditorProps
       setSaving(false);
     }
   };
-
-  const selectClass =
-    'h-9 w-full rounded-lg border border-input bg-card px-2.5 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50';
 
   return (
     <Card className="[--card-spacing:--spacing(5)]">
@@ -148,7 +146,7 @@ export function WeeklyHoursEditor({ session, availability, onSaved }: EditorProp
   const add = (dayOfWeek: number) =>
     setRows((current) => [
       ...current,
-      { dayOfWeek, startTime: '09:00', endTime: '13:00', capacity: availability.defaultCapacity },
+      { dayOfWeek, startTime: '09:00', endTime: '13:00', effectiveFrom: null, effectiveTo: null, ...plainSettings(availability.consultationMinutes) },
     ]);
 
   const save = async () => {
@@ -158,7 +156,8 @@ export function WeeklyHoursEditor({ session, availability, onSaved }: EditorProp
       const saved = await api<DoctorAvailability>('/doctor-portal/availability/weekly', {
         method: 'PUT',
         token: session.accessToken,
-        body: { hours: rows },
+        // Every field spelled out: a row read from the server also carries an id and empty dates the server does not take back.
+        body: { hours: rows.map((row) => ({ dayOfWeek: row.dayOfWeek, ...sessionBody(row, availability.consultationMinutes) })) },
       });
       setRows(saved.weekly); // the server's tidied-up order, without remounting the editor (which would wipe the message below)
       setFeedback({ tone: 'success', message: 'Weekly hours saved. Patients now see the updated slots.' });
@@ -177,8 +176,10 @@ export function WeeklyHoursEditor({ session, availability, onSaved }: EditorProp
           Weekly working hours
         </CardTitle>
         <CardDescription>
-          Patients book {availability.consultationMinutes}-minute appointments inside these hours, with a new slot starting every{' '}
-          {availability.slotIntervalMinutes} minutes. Capacity is the maximum number of bookings per session.
+          Each session is cut into slots. <strong className="font-semibold text-foreground">Stream</strong> gives every slot exactly one patient (an
+          optional cap limits the whole session). <strong className="font-semibold text-foreground">Wave</strong> lets several patients share a slot, up to the
+          number you set, and each slot is counted on its own. Stream sessions of the default {availability.consultationMinutes}-minute length also follow
+          the slot interval above ({availability.slotIntervalMinutes} min); every other session uses back-to-back slots.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -193,7 +194,8 @@ export function WeeklyHoursEditor({ session, availability, onSaved }: EditorProp
                 <div className="flex-1 space-y-2">
                   {sessions.length === 0 && <p className="pt-2 text-sm text-muted-foreground">Not working</p>}
                   {sessions.map(({ row, index }) => (
-                    <div key={index} className="flex flex-wrap items-center gap-2">
+                    <div key={index} className="space-y-2 rounded-lg border bg-card p-3">
+                      <div className="flex flex-wrap items-center gap-2">
                       <Input
                         type="time"
                         aria-label={`${DAY_LONG[day]} start time`}
@@ -209,20 +211,17 @@ export function WeeklyHoursEditor({ session, availability, onSaved }: EditorProp
                         onChange={(e) => update(index, { endTime: e.target.value })}
                         className="h-9 w-32"
                       />
-                      <Label className="gap-2 font-normal text-muted-foreground">
-                        Capacity
-                        <Input
-                          type="number"
-                          min={1}
-                          max={200}
-                          value={row.capacity}
-                          onChange={(e) => update(index, { capacity: Number(e.target.value) })}
-                          className="h-9 w-20"
-                        />
-                      </Label>
                       <Button type="button" variant="destructive" size="sm" onClick={() => remove(index)}>
                         Remove
                       </Button>
+                      </div>
+                      <SessionFields
+                        label={`${DAY_LONG[day]} session ${sessions.findIndex((entry) => entry.index === index) + 1}`}
+                        value={row}
+                        onChange={(patch) => update(index, patch)}
+                        fallbackMinutes={availability.consultationMinutes}
+                        defaultCapacity={availability.defaultCapacity}
+                      />
                     </div>
                   ))}
                 </div>
@@ -246,7 +245,7 @@ export function WeeklyHoursEditor({ session, availability, onSaved }: EditorProp
 export function DateOverridesEditor({ session, availability, onSaved }: EditorProps) {
   const today = useClinicToday();
   const [date, setDate] = useState('');
-  const [mode, setMode] = useState<'off' | 'custom'>('off');
+  const [mode, setMode] = useState<'off' | 'block' | 'custom'>('off');
   const [startTime, setStartTime] = useState('10:00');
   const [endTime, setEndTime] = useState('13:00');
   const [capacity, setCapacity] = useState(availability.defaultCapacity);
@@ -273,7 +272,9 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
     const body =
       mode === 'off'
         ? { date, isAvailable: false, reason: reason || undefined }
-        : { date, isAvailable: true, startTime, endTime, capacity, reason: reason || undefined };
+        : mode === 'block'
+          ? { date, isAvailable: false, startTime, endTime, reason: reason || undefined }
+          : { date, isAvailable: true, startTime, endTime, capacity, reason: reason || undefined };
     void run(
       () => api('/doctor-portal/availability/overrides', { method: 'PUT', token: session.accessToken, body }),
       `Saved the exception for ${formatDate(date)}.`,
@@ -293,7 +294,8 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
           Date exceptions
         </CardTitle>
         <CardDescription>
-          Take a day off or set different hours for a specific date. This replaces your weekly hours for that date.
+          Take a whole day off, block just part of a day, or set different hours for a specific date. Blocking part of a day removes only the
+          slots that overlap it; different hours replace everything on that date and keep its usual scheduling mode and slot length.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -316,19 +318,22 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
             <legend className="text-sm font-medium">Availability</legend>
             <RadioGroup
               value={mode}
-              onValueChange={(value) => setMode(value as 'off' | 'custom')}
-              className="flex gap-4 pt-1"
+              onValueChange={(value) => setMode(value as 'off' | 'block' | 'custom')}
+              className="flex flex-wrap gap-4 pt-1"
               aria-label="Availability"
             >
               <Label className="gap-2 font-normal">
                 <RadioGroupItem value="off" /> Day off
               </Label>
               <Label className="gap-2 font-normal">
+                <RadioGroupItem value="block" /> Block part of the day
+              </Label>
+              <Label className="gap-2 font-normal">
                 <RadioGroupItem value="custom" /> Custom hours
               </Label>
             </RadioGroup>
           </fieldset>
-          {mode === 'custom' && (
+          {mode !== 'off' && (
             <div className="flex flex-wrap items-end gap-3 sm:col-span-2">
               <div className="space-y-2">
                 <Label htmlFor="override-from">From</Label>
@@ -338,6 +343,7 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
                 <Label htmlFor="override-to">To</Label>
                 <Input id="override-to" type="time" required value={endTime} onChange={(e) => setEndTime(e.target.value)} className="h-9 w-32 bg-card" />
               </div>
+              {mode === 'custom' && (
               <div className="space-y-2">
                 <Label htmlFor="override-capacity">Capacity</Label>
                 <Input
@@ -351,6 +357,7 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
                   className="h-9 w-24 bg-card"
                 />
               </div>
+              )}
             </div>
           )}
           <div className="space-y-2 sm:col-span-2">
@@ -381,8 +388,10 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
                   <p className="font-semibold text-foreground">{formatDate(o.date, { weekday: 'long' })}</p>
                   <p className="text-muted-foreground">
                     {o.isAvailable && o.startTime && o.endTime
-                      ? `${formatTime(o.startTime)}–${formatTime(o.endTime)} · capacity ${o.capacity}`
-                      : 'Day off'}
+                      ? `Different hours ${formatTime(o.startTime)}–${formatTime(o.endTime)} · capacity ${o.capacity}`
+                      : o.startTime && o.endTime
+                        ? `Unavailable ${formatTime(o.startTime)}–${formatTime(o.endTime)} (rest of the day as usual)`
+                        : 'Day off'}
                     {o.reason && ` · ${o.reason}`}
                   </p>
                 </div>

@@ -1,4 +1,5 @@
 import { addDays, dayOfWeek } from './calendar.js';
+import { resolveDay, type AvailabilityRule } from './availability-rules.js';
 import { buildSlots, resolveSessions, type BookedWindow, type DateOverride, type WeeklyHours } from './slots.js';
 
 export interface NextSlot {
@@ -12,8 +13,10 @@ export interface NextAvailableInput {
   /** A new slot starts this often. Defaults to the appointment length. */
   slotIntervalMinutes?: number;
   defaultCapacity: number;
-  /** The doctor's weekly sessions, for any day of the week. */
+  /** The doctor's weekly sessions, for any day of the week (the original form). Ignored when `rules` is given. */
   weekly: (WeeklyHours & { dayOfWeek: number })[];
+  /** The doctor's availability rows, weekly and one-time, with slot length and capacity per slot. Takes the place of `weekly`. */
+  rules?: AvailabilityRule[];
   /** Date exceptions, keyed by YYYY-MM-DD. */
   overrides: Map<string, DateOverride>;
   /** ACTIVE appointments, keyed by YYYY-MM-DD: their start times, or full start-end windows. */
@@ -32,8 +35,16 @@ export interface NextAvailableInput {
 export function findNextAvailable(input: NextAvailableInput): NextSlot | null {
   for (let offset = 0; offset < input.days; offset++) {
     const date = addDays(input.today.date, offset);
-    const weekly = input.weekly.filter((row) => row.dayOfWeek === dayOfWeek(date));
-    const sessions = resolveSessions(input.overrides.get(date) ?? null, weekly, input.defaultCapacity);
+    const sessions = input.rules
+      ? resolveDay(input.overrides.get(date) ?? null, input.rules, date, {
+          consultationMinutes: input.consultationMinutes,
+          defaultCapacity: input.defaultCapacity,
+        })
+      : resolveSessions(
+          input.overrides.get(date) ?? null,
+          input.weekly.filter((row) => row.dayOfWeek === dayOfWeek(date)),
+          input.defaultCapacity,
+        );
     if (sessions.length === 0) continue;
 
     const { slots } = buildSlots(

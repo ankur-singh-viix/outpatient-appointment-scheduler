@@ -11,6 +11,7 @@ const bookAppointmentSchema = z.strictObject({
   doctorId: z.uuid(),
   date: dateSchema,
   startTime: timeSchema,
+  availabilityId: z.uuid().optional(),
 });
 
 const idParam = z.strictObject({ id: z.uuid() });

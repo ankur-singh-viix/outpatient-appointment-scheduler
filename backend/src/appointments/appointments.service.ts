@@ -9,7 +9,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import type { AuthUser } from '../auth/auth.types.js';
 import { loadConfig } from '../config.js';
-import { Appointment, Doctor, Patient } from '../database/entities/index.js';
+import { Appointment, Availability, Doctor, Patient } from '../database/entities/index.js';
 import { isSlotConflict } from '../database/errors.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
@@ -17,12 +17,14 @@ import type { PaymentSummary } from '../payments/payment-summary.js';
 import { changeBlockedReason } from '../scheduling/appointment-rules.js';
 import { clinicNow } from '../scheduling/calendar.js';
 import { loadDaySchedule } from '../scheduling/day-schedule.js';
-import { hhmm, type Slot } from '../scheduling/slots.js';
+import { hhmm, nextFreeSeat, type Slot } from '../scheduling/slots.js';
 
 export interface BookAppointmentInput {
   doctorId: string;
   date: string;
   startTime: string;
+  /** Optional: the availability the patient believes the slot belongs to. Refused when the slot comes from a different one. */
+  availabilityId?: string;
 }
 
 export interface RescheduleInput {
@@ -32,12 +34,20 @@ export interface RescheduleInput {
 
 const WITH_DOCTOR = { doctor: { user: true, specialty: true, clinic: true }, cancelledBy: true } as const;
 const SLOT_TAKEN = 'That time slot has just been booked. Please choose another.';
+const SLOT_FULL = 'That time slot is full: every place in it has been booked. Please choose another.';
+
+/** The lowest free seat of the slot. There always is one for a slot that passed assertBookable; this is the backstop. */
+function claimSeat(booked: Parameters<typeof nextFreeSeat>[0], slot: Slot): number {
+  const seat = nextFreeSeat(booked, slot, slot.capacityPerSlot ?? 1);
+  if (seat === null) throw new ConflictException((slot.capacityPerSlot ?? 1) > 1 ? SLOT_FULL : SLOT_TAKEN);
+  return seat;
+}
 
 /** Throws unless the slot exists and can still be booked. Shared by booking and rescheduling. */
 function assertBookable(slot: Slot | undefined): asserts slot is Slot {
   if (!slot) throw new BadRequestException('The doctor has no appointment slot at that time.');
   if (slot.status === 'PAST') throw new BadRequestException('That time slot has already passed.');
-  if (slot.status === 'BOOKED') throw new ConflictException(SLOT_TAKEN);
+  if (slot.status === 'BOOKED') throw new ConflictException((slot.capacityPerSlot ?? 1) > 1 ? SLOT_FULL : SLOT_TAKEN);
   if (slot.status === 'FULL') {
     throw new ConflictException('This session has reached its booking capacity. Please choose another session or date.');
   }
@@ -59,8 +69,10 @@ export class AppointmentsService {
    * Books a slot for the signed-in patient. Everything happens in one transaction:
    * 1. Lock the doctor's row, so concurrent bookings for this doctor run one at a time.
    * 2. Recompute the day's slots and session capacity from the database.
-   * 3. Insert only if the slot exists, is in the future, is free and its session isn't full.
-   * The partial unique index on (doctor_id, appointment_date, start_time) is the final backstop.
+   * 3. Insert only if the slot exists, is in the future, still has a free seat and its session isn't full. The appointment takes
+   *    the lowest free seat: a STREAM slot has one seat, a WAVE slot capacity_per_slot of them.
+   * The unique index on (doctor, date, start time, seat) and the per-seat overlap constraint are the final backstops: even code
+   * that skipped the lock could not put more patients in a slot than it has seats.
    */
   async book(user: AuthUser, input: BookAppointmentInput) {
     const patientId = await this.patientIdFor(user.id);
@@ -82,6 +94,15 @@ export class AppointmentsService {
 
         const slot = schedule.slots.find((candidate) => candidate.startTime === input.startTime);
         assertBookable(slot);
+        if (input.availabilityId !== undefined) {
+          if (!(await manager.existsBy(Availability, { id: input.availabilityId, doctorId: input.doctorId }))) {
+            throw new NotFoundException('Availability not found for this doctor.');
+          }
+          if (slot.availabilityId !== input.availabilityId) {
+            throw new BadRequestException('That time slot does not belong to the availability you chose.');
+          }
+        }
+        const seat = claimSeat(schedule.booked, slot);
 
         // With payments on, a booking with a fee is a HOLD: the slot is reserved but unconfirmed until payment succeeds.
         // The fee is read from the database here, never from the request. Without payments, or for a free doctor, it is confirmed as before.
@@ -94,6 +115,9 @@ export class AppointmentsService {
             appointmentDate: input.date,
             startTime: slot.startTime,
             endTime: slot.endTime,
+            availabilityId: slot.availabilityId ?? null,
+            slotCapacity: slot.capacityPerSlot ?? 1,
+            slotNumber: seat,
             status: needsPayment ? 'PENDING' : 'CONFIRMED',
             holdExpiresAt: needsPayment ? new Date(Date.now() + this.payments.holdMinutes * 60_000) : null,
           }),
@@ -186,6 +210,7 @@ export class AppointmentsService {
         });
         const slot = schedule.slots.find((candidate) => candidate.startTime === input.startTime);
         assertBookable(slot);
+        const seat = claimSeat(schedule.booked, slot);
 
         const saved = await manager.save(
           manager.create(Appointment, {
@@ -195,6 +220,9 @@ export class AppointmentsService {
             appointmentDate: input.date,
             startTime: slot.startTime,
             endTime: slot.endTime,
+            availabilityId: slot.availabilityId ?? null,
+            slotCapacity: slot.capacityPerSlot ?? 1,
+            slotNumber: seat,
             status: 'CONFIRMED',
             rescheduledFromId: current.id,
           }),
