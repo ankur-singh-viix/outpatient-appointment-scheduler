@@ -7,9 +7,11 @@ import { DatabaseModule } from './database/database.module.js';
 import { DoctorPortalModule } from './doctor-portal/doctor-portal.module.js';
 import { DoctorsModule } from './doctors/doctors.module.js';
 import { HealthController } from './health.controller.js';
+import { JobsModule } from './jobs/jobs.module.js';
+import { PaymentsModule } from './payments/payments.module.js';
 
 @Module({
-  imports: [DatabaseModule, AuthModule, DoctorsModule, AppointmentsModule, DoctorPortalModule],
+  imports: [DatabaseModule, AuthModule, DoctorsModule, AppointmentsModule, DoctorPortalModule, PaymentsModule, JobsModule],
   controllers: [AppController, HealthController],
   providers: [AppService],
 })

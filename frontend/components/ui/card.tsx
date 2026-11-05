@@ -32,9 +32,14 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
   )
 }
 
-function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
+// `as` lets a title be a real heading (h1-h3) so screen-reader users can navigate by it.
+function CardTitle({
+  className,
+  as: Tag = "div",
+  ...props
+}: React.ComponentProps<"div"> & { as?: "div" | "h1" | "h2" | "h3" }) {
   return (
-    <div
+    <Tag
       data-slot="card-title"
       className={cn(
         "font-heading text-base leading-snug font-medium group-data-[size=sm]/card:text-sm",

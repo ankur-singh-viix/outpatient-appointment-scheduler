@@ -16,6 +16,12 @@ export interface JwtPayload {
   role: Role;
 }
 
+/** A verified Clerk sign-in. It proves who the person is to Clerk, nothing about their CareSlot role. */
+export interface ClerkSignIn {
+  clerkUserId: string;
+}
+
 export interface AuthenticatedRequest extends Request {
   user?: AuthUser;
+  clerk?: ClerkSignIn;
 }
