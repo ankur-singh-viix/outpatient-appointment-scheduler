@@ -1,6 +1,8 @@
 /** What a provider returns once it has accepted a message. The reference is the provider's own id, for tracing it in their dashboard. */
 export interface SendResult {
   reference?: string;
+  /** Set only by the development stand-in, which prints a message instead of sending it. Anything else was handed to a real provider. */
+  mode?: 'dev-log';
 }
 
 /**

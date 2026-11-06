@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import Link from 'next/link';
 import { ApiError, api, errorMessage } from '@/lib/api';
+import { homeFor } from '@/lib/home';
 import { saveSession } from '@/lib/session';
 import { saveSignupDraft } from '@/lib/signup-draft';
 import type { LoginResult } from '@/lib/types';
@@ -47,7 +48,7 @@ export function LoginForm() {
         return;
       }
       saveSession(result);
-      router.push(next ?? (result.user.role === 'DOCTOR' ? '/doctor' : '/dashboard'));
+      router.push(next ?? homeFor(result.user.role));
     } catch (err) {
       if (err instanceof ApiError && err.code === 'EMAIL_NOT_VERIFIED') {
         router.push(`/signup/legacy?step=verify&email=${encodeURIComponent(credentials.email.trim())}`);

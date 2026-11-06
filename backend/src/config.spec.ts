@@ -51,26 +51,72 @@ describe('email delivery mode', () => {
     process.env.JWT_SECRET = 'a-real-secret';
   };
 
-  it('logs codes to the server log on a developer machine', () => {
-    expect(loadConfig().emailDelivery).toBe('log');
+  describe('development', () => {
+    it('prints emails in the terminal when Resend is not configured (and says nothing is wrong)', () => {
+      expect(loadConfig()).toMatchObject({ emailDelivery: 'log', emailProblem: null });
+    });
+
+    it('uses Resend as soon as a key is set, including with the testing sender', () => {
+      process.env.RESEND_API_KEY = 're_key';
+      expect(loadConfig()).toMatchObject({ emailDelivery: 'resend', resendApiKey: 're_key', emailProblem: null });
+      process.env.EMAIL_FROM = 'CareSlot <onboarding@resend.dev>';
+      expect(loadConfig().emailDelivery).toBe('resend');
+    });
+
+    it('treats NODE_ENV=test like development', () => {
+      process.env.NODE_ENV = 'test';
+      expect(loadConfig().emailDelivery).toBe('log');
+    });
   });
 
-  it('uses Resend whenever an API key is set', () => {
-    process.env.RESEND_API_KEY = 're_key';
-    expect(loadConfig()).toMatchObject({ emailDelivery: 'resend', resendApiKey: 're_key' });
-    production();
-    expect(loadConfig().emailDelivery).toBe('resend');
-  });
+  describe('production', () => {
+    it('switches email off without a key, with the reason, rather than printing emails into the logs', () => {
+      production();
+      expect(loadConfig()).toMatchObject({ emailDelivery: 'disabled', emailProblem: 'RESEND_API_KEY is not set.' });
+    });
 
-  it('switches sign-up off in production without a provider, rather than printing codes into the logs', () => {
-    production();
-    expect(loadConfig().emailDelivery).toBe('disabled');
-  });
+    it('needs a sender address: a key alone is not enough', () => {
+      production();
+      process.env.RESEND_API_KEY = 're_secret_key_value';
+      const config = loadConfig();
+      expect(config.emailDelivery).toBe('disabled');
+      expect(config.emailProblem).toMatch(/EMAIL_FROM is not set/);
+    });
 
-  it('allows log delivery in production only when explicitly requested', () => {
-    production();
-    process.env.EMAIL_DELIVERY = 'log';
-    expect(loadConfig().emailDelivery).toBe('log');
+    it("rejects Resend's testing sender, which cannot email real recipients", () => {
+      production();
+      process.env.RESEND_API_KEY = 're_secret_key_value';
+      for (const from of ['onboarding@resend.dev', 'CareSlot <onboarding@resend.dev>', 'CareSlot <ONBOARDING@RESEND.DEV>']) {
+        process.env.EMAIL_FROM = from;
+        const config = loadConfig();
+        expect(config.emailDelivery, from).toBe('disabled');
+        expect(config.emailProblem).toMatch(/testing sender.*verified in Resend/);
+      }
+    });
+
+    it('uses Resend with a key and a sender on your own domain', () => {
+      production();
+      process.env.RESEND_API_KEY = 're_secret_key_value';
+      process.env.EMAIL_FROM = 'CareSlot <no-reply@clinic.example>';
+      expect(loadConfig()).toMatchObject({ emailDelivery: 'resend', emailProblem: null, emailFrom: 'CareSlot <no-reply@clinic.example>' });
+    });
+
+    it('has no log mode: EMAIL_DELIVERY=log is ignored', () => {
+      production();
+      process.env.EMAIL_DELIVERY = 'log';
+      expect(loadConfig().emailDelivery).toBe('disabled');
+      process.env.RESEND_API_KEY = 're_secret_key_value';
+      process.env.EMAIL_FROM = 'CareSlot <no-reply@clinic.example>';
+      expect(loadConfig().emailDelivery).toBe('resend');
+    });
+
+    it('never puts the API key in the reason it gives', () => {
+      production();
+      process.env.RESEND_API_KEY = 're_secret_key_value';
+      expect(loadConfig().emailProblem).not.toContain('re_secret_key_value');
+      process.env.EMAIL_FROM = 'onboarding@resend.dev';
+      expect(loadConfig().emailProblem).not.toContain('re_secret_key_value');
+    });
   });
 
   it('keeps Clerk off unless a secret key is set, so the legacy login works on its own', () => {

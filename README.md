@@ -65,7 +65,21 @@ Open http://localhost:3001. `GET http://localhost:3000/` returns `Hello World!` 
 
 ### Signing up locally
 
-No email provider is needed in development: the backend prints each verification email, including the 6-digit code, in its terminal (the sign-up page says so). To send real emails, set `RESEND_API_KEY` and `EMAIL_FROM` (see Deploying).
+No email provider is needed in development: with no `RESEND_API_KEY`, the backend prints every email in its terminal, marked `[DEV ONLY]` and "NOT sent by email" (the sign-up page says so). That is where you find the 6-digit sign-up code and receptionist invitation links, which you can copy and share by hand. To try real delivery, set `RESEND_API_KEY`: you can send with Resend's testing sender (`EMAIL_FROM=CareSlot <onboarding@resend.dev>`), which reaches only your own Resend account's email address. Anyone else needs a domain verified in Resend (see "How email works" below).
+
+### How email works
+
+The mode is chosen automatically from `NODE_ENV`, in one place (`backend/src/config.ts`), and logged at start-up:
+
+| | `RESEND_API_KEY` | `EMAIL_FROM` | What happens |
+|---|---|---|---|
+| Development / test | not set | any | Emails are **printed in the terminal** (`[DEV ONLY]`), nothing is sent. The Admin page says so. |
+| Development / test | set | anything, including the testing sender | Sent through **Resend**. With the testing sender only your own Resend account address receives it. |
+| **Production** | not set | any | Email is **off**. Sign-up is unavailable, invitations are not sent (the Admin page says why), and booking emails fail fast as FAILED with the reason instead of retrying. |
+| **Production** | set | missing, or `onboarding@resend.dev` | Email is **off**, for the same reason: the testing sender cannot email real people. |
+| **Production** | set | an address on a domain verified in Resend | Sent through **Resend**. |
+
+Production never prints emails, so a sign-up code or invitation link can never end up in the logs (the old `EMAIL_DELIVERY=log` option is gone). Invitation links and tokens are never returned by the API in any mode: they exist only in the email, or, in development, in the terminal. The Admin page shows the current mode and what happened to each invitation: "provider accepted" (on its way, not necessarily delivered yet), "development: printed in the terminal", or "not sent" with the reason.
 
 ### Demo accounts
 
@@ -222,11 +236,13 @@ Three hosted pieces: the **database on Neon**, the **NestJS backend on Render** 
      JWT_SECRET=<long random string; the Blueprint generates one>
      CORS_ORIGIN=https://<your-vercel-domain>
      CLINIC_TIMEZONE=Asia/Kolkata
-     RESEND_API_KEY=<optional, enables real verification emails>
-     EMAIL_FROM=<optional, "CareSlot <no-reply@your-verified-domain>">
+     FRONTEND_URL=https://<your-vercel-domain>
+     RESEND_API_KEY=<required for any email: sign-up codes, receptionist invitations, booking notices>
+     EMAIL_FROM=CareSlot <no-reply@your-verified-domain>
      NODE_VERSION=24.22.1
      NODE_ENV=production
      ```
+     Production sends email only through Resend, with `EMAIL_FROM` on a domain you have verified there (not `onboarding@resend.dev`). Without both, email is switched off and the app says so (see "How email works"). `FRONTEND_URL` makes invitation links point at your website; it falls back to the first `CORS_ORIGIN`.
      `CORS_ORIGIN` isn't known until step 3; set a placeholder now and update it afterwards. The app refuses to start in production without `JWT_SECRET`.
    - `npm run start:prod` is the whole start step: it applies pending migrations, adds any demo data that is missing, then starts the API. Seeding only inserts rows that do not exist yet and never overwrites or deletes anything, so edits survive restarts. Set `SKIP_DEMO_SEED=true` to turn the demo data off. Render health-checks `/api/health`.
    - On Render's free plan the service sleeps when idle, so the first request after a pause can take about a minute.
@@ -250,13 +266,33 @@ Three hosted pieces: the **database on Neon**, the **NestJS backend on Render** 
 
 Payments & Receipts prints from a dedicated print container, not from the dialog: while printing, everything else on the page (navigation, sidebar, buttons) is removed from the layout, the page is set to A4 with 14 mm margins, and each receipt starts on its own page and is never split. *Print* on a card, *Print receipt* in the dialog and *Print all receipts* use the same layout. The frontend has no test runner, so [`frontend/scripts/verify-receipt-print.mjs`](frontend/scripts/verify-receipt-print.mjs) is a manual check (needs Playwright and a disposable database; see the header of the script) that measures real A4 PDF output.
 
+## Administrators and receptionists
+
+Public sign-up only creates **patients** and **doctors**. Receptionists and administrators are never self-service.
+
+- **The first administrator** is created from a terminal on the server, never from the website:
+  `cd backend && npm run admin:create -- --name "Asha Menon" --email asha@example.com` (production: `npm run admin:create:prod -- ...`).
+  It asks for the password at a hidden prompt, twice (at least 12 characters), so it never appears in the command line or shell
+  history; with no terminal, set `ADMIN_PASSWORD` in the environment instead. It refuses an email that already has an account, so a
+  patient or doctor is never turned into an administrator.
+- **Receptionists** are added by an administrator at **/admin/receptionists** (name, email and one clinic). They are emailed a link
+  (`/invite?token=...`) to choose their own password; nobody else ever sees or sets it. The link is signed, works once and expires
+  after 72 hours; the administrator can resend it until the receptionist has set a password, and can move them to another clinic at
+  any time (their access follows at once). Set `FRONTEND_URL` (or the first `CORS_ORIGIN`) to the website address so the link is right.
+- On sign-in a receptionist goes to `/reception` and an administrator to `/admin/receptionists`; patients and doctors go where they always did.
+- In development, with no `RESEND_API_KEY`, the invitation link is printed in the backend terminal marked `[DEV ONLY]` (copy it from there).
+  In production it is emailed through Resend and never logged or returned by the API. If email is off or Resend refuses it, the
+  receptionist is still created, the page shows the reason, and the administrator can use "Resend invitation" once it is fixed.
+- There is no deactivate or delete for receptionists yet: moving them to a clinic that has no doctors, or removing the account in
+  the database, ends their access.
+
 ## Known limitations
 
 - Only STREAM scheduling (one patient per slot) is implemented. The WAVE mode in the ER design is not.
-- Doctors can cancel but not reschedule appointments, and patients reschedule only with the same doctor. A patient is not emailed when their doctor cancels: they see it on their dashboard and in their history. There is no cancellation deadline, and receptionist and admin screens aren't built.
+- Doctors can cancel but not reschedule appointments, and patients reschedule only with the same doctor. A patient is not emailed when their doctor cancels: they see it on their dashboard and in their history. There is no cancellation deadline, and admin screens aren't built, and the receptionist front desk books only registered patients (no walk-ins without an account).
 - Changing weekly hours doesn't move or cancel existing appointments. They stay on the dashboard.
 - **Real email and SMS delivery are untested.** The Resend and Twilio adapters are tested against fake HTTP calls only, using their documented request and error formats; neither has been tried against the live service. If Resend answers HTTP 403, the message is kept with Resend's own reason (usually an unverified sender domain, or the shared test sender used to reach someone other than the account owner).
-- **Sign-up needs an email provider in production.** Without `RESEND_API_KEY`, sign-up is disabled there (set `EMAIL_DELIVERY=log` only for a private demo: codes would appear in the server logs). The Resend sender is unit-tested against a fake HTTP call, but has not been tried against the live service.
+- **Sign-up needs an email provider in production.** Without `RESEND_API_KEY` and a verified `EMAIL_FROM`, sign-up is disabled there; there is no log fallback in production. The Resend sender is unit-tested against a fake HTTP call, but has not been tried against the live service. "Provider accepted" does not mean delivered: bounces are not tracked.
 - **Anyone with a verified email can sign up as a doctor and appear in the directory.** There is no admin approval step yet, so a real deployment would need one.
 - No password reset, no per-IP rate limiting (only per-email limits), and no patient profile editing yet.
 - Demo accounts share a published password, so this deployment is for demos only.

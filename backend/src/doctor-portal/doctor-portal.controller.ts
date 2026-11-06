@@ -79,6 +79,9 @@ const dateOverrideSchema = z.discriminatedUnion('isAvailable', [
 
 const dateParam = z.strictObject({ date: dateSchema });
 
+const scheduleQuery = z.object({ days: z.coerce.number().int().min(1).max(60).optional() });
+const cancelTimeSchema = z.strictObject({ date: dateSchema, startTime: timeSchema, endTime: timeSchema, reason: z.string().trim().max(200).optional() });
+
 /** Everything here acts on the signed-in doctor's own profile only. */
 @Controller('doctor-portal')
 @UseGuards(AuthGuard)
@@ -107,6 +110,23 @@ export class DoctorPortalController {
   @Get('availability')
   availability(@CurrentUser() user: AuthUser) {
     return this.portal.availability(user);
+  }
+
+  @Get('schedule')
+  schedule(
+    @CurrentUser() user: AuthUser,
+    @Query(new ZodValidationPipe(scheduleQuery)) query: z.infer<typeof scheduleQuery>,
+  ) {
+    return this.portal.schedule(user, query.days ?? 14);
+  }
+
+  @Post('schedule/cancel')
+  @HttpCode(200)
+  cancelTime(
+    @CurrentUser() user: AuthUser,
+    @Body(new ZodValidationPipe(cancelTimeSchema)) body: z.infer<typeof cancelTimeSchema>,
+  ) {
+    return this.portal.cancelTime(user, body);
   }
 
   @Get('profile')

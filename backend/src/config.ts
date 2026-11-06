@@ -4,12 +4,20 @@ export interface AppConfig {
   databaseUrl: string;
   jwtSecret: string;
   corsOrigins: string[];
+  /** The website's address, for links in emails (invitations). FRONTEND_URL, or the first CORS origin. */
+  frontendUrl: string;
   /** IANA zone of the clinics; decides what "today" and "now" mean for slots. */
   clinicTimezone: string;
   /** How many days ahead patients may book. */
   bookingWindowDays: number;
-  /** How sign-up verification emails are delivered: Resend (needs RESEND_API_KEY), the server log (development), or not at all. */
+  /**
+   * How emails (sign-up codes, invitations, booking notices) are delivered, chosen from NODE_ENV:
+   * - development and tests: Resend when RESEND_API_KEY is set, otherwise the terminal ("log"), which sends nothing;
+   * - production: Resend, only with RESEND_API_KEY and an EMAIL_FROM on a domain verified in Resend, otherwise "disabled".
+   */
   emailDelivery: EmailDelivery;
+  /** Why email is "disabled" (never contains the key), or null. */
+  emailProblem: string | null;
   resendApiKey: string;
   /** The "from" address; with Resend it must be on a domain you have verified there. */
   emailFrom: string;
@@ -81,6 +89,26 @@ export function loadEnvFileIfPresent(path = '.env'): void {
   if (existsSync(path)) process.loadEnvFile(path);
 }
 
+/** True for Resend's shared testing sender (onboarding@resend.dev): it only delivers to the Resend account owner's own address. */
+export function usesResendTestingSender(from: string): boolean {
+  return /@resend\.dev>?\s*$/i.test(from.trim());
+}
+
+/**
+ * The one place that decides how email is delivered. Production never prints emails (an invitation link or sign-up code in a log
+ * is a credential) and never uses the testing sender (it cannot reach real recipients), so without a key and a verified sender it
+ * is switched off, with a reason that is safe to show. Anywhere else, no key means the terminal, which is for development only.
+ */
+function chooseEmailDelivery(args: { production: boolean; hasKey: boolean; explicitFrom: string }): { delivery: EmailDelivery; problem: string | null } {
+  if (!args.production) return { delivery: args.hasKey ? 'resend' : 'log', problem: null };
+  if (!args.hasKey) return { delivery: 'disabled', problem: 'RESEND_API_KEY is not set.' };
+  if (!args.explicitFrom) return { delivery: 'disabled', problem: 'EMAIL_FROM is not set. Use an address on a domain you have verified in Resend.' };
+  if (usesResendTestingSender(args.explicitFrom)) {
+    return { delivery: 'disabled', problem: 'EMAIL_FROM uses Resend\'s testing sender (resend.dev), which cannot email real recipients. Use an address on a domain you have verified in Resend.' };
+  }
+  return { delivery: 'resend', problem: null };
+}
+
 export function loadConfig(): AppConfig {
   // Railway sets RAILWAY_ENVIRONMENT_NAME; NODE_ENV is often left unset there so devDependencies install for the build.
   const production = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT_NAME);
@@ -92,13 +120,12 @@ export function loadConfig(): AppConfig {
   };
 
   const resendApiKey = process.env.RESEND_API_KEY ?? '';
-  // Printing codes to the server log is only safe on a developer machine, so in production it has to be asked for
-  // explicitly (EMAIL_DELIVERY=log, for a demo). Otherwise sign-up is switched off until a provider is configured.
-  const emailDelivery: EmailDelivery = resendApiKey
-    ? 'resend'
-    : !production || process.env.EMAIL_DELIVERY === 'log'
-      ? 'log'
-      : 'disabled';
+  const emailFrom = process.env.EMAIL_FROM ?? 'CareSlot <onboarding@resend.dev>';
+  const { delivery: emailDelivery, problem: emailProblem } = chooseEmailDelivery({
+    production,
+    hasKey: resendApiKey.trim().length > 0,
+    explicitFrom: (process.env.EMAIL_FROM ?? '').trim(),
+  });
 
   const corsOrigins = (process.env.CORS_ORIGIN ?? 'http://localhost:3001')
     .split(',')
@@ -129,11 +156,13 @@ export function loadConfig(): AppConfig {
     databaseUrl: required('DATABASE_URL', DEV_DATABASE_URL),
     jwtSecret: required('JWT_SECRET', 'dev-only-secret-change-me'),
     corsOrigins,
+    frontendUrl: (process.env.FRONTEND_URL ?? corsOrigins[0] ?? 'http://localhost:3001').trim().replace(/\/+$/, ''),
     clinicTimezone: process.env.CLINIC_TIMEZONE ?? 'Asia/Kolkata',
     bookingWindowDays: Number(process.env.BOOKING_WINDOW_DAYS ?? 30),
     emailDelivery,
+    emailProblem,
     resendApiKey,
-    emailFrom: process.env.EMAIL_FROM ?? 'CareSlot <onboarding@resend.dev>',
+    emailFrom,
     clerk: {
       enabled: Boolean(clerkSecretKey),
       secretKey: clerkSecretKey,

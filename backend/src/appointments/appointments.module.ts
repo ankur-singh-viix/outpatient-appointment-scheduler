@@ -8,5 +8,6 @@ import { AppointmentsService } from './appointments.service.js';
   imports: [PaymentsModule, NotificationsModule],
   controllers: [AppointmentsController],
   providers: [AppointmentsService],
+  exports: [AppointmentsService],
 })
 export class AppointmentsModule {}

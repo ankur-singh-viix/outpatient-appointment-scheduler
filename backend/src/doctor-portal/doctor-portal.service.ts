@@ -1,14 +1,14 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, FindOptionsWhere, In, MoreThanOrEqual, Repository } from 'typeorm';
+import { DataSource, EntityManager, FindOptionsWhere, In, MoreThanOrEqual, Repository } from 'typeorm';
 import type { AuthUser } from '../auth/auth.types.js';
 import { loadConfig } from '../config.js';
 import { withDoctorTitle } from '../common/names.js';
 import { changeBlockedReason } from '../scheduling/appointment-rules.js';
 import { ACTIVE_STATUSES, Appointment, Availability, Clinic, Doctor, ScheduleOverride, Specialty, User, slotIntervalOf } from '../database/entities/index.js';
 import { effectiveRangesIntersect, inheritedSettings, ruleProblem } from '../scheduling/availability-rules.js';
-import { clinicNow, isValidDate } from '../scheduling/calendar.js';
-import { toRule } from '../scheduling/day-schedule.js';
+import { addDays, clinicNow, isValidDate } from '../scheduling/calendar.js';
+import { loadDaySchedule, toRule } from '../scheduling/day-schedule.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import { hhmm, toMinutes } from '../scheduling/slots.js';
@@ -297,11 +297,115 @@ export class DoctorPortalService {
     return this.availability(user);
   }
 
+  /** Deletes a one-time session, unless patients have booked in it: those appointments must be cancelled first. */
   async deleteOneTime(user: AuthUser, id: string) {
     const doctor = await this.profileFor(user);
-    const result = await this.availabilityRepo.delete({ id, doctorId: doctor.id, recurrenceType: 'ONE_TIME' });
-    if (!result.affected) throw new NotFoundException('No one-time session exists with that id.');
+    await this.dataSource.transaction(async (manager) => {
+      await manager.findOne(Doctor, { where: { id: doctor.id }, lock: { mode: 'pessimistic_write' } });
+      const row = await manager.findOneBy(Availability, { id, doctorId: doctor.id, recurrenceType: 'ONE_TIME' });
+      if (!row || !row.specificDate) throw new NotFoundException('No one-time session exists with that id.');
+      await this.payments.releaseLapsedHolds(manager, doctor.id);
+      await this.assertNoBookings(manager, doctor.id, row.specificDate, row.startTime, row.endTime);
+      await manager.delete(Availability, { id: row.id });
+    });
     return this.availability(user);
+  }
+
+  /**
+   * The doctor's next few days as patients see them, from the same slot rules booking uses (so it cannot disagree with what a
+   * patient is offered): per date, its sessions, and every slot with its status and places left. A date exception is returned too,
+   * so a day off or a blocked time is visible. Limited to the booking window.
+   */
+  async schedule(user: AuthUser, days: number) {
+    const doctor = await this.profileFor(user);
+    const today = clinicNow(this.config.clinicTimezone).date;
+    const span = Math.min(days, this.config.bookingWindowDays + 1);
+    const result = [];
+    for (let offset = 0; offset < span; offset++) {
+      const date = addDays(today, offset);
+      const day = await loadDaySchedule(this.dataSource.manager, doctor.id, date, {
+        timeZone: this.config.clinicTimezone,
+        bookingWindowDays: this.config.bookingWindowDays,
+      });
+      const exception = await this.overrides.findOneBy({ doctorId: doctor.id, overrideDate: date });
+      const sessions = day.sessions.map((session) => ({
+        availabilityId: session.availabilityId ?? null,
+        source: session.source,
+        mode: session.mode ?? 'STREAM',
+        startTime: session.startTime,
+        endTime: session.endTime,
+        slotMinutes: session.slotMinutes ?? doctor.consultationMinutes,
+        capacityPerSlot: session.capacityPerSlot ?? 1,
+        capacity: session.capacity,
+        booked: session.booked,
+        remaining: session.remaining,
+        // A slot belongs to the session it was cut from (sessions can overlap in time).
+        slots: day.slots.filter(
+          (slot) => slot.startTime >= session.startTime && slot.startTime < session.endTime && (slot.availabilityId ?? null) === (session.availabilityId ?? null),
+        ),
+      }));
+      if (sessions.length === 0 && !exception) continue;
+      result.push({
+        date,
+        unavailableReason: day.unavailableReason,
+        exception: exception
+          ? {
+              isAvailable: exception.isAvailable,
+              startTime: exception.startTime && hhmm(exception.startTime),
+              endTime: exception.endTime && hhmm(exception.endTime),
+              reason: exception.reason,
+            }
+          : null,
+        sessions,
+      });
+    }
+    return { days: result };
+  }
+
+  /**
+   * Cancels a time on one date (one slot, or a whole session) by blocking it: patients can no longer book it, and nothing else on
+   * the day changes. Refused when patients have booked in that time (cancel those appointments first, so each patient is told and
+   * refunded), and when the date already has an exception (a date has one: change it under Date exceptions).
+   */
+  async cancelTime(user: AuthUser, input: { date: string; startTime: string; endTime: string; reason?: string }) {
+    const doctor = await this.profileFor(user);
+    if (!isValidDate(input.date)) throw new BadRequestException('Date must be a valid YYYY-MM-DD date.');
+    if (input.date < clinicNow(this.config.clinicTimezone).date) throw new BadRequestException('You can only cancel today or future dates.');
+    if (toMinutes(input.endTime) <= toMinutes(input.startTime)) throw new BadRequestException('The end of the time must be after its start.');
+
+    await this.dataSource.transaction(async (manager) => {
+      await manager.findOne(Doctor, { where: { id: doctor.id }, lock: { mode: 'pessimistic_write' } });
+      await this.payments.releaseLapsedHolds(manager, doctor.id);
+      if (await manager.existsBy(ScheduleOverride, { doctorId: doctor.id, overrideDate: input.date })) {
+        throw new ConflictException('This date already has an exception (a day off, a blocked time or different hours). Change it under Date exceptions.');
+      }
+      await this.assertNoBookings(manager, doctor.id, input.date, input.startTime, input.endTime);
+      await manager.insert(ScheduleOverride, {
+        doctorId: doctor.id,
+        overrideDate: input.date,
+        isAvailable: false,
+        startTime: input.startTime,
+        endTime: input.endTime,
+        capacity: null,
+        reason: input.reason?.trim() || 'Cancelled by doctor',
+      });
+    });
+    return this.availability(user);
+  }
+
+  /** Throws a 409 when active appointments share time with the window: the doctor cancels those first (reason, refund and notice). */
+  private async assertNoBookings(manager: EntityManager, doctorId: string, date: string, startTime: string, endTime: string) {
+    const booked = await manager
+      .createQueryBuilder(Appointment, 'appointment')
+      .where('appointment.doctorId = :doctorId AND appointment.appointmentDate = :date', { doctorId, date })
+      .andWhere('appointment.status IN (:...statuses)', { statuses: ACTIVE_STATUSES })
+      .andWhere('appointment.startTime < :endTime AND appointment.endTime > :startTime', { startTime, endTime })
+      .getCount();
+    if (booked > 0) {
+      throw new ConflictException(
+        `${booked} patient${booked === 1 ? ' has' : 's have'} an appointment in this time. Cancel ${booked === 1 ? 'it' : 'those appointments'} from Appointments first, so each patient is told and refunded.`,
+      );
+    }
   }
 
   /** Fills in what a request left out: STREAM, the doctor's slot length, one patient per slot. WAVE has no session-wide cap. */

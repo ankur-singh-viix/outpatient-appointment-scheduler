@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import type { AppConfig } from '../config.js';
+import { usesResendTestingSender, type AppConfig } from '../config.js';
 import { DeliveryError, isRetryableStatus, type SendResult } from '../notifications/delivery-error.js';
 
 export interface EmailMessage {
@@ -17,15 +17,16 @@ export interface EmailSender {
 export const EMAIL_SENDER = Symbol('EMAIL_SENDER');
 
 /**
- * Development only: prints the email to the server log instead of sending it, so sign-up can be tried locally
- * without an email provider. It exposes the verification code to anyone who can read the log, so it is never
- * the default in production (see `emailDelivery` in config.ts).
+ * Development only: prints the email in the terminal instead of sending it, so sign-up codes and invitation links can be tried
+ * locally without an email provider. Anyone who can read the log can use what it prints, so config.ts never selects it in
+ * production. Its result says `dev-log`, so callers never report an email as sent when it was only printed.
  */
 export class LogEmailSender implements EmailSender {
   private readonly logger = new Logger('DevEmail');
 
-  async send(message: EmailMessage): Promise<void> {
-    this.logger.log(`To: ${message.to} | ${message.subject}\n${message.text}`);
+  async send(message: EmailMessage): Promise<SendResult> {
+    this.logger.log(`[DEV ONLY] NOT sent by email. To: ${message.to} | ${message.subject}\n${message.text}`);
+    return { mode: 'dev-log' };
   }
 }
 
@@ -59,22 +60,36 @@ export class ResendEmailSender implements EmailSender {
   }
 }
 
-/** Used when no provider is configured in production: sign-up is refused before this is ever called. */
+/**
+ * Used in production when email is not set up. Sending fails at once, and not worth retrying: the outbox keeps the message as
+ * FAILED with this reason instead of trying five times. The reason names the missing setting, never a value.
+ */
 export class DisabledEmailSender implements EmailSender {
-  async send(): Promise<void> {
-    throw new Error('Email delivery is not configured.');
+  constructor(private readonly reason: string | null = null) {}
+
+  async send(): Promise<never> {
+    throw new DeliveryError(`Email is not configured${this.reason ? `: ${this.reason}` : '.'}`, false, 'email_not_configured');
   }
 }
 
-export function createEmailSender(config: Pick<AppConfig, 'emailDelivery' | 'resendApiKey' | 'emailFrom'>): EmailSender {
-  if (config.emailDelivery === 'resend') {
-    // The most common cause of Resend answering 403: mail from its shared test address (onboarding@resend.dev) can only go to
-    // the Resend account owner's own email, and any other sender address needs a verified domain.
-    if (/@resend\.dev>?\s*$/i.test(config.emailFrom)) {
-      new Logger('Email').warn('EMAIL_FROM uses resend.dev: Resend only delivers that to your own account email. Verify a domain in Resend and send from it to reach patients and doctors.');
-    }
-    return new ResendEmailSender(config.resendApiKey, config.emailFrom);
-  }
+export function createEmailSender(config: Pick<AppConfig, 'emailDelivery' | 'resendApiKey' | 'emailFrom'> & { emailProblem?: string | null }): EmailSender {
+  if (config.emailDelivery === 'resend') return new ResendEmailSender(config.resendApiKey, config.emailFrom);
   if (config.emailDelivery === 'log') return new LogEmailSender();
-  return new DisabledEmailSender();
+  return new DisabledEmailSender(config.emailProblem ?? null);
+}
+
+/** One line at start-up saying how email will be delivered, so a missing setting is never a surprise. Never prints a key or an address. */
+export function announceEmailMode(config: Pick<AppConfig, 'emailDelivery' | 'emailFrom' | 'emailProblem'>): void {
+  const logger = new Logger('Email');
+  if (config.emailDelivery === 'resend') {
+    logger.log(
+      usesResendTestingSender(config.emailFrom)
+        ? 'Email delivery: Resend with the testing sender. Messages reach only your own Resend account address; verify a domain and set EMAIL_FROM to email anyone else.'
+        : 'Email delivery: Resend.',
+    );
+  } else if (config.emailDelivery === 'log') {
+    logger.warn('[DEV ONLY] RESEND_API_KEY is not set: emails are printed in this terminal and NOT sent. Invitation links and sign-up codes appear here.');
+  } else {
+    logger.error(`Email delivery is OFF: ${config.emailProblem ?? 'not configured'} Sign-up, invitations and booking emails cannot be sent.`);
+  }
 }

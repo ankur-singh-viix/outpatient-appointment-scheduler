@@ -10,6 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { ApiError, api, errorMessage } from '@/lib/api';
 import { setClerkState, useClerkState } from '@/lib/clerk-state';
+import { homeFor } from '@/lib/home';
 import { signOutEverywhere } from '@/lib/session';
 import type { PublicUser } from '@/lib/types';
 
@@ -36,7 +37,7 @@ export function LinkAccountPanel({ email }: { email: string }) {
     try {
       const linked = await api<{ user: PublicUser }>('/auth/clerk/link', { method: 'POST', token: clerk.getToken, body: { password } });
       setClerkState({ account: { state: 'LINKED', user: linked.user } });
-      router.push(linked.user.role === 'DOCTOR' ? '/doctor' : '/dashboard');
+      router.push(homeFor(linked.user.role));
     } catch (err) {
       setError(
         err instanceof ApiError && err.status === 401 ? 'That password is not correct for the existing account.' : errorMessage(err),

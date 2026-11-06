@@ -75,8 +75,15 @@ export class AppointmentsService {
    * that skipped the lock could not put more patients in a slot than it has seats.
    */
   async book(user: AuthUser, input: BookAppointmentInput) {
-    const patientId = await this.patientIdFor(user.id);
+    return this.bookFor(user, await this.patientIdFor(user.id), input);
+  }
 
+  /**
+   * Books a slot for `patientId`, made by `user`: the patient themselves, or a receptionist acting for them (who has been checked
+   * by the caller). Everything else is the same transaction, slot rules, seats and database guards as a patient's own booking.
+   * `collectAtClinic` confirms the appointment at once instead of holding the slot for online payment: the fee is paid at the clinic.
+   */
+  async bookFor(user: AuthUser, patientId: string, input: BookAppointmentInput, options: { collectAtClinic?: boolean } = {}) {
     let appointmentId: string;
     let needsPayment = false;
     try {
@@ -106,7 +113,7 @@ export class AppointmentsService {
 
         // With payments on, a booking with a fee is a HOLD: the slot is reserved but unconfirmed until payment succeeds.
         // The fee is read from the database here, never from the request. Without payments, or for a free doctor, it is confirmed as before.
-        needsPayment = this.payments.enabled && doctor.consultationFee > 0;
+        needsPayment = !options.collectAtClinic && this.payments.enabled && doctor.consultationFee > 0;
         const saved = await manager.save(
           manager.create(Appointment, {
             patientId,
@@ -145,7 +152,11 @@ export class AppointmentsService {
    * longer counts toward its slot or its session's capacity, because only PENDING/CONFIRMED rows do.
    */
   async cancel(user: AuthUser, id: string, reason?: string) {
-    const patientId = await this.patientIdFor(user.id);
+    return this.cancelFor(user, id, await this.patientIdFor(user.id), reason);
+  }
+
+  /** Cancels `patientId`'s appointment, as `user` (the patient, or a receptionist acting for them). Same checks, refund and notice. */
+  async cancelFor(user: AuthUser, id: string, patientId: string, reason?: string) {
     const outcome = await this.dataSource.transaction(async (manager) => {
       const appointment = await this.lockOwn(manager, id, patientId);
       this.assertChangeable(appointment);
@@ -177,7 +188,11 @@ export class AppointmentsService {
    * If any step fails the transaction rolls back and the original appointment is untouched.
    */
   async reschedule(user: AuthUser, id: string, input: RescheduleInput) {
-    const patientId = await this.patientIdFor(user.id);
+    return this.rescheduleFor(user, id, await this.patientIdFor(user.id), input);
+  }
+
+  /** Moves `patientId`'s appointment, as `user` (the patient, or a receptionist acting for them). Same locking and checks. */
+  async rescheduleFor(user: AuthUser, id: string, patientId: string, input: RescheduleInput) {
     const existing = await this.appointments.findOneBy({ id, patientId });
     if (!existing) throw new NotFoundException('Appointment not found.');
 

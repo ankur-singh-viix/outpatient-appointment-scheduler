@@ -105,6 +105,25 @@ Doctor, Availability: *Weekly working hours* (each session has Scheduling = Stre
 slot for Wave), *One-time sessions* (the same options for one date) and *Date exceptions* (day off, block part of the day, or
 different hours). Patients see the slot length and, for Wave, the places left in each slot on the booking page.
 
+### Receptionist front desk
+
+A receptionist (role `RECEPTIONIST`, linked to a clinic in `receptionist_assignments`) signs in to **Front desk** (`/reception`).
+It shows live slot availability for the doctors of their clinic (Stream: Available/Booked; Wave: "2/3 available", then "Full";
+refreshed every few seconds) and lets them book, reschedule and cancel for a **registered** patient, found by name, email or phone.
+
+- It calls the patient's own booking, reschedule and cancel code (`AppointmentsService.bookFor`, `rescheduleFor`, `cancelFor`):
+  the same transaction, doctor row lock, slot rules, seats and database guards, so a receptionist and a patient racing for the
+  last place can never overbook a slot. Nothing about slots is computed again in the receptionist module.
+- Every doctor and appointment is checked against the receptionist's clinics first (`403` for another clinic's doctor, `404` for
+  another clinic's appointment). Booking records the receptionist in `booked_by_user_id`.
+- A receptionist's booking is **confirmed at once and the fee is paid at the clinic**: it skips the online payment hold. A patient's
+  own online booking is unchanged.
+- Endpoints (`RECEPTIONIST` only): `GET /api/receptionist/doctors`, `GET /api/receptionist/patients?search=`,
+  `GET /api/receptionist/appointments?date=&doctorId=`, `POST /api/receptionist/appointments`,
+  `POST /api/receptionist/appointments/:id/cancel`, `POST /api/receptionist/appointments/:id/reschedule`.
+- Receptionists are created and assigned by an **administrator** (see "Administrators and receptionists" in the README): one clinic
+  each, and they choose their own password from an emailed one-time link. Public sign-up cannot create them.
+
 ## 4. Cancelling and rescheduling
 
 **Cancel** (`POST /api/appointments/:id/cancel`, optional `{ reason }`): the appointment becomes `CANCELLED` with a
@@ -199,7 +218,7 @@ tests fail on every run; the STREAM race still passes then, because the database
 
 ## 8. Known limitations
 
-- Doctors can cancel appointments but cannot move them to another time; only patients reschedule.
+- Doctors can cancel appointments but cannot move them to another time; only patients and receptionists reschedule.
 - A patient is not emailed or texted when a doctor cancels. They see it on their dashboard and in their history.
 - A patient reschedules with the **same doctor** only. Another doctor is a new booking.
 - No cancellation deadline (for example "at least 2 hours before"). Anything that has not started can be changed.

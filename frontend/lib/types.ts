@@ -304,6 +304,91 @@ export interface DateOverride {
   reason: string | null;
 }
 
+/** A receptionist account, as an administrator sees it. */
+export interface AdminReceptionist {
+  id: string;
+  name: string;
+  email: string;
+  clinic: { id: string; name: string } | null;
+  /** True until the receptionist has chosen their password from the emailed link. */
+  invitePending: boolean;
+}
+
+/** What happened to an invitation email: a provider accepted it, it was only printed (development), or it was not sent. */
+export interface InviteDelivery {
+  status: 'sent' | 'logged' | 'failed';
+  /** Why it failed, safe to show. */
+  reason?: string;
+}
+
+/** How the server delivers email right now. `problem` says what is missing when it is off. */
+export interface EmailStatus {
+  mode: 'provider' | 'dev-log' | 'disabled';
+  /** Resend's shared testing sender: it reaches only the Resend account owner's own address. */
+  testingSender: boolean;
+  problem: string | null;
+}
+
+/** A doctor at one of the receptionist's clinics. */
+export interface ReceptionDoctor {
+  id: string;
+  name: string;
+  specialty: string;
+  clinic: { name: string; address: string };
+  consultationFee: number;
+  consultationMinutes: number;
+}
+
+/** A registered patient, as found by a receptionist's search. */
+export interface ReceptionPatient {
+  id: string;
+  name: string;
+  email: string;
+  phone: string | null;
+}
+
+/** An active appointment at the receptionist's clinics. slotNumber is the place held in a shared (Wave) slot. */
+export interface ReceptionAppointment {
+  id: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  status: AppointmentStatus;
+  slotNumber: number;
+  slotCapacity: number;
+  patient: { id: string; name: string; phone: string | null };
+  doctor: { id: string; name: string };
+}
+
+/** One working session on a date, with every slot cut from it. */
+export interface UpcomingSession {
+  availabilityId: string | null;
+  source: 'OVERRIDE' | 'ONE_TIME' | 'WEEKLY';
+  mode: SchedulingMode;
+  startTime: string;
+  endTime: string;
+  slotMinutes: number;
+  capacityPerSlot: number;
+  /** STREAM: the session cap; WAVE: every place the session offers. */
+  capacity: number;
+  booked: number;
+  remaining: number;
+  slots: Slot[];
+}
+
+/** One date of the doctor's upcoming schedule. */
+export interface UpcomingDay {
+  date: string;
+  unavailableReason: string | null;
+  /** The date exception, if any: a day off, a blocked time, or replacement hours. */
+  exception: { isAvailable: boolean; startTime: string | null; endTime: string | null; reason: string | null } | null;
+  sessions: UpcomingSession[];
+}
+
+export interface UpcomingSchedule {
+  days: UpcomingDay[];
+}
+
 export interface DoctorAvailability {
   consultationMinutes: number;
   /** Minutes between the starts of slots (equals consultationMinutes unless the doctor chose a shorter interval). */
