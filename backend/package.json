@@ -13,11 +13,13 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/main",
+    "start:prod": "node dist/database/migrate.js && node dist/database/seed.js && node dist/main",
     "db:migrate": "nest build && node dist/database/migrate.js",
     "db:seed": "nest build && node dist/database/seed.js",
     "db:migrate:prod": "node dist/database/migrate.js",
     "db:seed:prod": "node dist/database/seed.js",
+    "admin:create": "nest build && node dist/database/create-admin.js",
+    "admin:create:prod": "node dist/database/create-admin.js",
     "lint": "oxlint --type-aware src/ test/",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -27,6 +29,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@clerk/backend": "^3.26.4",
     "@nestjs/common": "^12.0.1",
     "@nestjs/core": "^12.0.1",
     "@nestjs/jwt": "12.0.3",

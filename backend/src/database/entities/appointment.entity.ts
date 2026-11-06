@@ -21,8 +21,8 @@ export const ACTIVE_STATUSES: AppointmentStatus[] = ['PENDING', 'CONFIRMED'];
 
 @Entity('appointments')
 @Index('ix_appointments_patient', ['patientId', 'appointmentDate'])
-// Double-booking backstop: one active appointment per doctor per start time.
-@Index('uq_active_doctor_appointment_start', ['doctorId', 'appointmentDate', 'startTime'], {
+// Double-booking backstop: one active appointment per doctor, start time and seat (a STREAM slot has one seat, a WAVE slot several).
+@Index('uq_active_slot_seat', ['doctorId', 'appointmentDate', 'startTime', 'slotNumber'], {
   unique: true,
   where: "status IN ('PENDING', 'CONFIRMED')",
 })
@@ -52,6 +52,17 @@ export class Appointment {
   @JoinColumn({ name: 'booked_by_user_id' })
   bookedBy: Relation<User>;
 
+  /** The availability row the slot was generated from. Null for old appointments, or after that row was replaced. */
+  @Column({ name: 'availability_id', type: 'uuid', nullable: true })
+  availabilityId: string | null;
+
+  /** How many patients the slot takes (1 for STREAM), and which seat, 1..slotCapacity, this appointment holds. */
+  @Column({ name: 'slot_capacity', type: 'smallint', default: 1 })
+  slotCapacity: number;
+
+  @Column({ name: 'slot_number', type: 'smallint', default: 1 })
+  slotNumber: number;
+
   @Column({ name: 'appointment_date', type: 'date' })
   appointmentDate: string;
 
@@ -66,6 +77,25 @@ export class Appointment {
 
   @Column({ name: 'cancel_reason', type: 'text', nullable: true })
   cancelReason: string | null;
+
+  @Column({ name: 'cancelled_at', type: 'timestamptz', nullable: true })
+  cancelledAt: Date | null;
+
+  /** Who cancelled it: the patient or the doctor. Always set together with cancelled_at. */
+  @Column({ name: 'cancelled_by_user_id', type: 'uuid', nullable: true })
+  cancelledByUserId: string | null;
+
+  @ManyToOne(() => User, { onDelete: 'RESTRICT', nullable: true })
+  @JoinColumn({ name: 'cancelled_by_user_id' })
+  cancelledBy: Relation<User> | null;
+
+  /** Set on the new appointment created by a reschedule: the (now cancelled) appointment it replaced. */
+  @Column({ name: 'rescheduled_from_id', type: 'uuid', nullable: true })
+  rescheduledFromId: string | null;
+
+  /** Set only while the appointment is an unpaid hold (PENDING): when the slot is released if payment has not completed. */
+  @Column({ name: 'hold_expires_at', type: 'timestamptz', nullable: true })
+  holdExpiresAt: Date | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
