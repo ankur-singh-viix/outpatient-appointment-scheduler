@@ -10,6 +10,7 @@ import type { DoctorAvailability, Session, WeeklyHours } from '@/lib/types';
 import { AvailabilityBuilder } from './availability-builder';
 import { DateOverridesEditor, SlotLengthEditor } from './availability-editor';
 import { AvailabilityList } from './availability-list';
+import { OutsideHoursCard } from './outside-hours-card';
 import { UpcomingScheduleCard } from './upcoming-schedule';
 
 export function DoctorAvailabilityPage() {
@@ -105,6 +106,7 @@ function AvailabilityView({ session }: { session: Session }) {
               }}
             />
           </div>
+          <OutsideHoursCard session={session} version={version} onChanged={refresh} />
           <UpcomingScheduleCard session={session} version={version} onChanged={availability.reload} />
           {/* No keys on the editors: remounting after a save would wipe their "saved" messages. */}
           <DateOverridesEditor session={session} availability={data} onSaved={refresh} />

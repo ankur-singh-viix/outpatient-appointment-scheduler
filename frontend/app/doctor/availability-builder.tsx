@@ -196,11 +196,11 @@ export function AvailabilityBuilder({
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="avail-start">Start time</Label>
-                <Input id="avail-start" type="time" required value={startTime} onChange={(e) => setStartTime(e.target.value)} className="h-10 bg-card" />
+                <Input id="avail-start" type="time" required value={startTime} onChange={(e) => setStartTime(e.target.value)} disabled={editing !== null} className="h-10 bg-card" />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="avail-end">End time</Label>
-                <Input id="avail-end" type="time" required value={endTime} onChange={(e) => setEndTime(e.target.value)} className="h-10 bg-card" />
+                <Input id="avail-end" type="time" required value={endTime} onChange={(e) => setEndTime(e.target.value)} disabled={editing !== null} className="h-10 bg-card" />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="avail-slot">Slot duration</Label>
@@ -234,6 +234,11 @@ export function AvailabilityBuilder({
                 </div>
               )}
             </div>
+            {editing && (
+              <p className="-mt-2 text-xs text-muted-foreground">
+                The hours are locked here. To change them, use “Adjust hours” on the session: it shows the effect first and leaves existing slots and appointments as they are.
+              </p>
+            )}
             {!wave && (
               <p id="avail-cap-hint" className="-mt-2 text-xs text-muted-foreground">
                 Stream always takes one patient per slot. The booking cap limits how many bookings the whole session takes; leave it empty to use your default ({availability.defaultCapacity}).

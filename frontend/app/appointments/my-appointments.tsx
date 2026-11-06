@@ -249,14 +249,23 @@ function AppointmentCard({
           </div>
         )}
 
+        {changeable && a.needsNewTime && !confirming && (
+          <div className="space-y-1 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="note">
+            <p className="font-semibold">{a.doctor.name} changed their hours</p>
+            <p>
+              This time is no longer within them. Your appointment is still booked. Choose a new time to move it; you will be asked to confirm, and nothing changes unless you do.
+            </p>
+          </div>
+        )}
+
         {changeable && !confirming && (
           <div className="flex flex-wrap gap-2 border-t pt-4">
             <Link
               href={`/doctors/${a.doctor.id}?reschedule=${a.id}`}
-              aria-label={`Reschedule appointment with ${a.doctor.name} on ${formatDate(a.date, { weekday: 'long' })}`}
-              className={buttonVariants({ variant: 'outline', size: 'lg', className: 'h-9' })}
+              aria-label={`${a.needsNewTime ? 'Choose a new time for the appointment' : 'Reschedule appointment'} with ${a.doctor.name} on ${formatDate(a.date, { weekday: 'long' })}`}
+              className={buttonVariants({ variant: a.needsNewTime ? 'default' : 'outline', size: 'lg', className: 'h-9' })}
             >
-              Reschedule
+              {a.needsNewTime ? 'Choose a new time' : 'Reschedule'}
             </Link>
             <Button
               variant="destructive"

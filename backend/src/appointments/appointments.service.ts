@@ -9,7 +9,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import type { AuthUser } from '../auth/auth.types.js';
 import { loadConfig } from '../config.js';
-import { Appointment, Availability, Doctor, Patient } from '../database/entities/index.js';
+import { ACTIVE_STATUSES, Appointment, Availability, Doctor, Patient } from '../database/entities/index.js';
 import { isSlotConflict } from '../database/errors.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
@@ -17,6 +17,7 @@ import type { PaymentSummary } from '../payments/payment-summary.js';
 import { changeBlockedReason } from '../scheduling/appointment-rules.js';
 import { clinicNow } from '../scheduling/calendar.js';
 import { loadDaySchedule } from '../scheduling/day-schedule.js';
+import { appointmentsOutsideHours } from '../scheduling/outside-hours.js';
 import { hhmm, nextFreeSeat, type Slot } from '../scheduling/slots.js';
 
 export interface BookAppointmentInput {
@@ -263,7 +264,24 @@ export class AppointmentsService {
       order: { appointmentDate: 'DESC', startTime: 'DESC' },
     });
     const payments = await this.payments.summariesFor(rows.map((row) => row.id));
-    return rows.map((row) => toAppointment(row, payments.get(row.id)));
+    const outside = await this.outsideHours(rows);
+    // `needsNewTime`: the doctor changed their hours and this booking no longer falls inside them. It is still booked.
+    return rows.map((row) => ({ ...toAppointment(row, payments.get(row.id)), needsNewTime: outside.has(row.id) }));
+  }
+
+  /** The ids of the patient's upcoming active appointments that are outside their doctor's current working hours. */
+  private async outsideHours(rows: Appointment[]): Promise<Set<string>> {
+    const today = clinicNow(this.config.clinicTimezone).date;
+    const byDoctor = new Map<string, Appointment[]>();
+    for (const row of rows) {
+      if (ACTIVE_STATUSES.includes(row.status) && row.appointmentDate >= today) byDoctor.set(row.doctorId, [...(byDoctor.get(row.doctorId) ?? []), row]);
+    }
+    const outside = new Set<string>();
+    for (const [doctorId, appointments] of byDoctor) {
+      const found = await appointmentsOutsideHours(this.dataSource.manager, doctorId, appointments.map((row) => ({ id: row.id, date: row.appointmentDate, startTime: row.startTime, endTime: row.endTime })));
+      for (const id of found) outside.add(id);
+    }
+    return outside;
   }
 
   private async findOne(id: string) {

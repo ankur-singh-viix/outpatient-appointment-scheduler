@@ -124,6 +124,41 @@ refreshed every few seconds) and lets them book, reschedule and cancel for a **r
 - Receptionists are created and assigned by an **administrator** (see "Administrators and receptionists" in the README): one clinic
   each, and they choose their own password from an emailed one-time link. Public sign-up cannot create them.
 
+### Changing hours after bookings (elastic scheduling)
+
+A doctor can extend or reduce the hours of an existing session (**Doctor, Availability, Your availability, Adjust hours**) for
+Wave and Stream, recurring and non-recurring. Slot length, places per slot and the Stream session cap never change; only the
+hours do. Everything is previewed first, from the same engine patients are offered slots from, run once with the current hours and
+once with the proposed ones: the hours now and proposed, the slots that appear or go, and anything that is refused.
+
+- **Extending** adds only the new slots. Existing slots, bookings and seats are untouched, and the new time is bookable at once.
+  The end can move freely (the extra time must hold at least one slot). The start must move in whole steps of the slot grid
+  (the slot length, or the interval for a Stream session of the doctor's own length), otherwise every existing slot would shift;
+  the preview refuses and offers the nearest start times that work.
+- **Reducing** works out which booked appointments end up outside the new hours (they were inside the hours before, and are not
+  afterwards) and lists every one before anything is saved, each with other open times it could move to. Saving needs the doctor's
+  explicit agreement. Then:
+  - new bookings in the removed time stop at once;
+  - **every affected appointment stays booked.** Nothing is moved, changed or cancelled automatically;
+  - each affected patient is emailed (and texted when SMS is set up) and asked to choose a new time. The link opens the normal
+    reschedule page, where the patient confirms the move themselves; the doctor may suggest one of the open times;
+  - the appointment shows "needs a new time" to the patient and appears under **Appointments outside your hours** for the doctor,
+    who can ask again (at most once a day) and, only as a last resort, cancel it with the usual reason, notice and refund.
+- **Recurring sessions** change from a chosen date (today by default). The old row ends the day before and a new row starts, so
+  earlier dates keep exactly the hours they had, and appointments from that date on follow the new row. Rows that ended this way
+  are history: they are never shown, edited or counted, and saving the weekly hours does not delete them.
+- **Non-recurring sessions** change only their own date. **Date exceptions** (a day off, a blocked time, replacement hours) are
+  never touched, and a date they decide comes out unaffected, because they already rule that day.
+- **Safety:** applying takes the doctor row lock that bookings take and re-checks the plan inside the transaction, so a booking in
+  flight either lands first (and is counted, and asked) or waits and sees the new hours; sending a change twice applies it once;
+  a change made against hours that have since changed is refused. No migration is needed: the affected appointments are worked out
+  from the current hours rather than stored.
+- An appointment is "outside the hours" when it is not inside any working session of its date (not on the slot grid, so changing
+  the slot interval never makes anyone outside). The same rule flags appointments left behind by a day off.
+- Endpoints (doctor only): `POST /doctor-portal/availability/:id/change/preview`, `POST /doctor-portal/availability/:id/change`,
+  `GET /doctor-portal/appointments/outside-hours`, `POST /doctor-portal/appointments/:id/ask-new-time`. `GET /appointments/mine`
+  gains `needsNewTime` for patients.
+
 ## 4. Cancelling and rescheduling
 
 **Cancel** (`POST /api/appointments/:id/cancel`, optional `{ reason }`): the appointment becomes `CANCELLED` with a
@@ -222,7 +257,7 @@ tests fail on every run; the STREAM race still passes then, because the database
 - A patient is not emailed or texted when a doctor cancels. They see it on their dashboard and in their history.
 - A patient reschedules with the **same doctor** only. Another doctor is a new booking.
 - No cancellation deadline (for example "at least 2 hours before"). Anything that has not started can be changed.
-- Changing availability does not move or cancel existing appointments. They stay on the dashboard.
+- Changing availability never moves or cancels existing appointments. When hours are reduced they stay booked until each patient chooses a new time (see above).
 - A date exception that replaces the day cannot choose its own mode or slot length; it inherits them (see section 2).
 - Lowering `capacity_per_slot` below the patients already booked keeps those bookings; the slot simply shows no free seats.
 - There is no arrival or queue rule inside a WAVE slot: patients share the slot, and the order within it is up to the clinic.

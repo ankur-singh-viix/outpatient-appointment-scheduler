@@ -1,6 +1,6 @@
 'use client';
 
-import { CalendarDaysIcon, PencilIcon, RepeatIcon, Trash2Icon } from 'lucide-react';
+import { CalendarDaysIcon, ClockIcon, PencilIcon, RepeatIcon, Trash2Icon } from 'lucide-react';
 import { useState } from 'react';
 import { Alert, EmptyState } from '@/components/common';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -11,6 +11,7 @@ import { api, errorMessage } from '@/lib/api';
 import { DAY_LONG, WEEK_ORDER, formatDate, formatTimeRange } from '@/lib/format';
 import type { AvailabilityRow, DoctorAvailability, OneTimeSession, SchedulingMode, Session, WeeklyHours } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import { AdjustHoursDialog, type AdjustTarget } from './adjust-hours-dialog';
 import { MODE_LABEL, describeSettings, sessionBody } from './availability-model';
 
 /** Stream and Wave get different tints, and always the word as well, so colour is never the only cue. */
@@ -48,6 +49,7 @@ export function AvailabilityList({
   onChanged: () => void;
 }) {
   const [removing, setRemoving] = useState<Removing>(null);
+  const [adjusting, setAdjusting] = useState<AdjustTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
@@ -122,6 +124,14 @@ export function AvailabilityList({
                         {effectiveText(row) && <p className="text-xs text-muted-foreground">{effectiveText(row)}</p>}
                       </div>
                       <div className="flex gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => row.id && setAdjusting({ id: row.id, title: DAY_LONG[row.dayOfWeek], recurring: true, startTime: row.startTime.slice(0, 5), endTime: row.endTime.slice(0, 5), mode: row.schedulingMode, settings: describeSettings(row, minutes) })}
+                          aria-label={`Adjust hours for ${DAY_LONG[row.dayOfWeek]}`}
+                        >
+                          <ClockIcon aria-hidden /> Adjust hours
+                        </Button>
                         <Button variant="outline" size="sm" onClick={() => onEdit(row)} aria-label={`Edit ${DAY_LONG[row.dayOfWeek]} session`}>
                           <PencilIcon aria-hidden /> Edit
                         </Button>
@@ -152,9 +162,19 @@ export function AvailabilityList({
                         </p>
                         <p className="text-sm text-muted-foreground">{describeSettings(row, minutes)}</p>
                       </div>
-                      <Button variant="outline" size="sm" onClick={() => setRemoving({ kind: 'oneoff', row })} aria-label={`Delete the session on ${formatDate(row.date)}`}>
-                        <Trash2Icon aria-hidden /> Delete
-                      </Button>
+                      <div className="flex gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => row.id && setAdjusting({ id: row.id, title: formatDate(row.date, { weekday: 'long' }), recurring: false, startTime: row.startTime.slice(0, 5), endTime: row.endTime.slice(0, 5), mode: row.schedulingMode, settings: describeSettings(row, minutes) })}
+                          aria-label={`Adjust hours for ${formatDate(row.date)}`}
+                        >
+                          <ClockIcon aria-hidden /> Adjust hours
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={() => setRemoving({ kind: 'oneoff', row })} aria-label={`Delete the session on ${formatDate(row.date)}`}>
+                          <Trash2Icon aria-hidden /> Delete
+                        </Button>
+                      </div>
                     </li>
                   ))}
                 </ul>
@@ -163,6 +183,17 @@ export function AvailabilityList({
           </>
         )}
       </CardContent>
+
+      <AdjustHoursDialog
+        session={session}
+        target={adjusting}
+        onClose={() => setAdjusting(null)}
+        onApplied={(message) => {
+          setAdjusting(null);
+          setFeedback({ tone: 'success', message });
+          onChanged();
+        }}
+      />
 
       <ConfirmDialog
         open={removing !== null}

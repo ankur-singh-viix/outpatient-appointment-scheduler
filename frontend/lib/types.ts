@@ -132,6 +132,8 @@ export interface PatientAppointment {
   createdAt: string;
   /** While the booking waits for payment: when the held slot is released. Null otherwise. */
   holdExpiresAt: string | null;
+  /** The doctor changed their hours and this booking no longer falls inside them. It is still booked until the patient moves it. */
+  needsNewTime?: boolean;
   /** Payment, receipt and refunds, or null when the visit was free. */
   payment: PaymentSummary | null;
   doctor: { id: string; name: string; specialty: string; consultationFee: number };
@@ -358,6 +360,57 @@ export interface ReceptionAppointment {
   slotCapacity: number;
   patient: { id: string; name: string; phone: string | null };
   doctor: { id: string; name: string };
+}
+
+/** What changing the hours of an existing session would do, as the server works it out from the same slot rules booking uses. */
+export interface HoursChangePreview {
+  row: { id: string; recurrence: 'WEEKLY' | 'ONE_TIME'; dayOfWeek: number | null; date: string | null; mode: SchedulingMode; slotMinutes: number | null; capacityPerSlot: number };
+  current: { startTime: string; endTime: string };
+  proposed: { startTime: string; endTime: string };
+  /** Recurring sessions: the first date the new hours apply to. Earlier dates keep theirs. */
+  applyFrom: string;
+  splitsAtDate: boolean;
+  kind: 'EXPAND' | 'SHRINK' | 'MIXED' | 'NONE';
+  /** Why the change cannot be made, in plain language. Empty when it can. */
+  problems: string[];
+  /** Start times that keep the existing slot grid, offered when the wanted one does not. */
+  suggestedStarts: string[];
+  addedSlots: number;
+  removedSlots: number;
+  /** Dates (from today to the end of the booking window) where the slots change. `days` lists the first few. */
+  affectedDates: number;
+  days: { date: string; added: { startTime: string; endTime: string }[]; removed: { startTime: string; endTime: string }[] }[];
+  /** Booked appointments the new hours would leave outside them. They stay booked; each patient is asked to choose a new time. */
+  affectedAppointments: AffectedAppointment[];
+  affectedCount: number;
+  /** How many of them have no other open time to move to. */
+  withoutAlternatives: number;
+  canApply: boolean;
+}
+
+/** A time that is still open for booking, with the places left in it. */
+export interface OpenTime {
+  date: string;
+  startTime: string;
+  endTime: string;
+  remaining: number;
+}
+
+/** A booked appointment that is outside the doctor's hours, with the open times it could move to. */
+export interface AffectedAppointment {
+  id: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  status: AppointmentStatus;
+  slotNumber: number;
+  patient: { name: string; phone: string | null };
+  alternatives: OpenTime[];
+}
+
+/** An appointment outside the doctor's current hours, and whether the patient has been asked to choose a new time. */
+export interface OutsideHoursAppointment extends AffectedAppointment {
+  asked: { at: string; status: string } | null;
 }
 
 /** One working session on a date, with every slot cut from it. */

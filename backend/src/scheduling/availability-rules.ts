@@ -29,6 +29,14 @@ export interface DoctorDefaults {
   defaultCapacity: number;
 }
 
+/**
+ * True while a row can still apply to some date: it has no end date, or its end date is today or later. A recurring row whose hours
+ * were changed ends the day before the change and is kept as history; it is never shown, edited or counted as current.
+ */
+export function isCurrent(rule: Pick<AvailabilityRule, 'effectiveTo'>, today: string): boolean {
+  return rule.effectiveTo === null || rule.effectiveTo >= today;
+}
+
 /** True when the row applies on `date`: it repeats on that weekday (or is set for exactly that date) and the date is in its effective range. */
 export function appliesOn(rule: AvailabilityRule, date: string): boolean {
   if (rule.effectiveFrom !== null && date < rule.effectiveFrom) return false;

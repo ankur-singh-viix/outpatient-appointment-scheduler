@@ -140,6 +140,21 @@ export class NotificationsService {
     });
   }
 
+  /**
+   * Asks the patient to choose a new time because the doctor's hours changed and this appointment no longer fits them. It never
+   * moves or cancels anything. `changeKey` makes one request per appointment per change (or per day, when the doctor asks again).
+   */
+  async appointmentNeedsNewTime(
+    manager: EntityManager,
+    appointmentId: string,
+    input: { link: string; changeKey: string; proposed?: { date: string; startTime: string; endTime: string } },
+  ): Promise<void> {
+    await this.safely(manager, `new-time request for ${appointmentId}`, async (inner) => {
+      const loaded = await this.load(inner, appointmentId);
+      await this.enqueue(inner, this.toPatient(loaded, templates.needsNewTime(loaded.facts, input), `needs-new-time:${appointmentId}:${input.changeKey}`));
+    });
+  }
+
   /** A successful payment: the receipt goes to the patient (the doctor learns of the paid booking from the confirmation). */
   async paymentReceived(manager: EntityManager, appointmentId: string, input: { amountPaise: number; receipt: string }): Promise<void> {
     await this.safely(manager, `payment receipt for ${appointmentId}`, async (inner) => {

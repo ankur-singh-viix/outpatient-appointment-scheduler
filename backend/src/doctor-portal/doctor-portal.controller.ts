@@ -5,6 +5,7 @@ import { AuthGuard } from '../auth/auth.guard.js';
 import type { AuthUser } from '../auth/auth.types.js';
 import { ZodValidationPipe } from '../common/zod-validation.pipe.js';
 import { dateSchema, timeSchema } from '../scheduling/schemas.js';
+import { AvailabilityChangeService } from './availability-change.service.js';
 import { DoctorPortalService } from './doctor-portal.service.js';
 
 const capacitySchema = z.int().min(1).max(200);
@@ -58,6 +59,16 @@ const replaceWeeklySchema = z.strictObject({
 const oneTimeSchema = z.strictObject({ date: dateSchema, ...availabilityFields });
 const idParam = z.strictObject({ id: z.uuid() });
 
+// Changing the hours of an existing session. `applyFrom` is for recurring sessions: earlier dates keep their hours.
+const hoursChangeSchema = z.strictObject({ startTime: timeSchema, endTime: timeSchema, applyFrom: dateSchema.optional() });
+const applyHoursChangeSchema = hoursChangeSchema.extend({
+  from: z.strictObject({ startTime: timeSchema, endTime: timeSchema }),
+  // Reducing hours: agree that affected appointments stay booked until each patient chooses a new time, and optionally suggest times.
+  acknowledge: z.boolean().optional(),
+  proposals: z.array(z.strictObject({ appointmentId: z.uuid(), date: dateSchema, startTime: timeSchema })).max(200).optional(),
+});
+const askNewTimeSchema = z.strictObject({ proposal: z.strictObject({ date: dateSchema, startTime: timeSchema }).optional() }).optional();
+
 // A day off needs only a date. Add a start and an end to block just that part of the day. Custom hours also need a capacity.
 const dateOverrideSchema = z.discriminatedUnion('isAvailable', [
   z.strictObject({
@@ -87,7 +98,10 @@ const cancelTimeSchema = z.strictObject({ date: dateSchema, startTime: timeSchem
 @UseGuards(AuthGuard)
 @Roles('DOCTOR')
 export class DoctorPortalController {
-  constructor(private readonly portal: DoctorPortalService) {}
+  constructor(
+    private readonly portal: DoctorPortalService,
+    private readonly changes: AvailabilityChangeService,
+  ) {}
 
   @Get('appointments')
   appointments(
@@ -95,6 +109,23 @@ export class DoctorPortalController {
     @Query(new ZodValidationPipe(appointmentsQuery)) query: z.infer<typeof appointmentsQuery>,
   ) {
     return this.portal.appointments(user, query.scope ?? 'upcoming');
+  }
+
+  /** Booked appointments that are outside the doctor's current hours, with open times and whether the patient was asked to move. */
+  @Get('appointments/outside-hours')
+  outsideHours(@CurrentUser() user: AuthUser) {
+    return this.changes.outsideHours(user);
+  }
+
+  /** Asks the patient to choose a new time. It moves nothing: the patient confirms the move themselves. */
+  @Post('appointments/:id/ask-new-time')
+  @HttpCode(200)
+  askNewTime(
+    @CurrentUser() user: AuthUser,
+    @Param(new ZodValidationPipe(appointmentIdParam)) params: z.infer<typeof appointmentIdParam>,
+    @Body(new ZodValidationPipe(askNewTimeSchema)) body: z.infer<typeof askNewTimeSchema>,
+  ) {
+    return this.changes.askNewTime(user, params.id, body?.proposal);
   }
 
   @Post('appointments/:id/cancel')
@@ -172,6 +203,27 @@ export class DoctorPortalController {
     @Param(new ZodValidationPipe(idParam)) params: z.infer<typeof idParam>,
   ) {
     return this.portal.deleteOneTime(user, params.id);
+  }
+
+  /** Shows what changing a session's hours would do, without doing it. */
+  @Post('availability/:id/change/preview')
+  @HttpCode(200)
+  previewChange(
+    @CurrentUser() user: AuthUser,
+    @Param(new ZodValidationPipe(idParam)) params: z.infer<typeof idParam>,
+    @Body(new ZodValidationPipe(hoursChangeSchema)) body: z.infer<typeof hoursChangeSchema>,
+  ) {
+    return this.changes.preview(user, params.id, body);
+  }
+
+  @Post('availability/:id/change')
+  @HttpCode(200)
+  applyChange(
+    @CurrentUser() user: AuthUser,
+    @Param(new ZodValidationPipe(idParam)) params: z.infer<typeof idParam>,
+    @Body(new ZodValidationPipe(applyHoursChangeSchema)) body: z.infer<typeof applyHoursChangeSchema>,
+  ) {
+    return this.changes.apply(user, params.id, body);
   }
 
   @Put('availability/overrides')

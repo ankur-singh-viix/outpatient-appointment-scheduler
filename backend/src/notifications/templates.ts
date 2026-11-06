@@ -106,6 +106,34 @@ export function bookingCancelled(
   };
 }
 
+/**
+ * The doctor's hours changed and this appointment no longer fits them. Nothing has been moved or cancelled: the booking stands until
+ * the patient chooses a new time. `link` opens the existing reschedule page (the patient signs in there and confirms the move), and
+ * `proposed` is a time the doctor suggests, if they picked one.
+ */
+export function needsNewTime(facts: AppointmentFacts, input: { link: string; proposed?: Pick<AppointmentFacts, 'date' | 'startTime' | 'endTime'> }): MessageContent {
+  return {
+    kind: 'needs-new-time',
+    subject: `Please choose a new time: ${facts.doctorName}, ${when(facts)}`,
+    body:
+      `Hi ${facts.patientName},
+
+${facts.doctorName} has changed their hours, and your appointment is no longer within them. ` +
+      `Nothing has been cancelled or moved: your booking stays as it is until you choose a new time.
+
+${details(facts)}
+
+` +
+      `${input.proposed ? `The doctor suggests: ${when(input.proposed)}
+
+` : ''}Choose a new time here (you will be asked to confirm the move): ${input.link}
+
+` +
+      'If none of the available times suit you, you can cancel from your appointments page or contact the clinic.',
+    sms: clip(`CareSlot: ${facts.doctorName} changed their hours; your ${when(facts)} appointment needs a new time. Choose one: ${input.link}`),
+  };
+}
+
 export function paymentReceived(facts: AppointmentFacts, input: { amountPaise: number; receipt: string }): MessageContent {
   return {
     kind: 'payment-received',

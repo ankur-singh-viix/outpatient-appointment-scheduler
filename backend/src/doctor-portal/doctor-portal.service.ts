@@ -6,7 +6,7 @@ import { loadConfig } from '../config.js';
 import { withDoctorTitle } from '../common/names.js';
 import { changeBlockedReason } from '../scheduling/appointment-rules.js';
 import { ACTIVE_STATUSES, Appointment, Availability, Clinic, Doctor, ScheduleOverride, Specialty, User, slotIntervalOf } from '../database/entities/index.js';
-import { effectiveRangesIntersect, inheritedSettings, ruleProblem } from '../scheduling/availability-rules.js';
+import { effectiveRangesIntersect, inheritedSettings, isCurrent, ruleProblem } from '../scheduling/availability-rules.js';
 import { addDays, clinicNow, isValidDate } from '../scheduling/calendar.js';
 import { loadDaySchedule, toRule } from '../scheduling/day-schedule.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
@@ -110,10 +110,13 @@ export class DoctorPortalService {
   async availability(user: AuthUser) {
     const doctor = await this.profileFor(user);
     const today = clinicNow(this.config.clinicTimezone).date;
-    const weekly = await this.availabilityRepo.find({
-      where: { doctorId: doctor.id, recurrenceType: 'WEEKLY' },
-      order: { dayOfWeek: 'ASC', startTime: 'ASC' },
-    });
+    // Rows that ended (their hours were changed from a later date) are history, not part of the schedule being edited.
+    const weekly = (
+      await this.availabilityRepo.find({
+        where: { doctorId: doctor.id, recurrenceType: 'WEEKLY' },
+        order: { dayOfWeek: 'ASC', startTime: 'ASC' },
+      })
+    ).filter((row) => isCurrent(row, today));
     const oneTime = await this.availabilityRepo.find({
       where: { doctorId: doctor.id, recurrenceType: 'ONE_TIME', specificDate: MoreThanOrEqual(today) },
       order: { specificDate: 'ASC', startTime: 'ASC' },
@@ -211,7 +214,7 @@ export class DoctorPortalService {
       const today = clinicNow(this.config.clinicTimezone).date;
       const rows = await this.availabilityRepo.findBy({ doctorId: doctor.id });
       // Rows with a slot length of their own are not affected; the rest follow the doctor's length and must still fit it.
-      for (const row of rows.filter((r) => r.slotDurationMinutes === null || r.slotDurationMinutes === doctor.consultationMinutes)) {
+      for (const row of rows.filter((r) => isCurrent(r, today) && (r.slotDurationMinutes === null || r.slotDurationMinutes === doctor.consultationMinutes))) {
         checkWindow(row.startTime, row.endTime, consultationMinutes, rowLabel(row));
       }
       const overrides = await this.overrides.find({
@@ -261,7 +264,9 @@ export class DoctorPortalService {
 
     await this.dataSource.transaction(async (manager) => {
       await manager.findOne(Doctor, { where: { id: doctor.id }, lock: { mode: 'pessimistic_write' } });
-      const existing = await manager.find(Availability, { where: { doctorId: doctor.id, recurrenceType: 'WEEKLY' } });
+      // Only the rows the editor showed. Ended rows are history and must survive a save.
+      const today = clinicNow(this.config.clinicTimezone).date;
+      const existing = (await manager.find(Availability, { where: { doctorId: doctor.id, recurrenceType: 'WEEKLY' } })).filter((row) => isCurrent(row, today));
       const unused = new Map<string, Availability[]>();
       for (const row of existing) unused.set(rowKey(row), [...(unused.get(rowKey(row)) ?? []), row]);
       const toInsert = [];
