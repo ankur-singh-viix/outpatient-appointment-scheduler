@@ -30,6 +30,7 @@ export function AvailabilityBuilder({
   session,
   availability,
   editing,
+  prefillDate = null,
   onCancelEdit,
   onSaved,
 }: {
@@ -37,15 +38,17 @@ export function AvailabilityBuilder({
   availability: DoctorAvailability;
   /** A saved recurring session to change, or null to add a new one. */
   editing: WeeklyHours | null;
+  /** Opens the form as a single-date session on this date (a new object each time it is asked for). */
+  prefillDate?: { date: string; n: number } | null;
   onCancelEdit: () => void;
   /** Called after a save with a plain-language confirmation. The page shows it, so it survives this form being reset. */
   onSaved: (message: string) => void;
 }) {
   const today = useClinicToday();
-  const [kind, setKind] = useState<Kind>('recurring');
+  const [kind, setKind] = useState<Kind>(prefillDate ? 'oneoff' : 'recurring');
   const [mode, setMode] = useState<SchedulingMode>(editing?.schedulingMode ?? 'STREAM');
   const [days, setDays] = useState<number[]>(editing ? [editing.dayOfWeek] : [1]);
-  const [date, setDate] = useState('');
+  const [date, setDate] = useState(prefillDate?.date ?? '');
   const [startTime, setStartTime] = useState(editing?.startTime.slice(0, 5) ?? '09:00');
   const [endTime, setEndTime] = useState(editing?.endTime.slice(0, 5) ?? '13:00');
   const [slotMinutes, setSlotMinutes] = useState(editing?.slotDurationMinutes ?? availability.consultationMinutes);

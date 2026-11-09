@@ -38,6 +38,12 @@ export class AppointmentsController {
     return this.appointments.listForPatient(user);
   }
 
+  /** Other open times the patient can move this appointment to (read-only). */
+  @Get(':id/alternatives')
+  alternatives(@CurrentUser() user: AuthUser, @Param(new ZodValidationPipe(idParam)) params: z.infer<typeof idParam>) {
+    return this.appointments.alternativesFor(user, params.id);
+  }
+
   @Post(':id/cancel')
   @HttpCode(200)
   cancel(

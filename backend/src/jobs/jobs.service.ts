@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { loadConfig } from '../config.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
+import { ScheduleChangeNotifier } from '../scheduling/schedule-change-notifier.service.js';
 
 const EVERY_MS = 30_000;
 
@@ -20,6 +21,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly payments: PaymentsService,
     private readonly notifications: NotificationsService,
+    private readonly scheduleChanges: ScheduleChangeNotifier,
   ) {}
 
   onModuleInit(): void {
@@ -40,6 +42,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
       for (const [name, job] of [
         ['release unpaid holds', () => this.payments.expireHolds()],
         ['settle refunds', () => this.payments.settleRefunds()],
+        ['ask patients whose appointments left the hours', () => this.scheduleChanges.drain()],
         ['send due emails', () => this.notifications.dispatchDue()],
         // Reminder upkeep is a scan of upcoming appointments, so it runs on the first pass after start-up and then every 10 minutes.
         ...(this.passes++ % 20 === 0 ? ([['repair reminders', () => this.notifications.maintainReminders()]] as const) : []),

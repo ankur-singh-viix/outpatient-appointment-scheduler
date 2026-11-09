@@ -10,6 +10,7 @@ import { hashPassword } from '../src/auth/password.js';
 import { loadEnvFileIfPresent } from '../src/config.js';
 import { runMigrations } from '../src/database/migrator.js';
 import { addDays, clinicNow, dayOfWeek } from '../src/scheduling/calendar.js';
+import { ScheduleChangeNotifier } from '../src/scheduling/schedule-change-notifier.service.js';
 
 loadEnvFileIfPresent();
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -184,7 +185,7 @@ describe('Elastic scheduling: expanding availability (e2e)', () => {
       ]);
       expect(await rows('SELECT availability_id FROM appointments WHERE id = $1', [past])).toEqual([{ availability_id: id }]); // the past stays as it was
       expect(await rows('SELECT availability_id FROM appointments WHERE id = $1', [upcoming.id])).toEqual([{ availability_id: done.id }]);
-      expect(await times(addDays(today, -7))).toEqual([]); // not offered in the past, and the past row still describes its own hours
+      expect((await slots(addDays(today, -7))).slots.filter((slot) => slot.status === 'AVAILABLE')).toEqual([]); // nothing can be booked in the past
     });
 
     it('applies from a later date: the dates before it keep their hours', async () => {
@@ -377,7 +378,11 @@ describe('Elastic scheduling: expanding availability (e2e)', () => {
     type ShrinkPreview = Preview & { affectedAppointments: Affected[]; affectedCount: number; withoutAlternatives: number };
     const shrink = (id: string, startTime: string, endTime: string, extra: Record<string, unknown> = {}, from = { startTime: '10:00', endTime: '12:00' }) => apply(id, { startTime, endTime, from, ...extra });
     const outsideList = async (token = doctorToken) => (await http().get('/api/doctor-portal/appointments/outside-hours').set(as(token)).expect(200)).body.appointments as (Affected & { asked: { status: string } | null })[];
-    const asks = () => rows<{ to_address: string; body: string; status: string; subject: string; appointment_id: string }>("SELECT to_address, body, status, subject, appointment_id FROM notifications WHERE kind = 'needs-new-time' AND channel = 'email' ORDER BY created_at");
+    // The doctor's request only records who is affected; the background job asks them. Tests run that job on demand.
+    const asks = async () => {
+      await app.get(ScheduleChangeNotifier).drain();
+      return rows<{ to_address: string; body: string; status: string; subject: string; appointment_id: string }>("SELECT to_address, body, status, subject, appointment_id FROM notifications WHERE kind = 'needs-new-time' AND channel = 'email' ORDER BY created_at");
+    };
     const mine = async (patient: number) => (await http().get('/api/appointments/mine').set(as(patientTokens[patient])).expect(200)).body as { id: string; status: string; needsNewTime: boolean }[];
     const activeAt = (date: string) => rows<{ id: string; start_time: string; slot_number: number; status: string }>("SELECT id, start_time::text, slot_number, status FROM appointments WHERE appointment_date = $1 AND status IN ('PENDING','CONFIRMED') ORDER BY start_time, slot_number", [date]);
 
@@ -548,7 +553,9 @@ describe('Elastic scheduling: expanding availability (e2e)', () => {
       await shrink(id, '10:00', '11:00', { acknowledge: true }).expect(200);
       const list = await outsideList();
       expect(list.map((appointment) => appointment.id)).toEqual([stranded.id]);
-      expect(list[0].asked).toMatchObject({ status: 'PENDING' }); // queued; it goes out with the next delivery run
+      expect(list[0]).toMatchObject({ asked: null, noticePending: true }); // recorded; the background job has not asked yet
+      await app.get(ScheduleChangeNotifier).drain();
+      expect((await outsideList())[0]).toMatchObject({ asked: { status: 'PENDING' }, noticePending: false }); // queued; it goes out with the next delivery run
       const ask = (appointmentId: string, token = doctorToken, body: Record<string, unknown> = {}) => http().post(`/api/doctor-portal/appointments/${appointmentId}/ask-new-time`).set(as(token)).send(body);
       expect((await ask(stranded.id).expect(409)).body.message).toMatch(/already asked this patient in the last 24 hours/);
       expect((await ask(inside.id).expect(409)).body.message).toMatch(/within your hours/);

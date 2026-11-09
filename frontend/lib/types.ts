@@ -411,6 +411,39 @@ export interface AffectedAppointment {
 /** An appointment outside the doctor's current hours, and whether the patient has been asked to choose a new time. */
 export interface OutsideHoursAppointment extends AffectedAppointment {
   asked: { at: string; status: string } | null;
+  /** The change is recorded but the background job has not asked this patient yet. */
+  noticePending: boolean;
+}
+
+/** One page of appointments outside the doctor's hours; `nextCursor` asks for the following page. */
+export interface OutsideHoursPage {
+  appointments: OutsideHoursAppointment[];
+  nextCursor: string | null;
+}
+
+/** A recent reduction of the doctor's hours and how its affected appointments stand. */
+export interface ScheduleChangeSummary {
+  id: string;
+  kind: 'SHRINK' | 'MIXED';
+  applyFrom: string;
+  oldStart: string;
+  oldEnd: string;
+  newStart: string;
+  newEnd: string;
+  affected: number;
+  unresolved: number;
+  rescheduled: number;
+  cancelled: number;
+  createdAt: string;
+}
+
+/** Other open times a patient can move their own appointment to. */
+export interface AppointmentAlternatives {
+  appointmentId: string;
+  doctorId: string;
+  needsNewTime: boolean;
+  alternatives: OpenTime[];
+  searchedUntil: string;
 }
 
 /** One working session on a date, with every slot cut from it. */

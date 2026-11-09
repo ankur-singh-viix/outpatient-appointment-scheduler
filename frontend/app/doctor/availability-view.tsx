@@ -45,10 +45,18 @@ function HowItWorks() {
           </p>
         </div>
         <div className="space-y-1 sm:col-span-2">
-          <p className="font-semibold text-foreground">Days off and changes</p>
+          <p className="font-semibold text-foreground">Days off and date exceptions</p>
           <p>
-            A date exception (below) can take a whole day off, block part of a day, or replace the hours on a date. Appointments already booked are never moved or cancelled by changing availability: cancel
-            those from Appointments, so each patient is told and refunded.
+            A date exception (below) can take a whole day off, block part of a day, or replace the hours on a date. Appointments already booked on that date are not moved or cancelled; they appear under
+            Appointments outside your hours, where you can ask each patient to choose a new time.
+          </p>
+        </div>
+        <div className="space-y-1 sm:col-span-2">
+          <p className="font-semibold text-foreground">Reducing your hours</p>
+          <p>
+            Use Adjust hours on a session to shorten it. You see which booked appointments would fall outside the new hours before anything is saved. Those appointments stay booked: nothing is moved or
+            cancelled automatically. Each affected patient is emailed and asked to choose a new time, and an appointment moves only after its patient confirms the new time. If no other time is open for a
+            patient, you can add a one-time session for them. Cancelling is the last resort, from Appointments outside your hours, with the usual notice and refund.
           </p>
         </div>
       </div>
@@ -62,6 +70,8 @@ function AvailabilityView({ session }: { session: Session }) {
   );
   const [editing, setEditing] = useState<WeeklyHours | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // "Add a one-time session" from the list of appointments outside the hours: the form opens on that date.
+  const [prefill, setPrefill] = useState<{ date: string; n: number } | null>(null);
   // Bumped after any change, so the upcoming schedule (which has its own query) fetches again.
   const [version, setVersion] = useState(0);
   const refresh = () => {
@@ -82,10 +92,11 @@ function AvailabilityView({ session }: { session: Session }) {
           <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
             {/* Keyed by the session being edited: each edit starts from that session's values, and adding starts clean. */}
             <AvailabilityBuilder
-              key={editing?.id ?? 'new'}
+              key={`${editing?.id ?? 'new'}:${prefill?.n ?? 0}`}
               session={session}
               availability={data}
               editing={editing}
+              prefillDate={prefill}
               onCancelEdit={() => setEditing(null)}
               onSaved={(message) => {
                 setNotice(message);
@@ -106,7 +117,16 @@ function AvailabilityView({ session }: { session: Session }) {
               }}
             />
           </div>
-          <OutsideHoursCard session={session} version={version} onChanged={refresh} />
+          <OutsideHoursCard
+            session={session}
+            version={version}
+            onChanged={refresh}
+            onAddSession={(date) => {
+              setEditing(null);
+              setPrefill((current) => ({ date, n: (current?.n ?? 0) + 1 }));
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+          />
           <UpcomingScheduleCard session={session} version={version} onChanged={availability.reload} />
           {/* No keys on the editors: remounting after a save would wipe their "saved" messages. */}
           <DateOverridesEditor session={session} availability={data} onSaved={refresh} />

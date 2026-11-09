@@ -150,14 +150,67 @@ once with the proposed ones: the hours now and proposed, the slots that appear o
 - **Non-recurring sessions** change only their own date. **Date exceptions** (a day off, a blocked time, replacement hours) are
   never touched, and a date they decide comes out unaffected, because they already rule that day.
 - **Safety:** applying takes the doctor row lock that bookings take and re-checks the plan inside the transaction, so a booking in
-  flight either lands first (and is counted, and asked) or waits and sees the new hours; sending a change twice applies it once;
-  a change made against hours that have since changed is refused. No migration is needed: the affected appointments are worked out
-  from the current hours rather than stored.
+  flight either lands first (and is counted, and recorded) or waits and sees the new hours; sending a change twice applies it once;
+  a change made against hours that have since changed is refused.
 - An appointment is "outside the hours" when it is not inside any working session of its date (not on the slot grid, so changing
   the slot interval never makes anyone outside). The same rule flags appointments left behind by a day off.
 - Endpoints (doctor only): `POST /doctor-portal/availability/:id/change/preview`, `POST /doctor-portal/availability/:id/change`,
-  `GET /doctor-portal/appointments/outside-hours`, `POST /doctor-portal/appointments/:id/ask-new-time`. `GET /appointments/mine`
-  gains `needsNewTime` for patients.
+  `GET /doctor-portal/appointments/outside-hours?cursor=&limit=` (a page at a time), `POST /doctor-portal/appointments/:id/ask-new-time`,
+  `GET /doctor-portal/schedule-changes` (recent reductions and how they stand). Patients: `GET /appointments/mine` gains
+  `needsNewTime`, and `GET /appointments/:id/alternatives` lists the open times they can move to.
+
+#### Reducing hours: how it holds up (migration 011)
+
+State model. No new appointment status exists: an affected appointment stays `CONFIRMED` (or `PENDING` while unpaid) and keeps its
+payment. What it *is* comes from the facts around it:
+
+| What the people see | Where it comes from |
+| --- | --- |
+| Normal confirmed | `CONFIRMED`, inside the hours |
+| Needs a new time | active, and outside the hours as they stand now |
+| Patient asked | a `needs-new-time` message exists for it (state shown: queued / sent / failed) |
+| Reschedule confirmed | old row `CANCELLED` "Rescheduled by patient", a new `CONFIRMED` row linked by `rescheduled_from_id`, payment moved |
+| Cancelled | `CANCELLED` by the existing cancel (refund and notice as usual) |
+
+Audit. `schedule_changes` has one row per applied change (who, which row, from when, old and new hours, how many were affected).
+`schedule_change_appointments` has one row per affected appointment: when the patient was asked (`notified_at`), failed attempts,
+the time the doctor suggested, and how it ended (`RESCHEDULED`, `CANCELLED`, `COVERED` when the hours were widened again, `CLOSED`
+otherwise). Both are written in the same short transaction as the change; neither touches appointments or payments.
+
+Notices. The request sends nothing. A background job (every 30 s, plus one immediate pass after a change) claims up to 200 unsent
+rows with `FOR UPDATE SKIP LOCKED`, skips and closes any appointment that is inside the hours again, skips a patient already asked
+in the last 24 hours (no repeat email when the doctor shrinks again), and puts the rest into the existing notification outbox with
+a dedupe key per appointment and change. Each patient is queued in its own savepoint, so one failure rolls back only itself: it is
+counted (`attempts`), retried on the next pass, and after 5 tries left visible to the doctor ("Waiting to be asked") who can ask
+manually. The outbox dispatcher then sends; no database transaction is ever open while mail or text goes out. A second server
+running the same job cannot double-send (SKIP LOCKED, then the dedupe key).
+
+When nothing is open. The patient sees "No other time is open with Dr X right now. Your appointment is still booked", can check
+later, contact the clinic or cancel (the existing cancel and refund rules). The doctor sees the same appointment with no times and
+an **Add a one-time session** shortcut, which opens the one-time form on that date. Recurring schedules are never changed by it.
+
+#### Algorithms (inputs, outputs, cost, why)
+
+N = the doctor's active appointments in the booking window, R = removed time ranges, K = candidates, S = slots per day,
+D = distinct dates, B = batch size.
+
+| Job | Approach | Time | Space | Why / where |
+| --- | --- | --- | --- | --- |
+| Which appointments fall outside | The database narrows to this row's weekday, effective dates, inside its old window and sticking out of the new one (an index range scan on the existing `uq_active_slot_seat`), then the exact rule (`isCovered` before and not after, with date exceptions) decides each candidate | O(log N + K) for the scan, O(K x S) for the exact check | O(K + D x S) | The exact rule is the same engine patients are offered slots from, so a preview cannot disagree with booking; SQL only prunes, so it is never the source of truth |
+| Outside-hours list for the doctor | Keyset scan in date order, 500 rows per step, stop when the page is full | O(page + log N) per page | O(500) | No offset, no repeats or gaps, memory does not grow with N |
+| Alternatives for a patient | Walk days forward from the appointment's date, cut slots with the booking engine, stop at 8 (patient) or 5 (doctor list); booked windows are read 7 days at a time and cached | O(days visited x S), early exit | O(limit + days cached) | Lazy and bounded; the database still decides at confirm, so a stale list can only lose a race, never overbook |
+| Notifying | Batch of 200 with SKIP LOCKED, set-based updates (`unnest`) | O(B log N) per pass | O(B) | Predictable load, restart-safe, parallel-safe |
+| Matching patients to slots | None, on purpose | n/a | n/a | Patients choose and confirm; the unique seat index and the doctor lock enforce capacity, so no assignment algorithm is needed |
+
+#### Manual testing
+
+1. As a doctor with a Wave session (Mon 10:00 to 12:00), have two patients book 11:00 and 11:30.
+2. Availability, Adjust hours, set the end to 11:00. The preview lists both patients; tick the agreement and save.
+3. Right after saving, the page shows both as "Waiting to be asked", then "Asked (email on its way)" within a minute. Nothing is cancelled.
+4. As the patient: Appointments shows the notice "Doctor changed their hours..."; **Choose a new time** lists real open times;
+   pick one and **Confirm move**. The old booking appears under Past as "Rescheduled" and the new one is Upcoming.
+5. Shrink again before they answer: no second email within 24 hours. Remove every other open time (days off) and the patient sees
+   "No other time is open"; the doctor sees **Add a one-time session**.
 
 ## 4. Cancelling and rescheduling
 
@@ -209,6 +262,16 @@ the old appointment of a reschedule, the doctor for a doctor cancel.
   every place in it has been booked" (WAVE), whether it was caught by the application check or by the database.
 
 ## 6. Data changes
+
+Migration `011_schedule_changes.sql` (additive: two new tables and three indexes, nothing existing is altered, safe on a live
+database; old code ignores it). Rollback: `DROP TABLE schedule_change_appointments; DROP TABLE schedule_changes;`.
+
+- `schedule_changes`: the audit row of each applied change of an availability row's hours.
+- `schedule_change_appointments`: one row per appointment a reduction left outside the hours, primary key
+  `(change_id, appointment_id)`, with `notified_at`, `attempts`, the doctor's suggested time, and `resolved_at` + `resolution`
+  (a CHECK keeps the two in step). A partial index holds only the rows still waiting to be asked, and another finds the open rows of
+  one appointment. Changes made before this migration have no rows; their appointments are still found and shown, because the
+  doctor's list is worked out from the current hours.
 
 Migration `010_wave_stream_scheduling.sql` (additive; rollback steps are in its header):
 

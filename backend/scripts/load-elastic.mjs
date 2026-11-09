@@ -1,0 +1,159 @@
+// Load and invariant check for SHRINKING hours. It is a check of behaviour under concurrency, not a benchmark of a production
+// deployment: one machine, one database, so it shows the invariants hold and where the time goes, not what 100k users cost.
+//
+//   1. start the backend against a THROWAWAY database with background jobs ON, e.g.
+//        TEST_DATABASE_URL=postgresql://.../outpatient_test  (the database name must end in _test)
+//        DATABASE_URL=$TEST_DATABASE_URL BACKGROUND_JOBS=true PORT=3199 RESEND_API_KEY= RAZORPAY_KEY_ID= RAZORPAY_KEY_SECRET= node dist/main
+//   2. node scripts/load-elastic.mjs            (env: BASE_URL=http://localhost:3199/api, PATIENTS=400)
+//
+// It books many patients at once, shrinks the doctor's hours while more bookings arrive, shrinks it twice at once, waits for the
+// background notifier, then has the affected patients pick new times at once, and checks the invariants in the database.
+
+import pg from 'pg';
+import { pathToFileURL } from 'node:url';
+import path from 'node:path';
+
+// The compiled backend (nest build) supplies the same password hashing the app verifies with. DIST_DIR points at another build output.
+const { hashPassword } = await import(pathToFileURL(path.resolve(process.env.DIST_DIR ?? 'dist', 'auth/password.js')).href);
+
+const BASE_URL = process.env.BASE_URL ?? 'http://localhost:3199/api';
+const DATABASE_URL = process.env.TEST_DATABASE_URL;
+const PATIENTS = Number(process.env.PATIENTS ?? 400);
+const PER_SLOT = 60;
+if (!DATABASE_URL) throw new Error('Set TEST_DATABASE_URL (a throwaway database).');
+if (!/_test(\?|$)/.test(DATABASE_URL)) throw new Error('Refusing to run: the database name must end in _test, because this script deletes appointments.');
+
+const PASSWORD = 'Load@1234';
+const db = new pg.Client({ connectionString: DATABASE_URL });
+await db.connect();
+
+const clinicDate = (offset) => {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + offset);
+  return d.toISOString().slice(0, 10);
+};
+const monday = (() => {
+  for (let n = 1; n < 9; n++) if (new Date(`${clinicDate(n)}T00:00:00Z`).getUTCDay() === 1) return clinicDate(n);
+})();
+
+const timings = {};
+const timed = async (name, fn) => {
+  const started = performance.now();
+  const result = await fn();
+  (timings[name] ??= []).push(performance.now() - started);
+  return result;
+};
+const pct = (values, p) => [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor((values.length * p) / 100))];
+const pool = async (items, size, fn) => {
+  const results = new Array(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: size }, async () => {
+      while (next < items.length) {
+        const index = next++;
+        results[index] = await fn(items[index], index);
+      }
+    }),
+  );
+  return results;
+};
+const call = async (method, path, token, body) => {
+  const res = await fetch(`${BASE_URL}${path}`, { method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  return { status: res.status, body: await res.json().catch(() => null) };
+};
+const check = (name, ok, detail = '') => {
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  (${detail})` : ''}`);
+  if (!ok) process.exitCode = 1;
+};
+
+// ---- fixtures ----
+await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments; DELETE FROM schedule_overrides; DELETE FROM availability;');
+const hash = await hashPassword(PASSWORD);
+const upsertUser = async (name, email, role) =>
+  (await db.query('INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash RETURNING id', [name, email, hash, role])).rows[0].id;
+const specialtyId = (await db.query("INSERT INTO specialties (name) VALUES ('Load') ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id")).rows[0].id;
+const clinicId = (await db.query("INSERT INTO clinics (name, address) VALUES ('Load clinic', '1 Load St') RETURNING id")).rows[0].id;
+const doctorUser = await upsertUser('Dr. Load', 'load-doctor@test.local', 'DOCTOR');
+const doctorId =
+  (await db.query('SELECT id FROM doctors WHERE user_id = $1', [doctorUser])).rows[0]?.id ??
+  (await db.query('INSERT INTO doctors (user_id, clinic_id, specialty_id, consultation_minutes, default_daily_capacity, consultation_fee) VALUES ($1, $2, $3, 30, 20, 0) RETURNING id', [doctorUser, clinicId, specialtyId])).rows[0].id;
+await db.query('UPDATE doctors SET clinic_id = $2 WHERE id = $1', [doctorId, clinicId]);
+const patientEmails = [];
+for (let n = 1; n <= PATIENTS; n++) {
+  const email = `load-p${n}@test.local`;
+  const userId = await upsertUser(`Load Patient ${n}`, email, 'PATIENT');
+  await db.query('INSERT INTO patients (user_id, phone) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING', [userId, `+9190000${String(n).padStart(5, '0')}`]);
+  patientEmails.push(email);
+}
+const rowId = (
+  await db.query(
+    `INSERT INTO availability (doctor_id, recurrence_type, day_of_week, start_time, end_time, scheduling_mode, capacity_per_slot, slot_duration_minutes)
+     VALUES ($1, 'WEEKLY', 1, '10:00', '14:00', 'WAVE', $2, 30) RETURNING id`,
+    [doctorId, PER_SLOT],
+  )
+).rows[0].id;
+console.log(`fixtures: ${PATIENTS} patients, 1 doctor, Monday ${monday} 10:00-14:00, ${PER_SLOT} places per slot (${8 * PER_SLOT} seats)`);
+
+const login = async (email) => (await call('POST', '/auth/login', null, { email, password: PASSWORD })).body.accessToken;
+const doctorToken = await login('load-doctor@test.local');
+const tokens = await pool(patientEmails, 25, login);
+check('every patient could log in', tokens.every(Boolean));
+
+// ---- phase A: everyone books at once, spread over the 8 slots ----
+const slotStarts = ['10:00', '10:30', '11:00', '11:30', '12:00', '12:30', '13:00', '13:30'];
+const booked = await pool(tokens, 50, (token, index) => timed('book', () => call('POST', '/appointments', token, { doctorId, date: monday, startTime: slotStarts[index % 8] })));
+const created = booked.filter((r) => r.status === 201);
+check('all patients booked', created.length === PATIENTS, `${created.length}/${PATIENTS}, others: ${[...new Set(booked.filter((r) => r.status !== 201).map((r) => r.status))].join(',') || 'none'}`);
+
+// ---- phase B: shrink 10:00-14:00 -> 10:00-12:00 while late bookings race it, and the same shrink is sent twice ----
+const racers = tokens.slice(0, 40).map((token, index) => () => call('POST', '/appointments', token, { doctorId, date: monday, startTime: slotStarts[4 + (index % 4)] }));
+const shrinkBody = { startTime: '10:00', endTime: '12:00', from: { startTime: '10:00', endTime: '14:00' }, acknowledge: true };
+const [applyA, applyB, ...raced] = await Promise.all([
+  timed('apply', () => call('POST', `/doctor-portal/availability/${rowId}/change`, doctorToken, shrinkBody)),
+  timed('apply', () => call('POST', `/doctor-portal/availability/${rowId}/change`, doctorToken, shrinkBody)),
+  ...racers.map((run) => run()),
+]);
+check('the shrink was applied exactly once when sent twice', [applyA.status, applyB.status].filter((s) => s === 200).length === 1, `statuses ${applyA.status}, ${applyB.status}`);
+const affected = (await db.query("SELECT count(*)::int AS n FROM appointments WHERE status IN ('PENDING','CONFIRMED') AND start_time >= '12:00'")).rows[0].n;
+const tracked = (await db.query('SELECT count(*)::int AS n FROM schedule_change_appointments')).rows[0].n;
+check('every appointment left outside the hours is recorded', tracked === affected, `${tracked} recorded, ${affected} outside`);
+check('nothing was cancelled by the change', (await db.query("SELECT count(*)::int AS n FROM appointments WHERE status = 'CANCELLED'")).rows[0].n === 0);
+const lateAccepted = raced.filter((r) => r.status === 201).length;
+console.log(`        ${lateAccepted} late bookings landed before the change (and were recorded), ${raced.length - lateAccepted} were refused after it`);
+
+// ---- phase C: the background notifier ----
+const waitStarted = performance.now();
+let waiting = tracked;
+while (waiting > 0 && performance.now() - waitStarted < 180_000) {
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  waiting = (await db.query('SELECT count(*)::int AS n FROM schedule_change_appointments WHERE notified_at IS NULL AND resolved_at IS NULL AND attempts < 5')).rows[0].n;
+}
+check('every affected patient was asked by the background job', waiting === 0, `${((performance.now() - waitStarted) / 1000).toFixed(1)}s for ${tracked}; ${waiting} still waiting (is BACKGROUND_JOBS on?)`);
+const duplicates = (await db.query("SELECT appointment_id FROM notifications WHERE kind = 'needs-new-time' AND channel = 'email' GROUP BY appointment_id HAVING count(*) > 1")).rowCount;
+check('no patient was asked twice', duplicates === 0);
+
+// ---- phase D: the affected patients choose new times at once ----
+const affectedPatients = (await db.query("SELECT a.id AS appointment_id, u.email FROM appointments a JOIN patients p ON p.id = a.patient_id JOIN users u ON u.id = p.user_id WHERE a.status IN ('PENDING','CONFIRMED') AND a.start_time >= '12:00'")).rows;
+const byEmail = new Map(patientEmails.map((email, index) => [email, tokens[index]]));
+const moves = await pool(affectedPatients, 50, async (row) => {
+  const token = byEmail.get(row.email);
+  const options = await timed('alternatives', () => call('GET', `/appointments/${row.appointment_id}/alternatives`, token));
+  const choice = options.body?.alternatives?.[0];
+  if (!choice) return { status: 'none' };
+  return timed('reschedule', () => call('POST', `/appointments/${row.appointment_id}/reschedule`, token, { date: choice.date, startTime: choice.startTime }));
+});
+const moved = moves.filter((m) => m.status === 201).length;
+const refused = moves.filter((m) => m.status === 409).length;
+console.log(`        ${affectedPatients.length} affected: ${moved} moved, ${refused} refused (time taken, can choose again), ${moves.filter((m) => m.status === 'none').length} had nothing open`);
+
+// ---- invariants ----
+const q = async (sql) => (await db.query(sql)).rows;
+check('no place is double-booked', (await q("SELECT 1 FROM appointments WHERE status IN ('PENDING','CONFIRMED') GROUP BY doctor_id, appointment_date, start_time, slot_number HAVING count(*) > 1")).length === 0);
+check('no slot is over capacity', (await q("SELECT 1 FROM appointments WHERE status IN ('PENDING','CONFIRMED') GROUP BY doctor_id, appointment_date, start_time HAVING count(*) > max(slot_capacity)")).length === 0);
+check('no appointment was lost or duplicated by a move', (await q("SELECT 1 FROM appointments c WHERE c.rescheduled_from_id IS NOT NULL AND c.status IN ('PENDING','CONFIRMED') GROUP BY c.rescheduled_from_id HAVING count(*) > 1")).length === 0);
+check('every moved appointment kept exactly one active replacement', (await q("SELECT 1 FROM appointments o WHERE o.status = 'CANCELLED' AND o.cancel_reason = 'Rescheduled by patient' AND (SELECT count(*) FROM appointments n WHERE n.rescheduled_from_id = o.id AND n.status IN ('PENDING','CONFIRMED')) <> 1")).length === 0);
+check('every unmoved affected appointment is still booked and recorded', (await q("SELECT 1 FROM appointments a WHERE a.status IN ('PENDING','CONFIRMED') AND a.start_time >= '12:00' AND NOT EXISTS (SELECT 1 FROM schedule_change_appointments s WHERE s.appointment_id = a.id)")).length === 0);
+
+console.log('\nlatency (ms)            n      p50      p95      max');
+for (const [name, values] of Object.entries(timings)) console.log(`${name.padEnd(20)} ${String(values.length).padStart(5)} ${pct(values, 50).toFixed(0).padStart(8)} ${pct(values, 95).toFixed(0).padStart(8)} ${Math.max(...values).toFixed(0).padStart(8)}`);
+await db.end();

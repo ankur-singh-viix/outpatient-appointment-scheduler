@@ -78,7 +78,9 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
   const shown = preview.data;
   const settled = ready && shown !== undefined && !preview.loading;
   const affected = settled && shown ? shown.affectedAppointments : [];
-  const needsAgreement = affected.length > 0;
+  // The list shows the first few; the count covers every affected appointment.
+  const affectedTotal = settled && shown ? shown.affectedCount : 0;
+  const needsAgreement = affectedTotal > 0;
 
   const apply = async () => {
     if (!shown?.canApply || (needsAgreement && !agreed)) return;
@@ -104,7 +106,7 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
       if (shown.addedSlots) parts.push(`${plural(shown.addedSlots, 'new slot')} open for booking`);
       if (shown.removedSlots) parts.push(`${plural(shown.removedSlots, 'slot')} closed to new bookings`);
       onApplied(
-        `${target.title}: ${parts.join(', ')}.${needsAgreement ? ` ${plural(affected.length, 'patient')} ${affected.length === 1 ? 'was' : 'were'} asked to choose a new time; their appointments stay booked until they do.` : ''}`,
+        `${target.title}: ${parts.join(', ')}.${needsAgreement ? ` ${plural(affectedTotal, 'patient')} ${affectedTotal === 1 ? 'is being' : 'are being'} asked to choose a new time; their appointments stay booked until they do.` : ''}`,
       );
     } catch (err) {
       setError(errorMessage(err));
@@ -211,13 +213,13 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
               </div>
             )}
 
-            {shown.canApply && reducing && affected.length === 0 && <p className="text-sm text-muted-foreground">No booked appointment falls outside the new hours, so nobody needs to be contacted.</p>}
+            {shown.canApply && reducing && affectedTotal === 0 && <p className="text-sm text-muted-foreground">No booked appointment falls outside the new hours, so nobody needs to be contacted.</p>}
 
             {needsAgreement && (
               <section aria-labelledby="affected-heading" className="space-y-3 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
                 <h3 id="affected-heading" className="flex items-center gap-2 font-semibold">
                   <TriangleAlertIcon className="size-4 shrink-0" aria-hidden />
-                  {plural(affected.length, 'booked appointment')} {affected.length === 1 ? 'falls' : 'fall'} outside the new hours
+                  {plural(affectedTotal, 'booked appointment')} {affectedTotal === 1 ? 'falls' : 'fall'} outside the new hours
                 </h3>
                 <p>
                   They stay booked. After you save, each patient is emailed and asked to choose a new time; an appointment moves only when its patient confirms. Cancelling is
@@ -262,6 +264,11 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
                     </li>
                   ))}
                 </ul>
+                {affectedTotal > affected.length && (
+                  <p className="text-muted-foreground">
+                    Showing the first {affected.length}. The other {affectedTotal - affected.length} are asked the same way; you can follow all of them from the list that appears on this page.
+                  </p>
+                )}
                 {shown.withoutAlternatives > 0 && (
                   <p className="font-medium">
                     {plural(shown.withoutAlternatives, 'appointment')} {shown.withoutAlternatives === 1 ? 'has' : 'have'} no open alternative right now.

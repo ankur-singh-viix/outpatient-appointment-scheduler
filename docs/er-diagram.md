@@ -176,6 +176,34 @@ erDiagram
         varchar dedupe_key UK
     }
 
+    schedule_changes {
+        uuid id PK
+        uuid doctor_id FK "ON DELETE CASCADE"
+        uuid availability_id FK "nullable; ON DELETE SET NULL"
+        varchar kind "EXPAND | SHRINK | MIXED"
+        date apply_from "first date the new hours apply to"
+        time old_start_time
+        time old_end_time
+        time new_start_time
+        time new_end_time
+        int affected_count "booked appointments left outside the new hours, default 0"
+        uuid created_by_user_id FK "nullable; ON DELETE SET NULL"
+        timestamptz created_at
+    }
+
+    schedule_change_appointments {
+        uuid change_id PK "FK to schedule_changes; ON DELETE CASCADE"
+        uuid appointment_id PK "FK to appointments; ON DELETE CASCADE"
+        timestamptz created_at
+        timestamptz notified_at "set when the patient was asked (or was already asked in the last 24 hours)"
+        timestamptz resolved_at "set together with resolution"
+        date proposed_date "optional time the doctor suggested"
+        time proposed_start_time
+        time proposed_end_time
+        smallint attempts "failed attempts to queue the notice, default 0"
+        varchar resolution "RESCHEDULED | CANCELLED | COVERED | CLOSED; NULL while open"
+    }
+
     external_identities {
         varchar provider PK "UK with external_id, e.g. clerk"
         varchar external_id PK "the provider's user id"
@@ -201,6 +229,11 @@ erDiagram
     patients ||--o{ payments : "pays"
     payments ||--o{ refunds : "refunded by"
     appointments ||--o{ notifications : "notifies about"
+    doctors ||--o{ schedule_changes : "changes hours"
+    availability |o--o{ schedule_changes : "hours changed on"
+    users |o--o{ schedule_changes : "made by"
+    schedule_changes ||--o{ schedule_change_appointments : "leaves outside hours"
+    appointments ||--o{ schedule_change_appointments : "tracked until resolved"
     users ||--o| notification_preferences : "chooses"
 ```
 
@@ -327,3 +360,24 @@ ALTER TABLE appointments
 - Appointments are medical and audit history. Deleting a patient, doctor or user must **not** cascade-delete their appointments, so these FKs use `ON DELETE RESTRICT`.
 - Prefer **soft delete** for people and clinics, for example a future `deleted_at` or `is_active` column, so history stays readable. These columns aren't in the model yet. Add them when user and clinic management is built.
 - Rows that are purely configuration (`availability`, `schedule_overrides`, `receptionist_assignments`) can be hard-deleted safely, because no appointment references them.
+
+### 7. Schedule changes (migration 011)
+
+When a doctor changes the hours of an availability row, `schedule_changes` records the change and `schedule_change_appointments` follows each booked appointment it left outside the new hours until someone settles it. Neither table changes an appointment or a payment: the appointment keeps its own status.
+
+```sql
+-- schedule_changes
+CHECK (kind IN ('EXPAND', 'SHRINK', 'MIXED'))
+CHECK (affected_count >= 0)
+-- doctor_id -> doctors(id) ON DELETE CASCADE; availability_id -> availability(id) and created_by_user_id -> users(id), both ON DELETE SET NULL
+-- index idx_schedule_changes_doctor (doctor_id, created_at DESC)
+
+-- schedule_change_appointments: PRIMARY KEY (change_id, appointment_id)
+-- change_id -> schedule_changes(id) ON DELETE CASCADE; appointment_id -> appointments(id) ON DELETE CASCADE
+CHECK (resolution IN ('RESCHEDULED', 'CANCELLED', 'COVERED', 'CLOSED'))
+CHECK ((resolved_at IS NULL) = (resolution IS NULL))
+-- partial index idx_sca_pending_notice (created_at) WHERE notified_at IS NULL AND resolved_at IS NULL   -- the notifier's queue
+-- partial index idx_sca_open_by_appointment (appointment_id) WHERE resolved_at IS NULL
+```
+
+`resolution` is `RESCHEDULED` when the patient moved, `CANCELLED` when the appointment was cancelled, `COVERED` when the hours were widened again, and `CLOSED` for any other end.

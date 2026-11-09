@@ -67,6 +67,8 @@ const applyHoursChangeSchema = hoursChangeSchema.extend({
   acknowledge: z.boolean().optional(),
   proposals: z.array(z.strictObject({ appointmentId: z.uuid(), date: dateSchema, startTime: timeSchema })).max(200).optional(),
 });
+const outsideQuery = z.object({ cursor: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).optional() });
+const historyQuery = z.object({ limit: z.coerce.number().int().min(1).max(50).optional() });
 const askNewTimeSchema = z.strictObject({ proposal: z.strictObject({ date: dateSchema, startTime: timeSchema }).optional() }).optional();
 
 // A day off needs only a date. Add a start and an end to block just that part of the day. Custom hours also need a capacity.
@@ -113,8 +115,14 @@ export class DoctorPortalController {
 
   /** Booked appointments that are outside the doctor's current hours, with open times and whether the patient was asked to move. */
   @Get('appointments/outside-hours')
-  outsideHours(@CurrentUser() user: AuthUser) {
-    return this.changes.outsideHours(user);
+  outsideHours(@CurrentUser() user: AuthUser, @Query(new ZodValidationPipe(outsideQuery)) query: z.infer<typeof outsideQuery>) {
+    return this.changes.outsideHours(user, query);
+  }
+
+  /** The doctor's recent reductions of hours and how many of their affected appointments are still unresolved. */
+  @Get('schedule-changes')
+  scheduleChanges(@CurrentUser() user: AuthUser, @Query(new ZodValidationPipe(historyQuery)) query: z.infer<typeof historyQuery>) {
+    return this.changes.history(user, query.limit);
   }
 
   /** Asks the patient to choose a new time. It moves nothing: the patient confirms the move themselves. */

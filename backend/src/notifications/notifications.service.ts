@@ -155,6 +155,20 @@ export class NotificationsService {
     });
   }
 
+  /**
+   * Same request as appointmentNeedsNewTime, for the background notifier: it queues the message in the caller's transaction and
+   * lets a failure reach the caller (which retries and counts it) instead of swallowing it. Nothing is sent here; the outbox
+   * dispatcher sends it, so no transaction is ever open while an email or text goes out.
+   */
+  async queueNewTimeRequest(
+    manager: EntityManager,
+    appointmentId: string,
+    input: { link: string; changeKey: string; proposed?: { date: string; startTime: string; endTime: string } },
+  ): Promise<void> {
+    const loaded = await this.load(manager, appointmentId);
+    await this.enqueue(manager, this.toPatient(loaded, templates.needsNewTime(loaded.facts, input), `needs-new-time:${appointmentId}:${input.changeKey}`));
+  }
+
   /** A successful payment: the receipt goes to the patient (the doctor learns of the paid booking from the confirmation). */
   async paymentReceived(manager: EntityManager, appointmentId: string, input: { amountPaise: number; receipt: string }): Promise<void> {
     await this.safely(manager, `payment receipt for ${appointmentId}`, async (inner) => {

@@ -6,18 +6,19 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { Between, DataSource, EntityManager, Repository } from 'typeorm';
 import type { AuthUser } from '../auth/auth.types.js';
 import { loadConfig } from '../config.js';
-import { ACTIVE_STATUSES, Appointment, Availability, Doctor, Patient } from '../database/entities/index.js';
+import { ACTIVE_STATUSES, Appointment, Availability, Doctor, Patient, ScheduleOverride, slotIntervalOf } from '../database/entities/index.js';
 import { isSlotConflict } from '../database/errors.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import type { PaymentSummary } from '../payments/payment-summary.js';
 import { changeBlockedReason } from '../scheduling/appointment-rules.js';
-import { clinicNow } from '../scheduling/calendar.js';
-import { loadDaySchedule } from '../scheduling/day-schedule.js';
-import { appointmentsOutsideHours } from '../scheduling/outside-hours.js';
+import { addDays, clinicNow } from '../scheduling/calendar.js';
+import { bookedLoader, openTimes } from '../scheduling/open-times.js';
+import { loadDaySchedule, toRule } from '../scheduling/day-schedule.js';
+import { appointmentsOutsideHours, toOverride } from '../scheduling/outside-hours.js';
 import { hhmm, nextFreeSeat, type Slot } from '../scheduling/slots.js';
 
 export interface BookAppointmentInput {
@@ -254,6 +255,41 @@ export class AppointmentsService {
       if (isSlotConflict(error)) throw new ConflictException(SLOT_TAKEN);
       throw error;
     }
+  }
+
+  /** How many other times the patient is offered when choosing a new one. */
+  private static readonly ALTERNATIVES = 8;
+
+  /**
+   * Other times the patient can move their own upcoming appointment to, nearest first: open slots of the same doctor under the
+   * doctor's current hours, with a free place, not started, no overlap. Read-only; the move itself is the normal reschedule, which
+   * re-checks everything under the doctor lock, so a time taken in the meantime is refused there and nothing is overbooked.
+   * `needsNewTime` says the doctor's hours changed so that this appointment no longer fits.
+   */
+  async alternativesFor(user: AuthUser, id: string) {
+    const patientId = await this.patientIdFor(user.id);
+    const manager = this.dataSource.manager;
+    const appointment = await manager.findOne(Appointment, { where: { id, patientId } });
+    if (!appointment) throw new NotFoundException('Appointment not found.');
+    this.assertChangeable(appointment);
+    if (appointment.status === 'PENDING') throw new ConflictException('Finish paying for this booking, or cancel it, before rescheduling.');
+    const doctor = await manager.findOneByOrFail(Doctor, { id: appointment.doctorId });
+    const clock = clinicNow(this.config.clinicTimezone);
+    const lastDate = addDays(clock.date, this.config.bookingWindowDays);
+    const rules = (await manager.findBy(Availability, { doctorId: doctor.id })).map(toRule);
+    const overrides = new Map((await manager.find(ScheduleOverride, { where: { doctorId: doctor.id, overrideDate: Between(clock.date, lastDate) } })).map((row) => [row.overrideDate, toOverride(row)]));
+    const found = await openTimes({
+      targets: [{ id: appointment.id, date: appointment.appointmentDate, startTime: appointment.startTime }],
+      rules,
+      overrides,
+      elastic: { consultationMinutes: doctor.consultationMinutes, defaultCapacity: doctor.defaultDailyCapacity, slotIntervalMinutes: slotIntervalOf(doctor) },
+      clock,
+      lastDate,
+      bookedOn: bookedLoader(manager, doctor.id, lastDate),
+      limit: AppointmentsService.ALTERNATIVES,
+    });
+    const outside = await appointmentsOutsideHours(manager, doctor.id, [{ id: appointment.id, date: appointment.appointmentDate, startTime: appointment.startTime, endTime: appointment.endTime }]);
+    return { appointmentId: appointment.id, doctorId: doctor.id, needsNewTime: outside.has(appointment.id), alternatives: found.get(appointment.id) ?? [], searchedUntil: lastDate };
   }
 
   async listForPatient(user: AuthUser) {
