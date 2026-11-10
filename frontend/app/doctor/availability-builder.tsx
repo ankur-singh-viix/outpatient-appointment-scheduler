@@ -53,7 +53,7 @@ export function AvailabilityBuilder({
   const [startTime, setStartTime] = useState(editing?.startTime.slice(0, 5) ?? '09:00');
   const [endTime, setEndTime] = useState(editing?.endTime.slice(0, 5) ?? '13:00');
   const [slotMinutes, setSlotMinutes] = useState(editing?.slotDurationMinutes ?? availability.consultationMinutes);
-  const [patients, setPatients] = useState(editing && editing.schedulingMode === 'WAVE' ? editing.capacityPerSlot : 3);
+  const [patients, setPatients] = useState(editing && editing.schedulingMode === 'WAVE' ? editing.capacityPerSlot : availability.suggestedCapacityPerSlot);
   const [sessionCap, setSessionCap] = useState<number | null>(editing?.capacity ?? null);
   const [from, setFrom] = useState(editing?.effectiveFrom ?? '');
   const [to, setTo] = useState(editing?.effectiveTo ?? '');

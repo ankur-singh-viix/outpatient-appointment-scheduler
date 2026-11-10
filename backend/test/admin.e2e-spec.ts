@@ -223,7 +223,7 @@ describe('Admin-managed receptionists (e2e)', () => {
     const status = () => http().get('/api/admin/email-status').set(as(adminToken));
     const saved = { ...process.env };
     afterEach(() => {
-      for (const key of ['NODE_ENV', 'RESEND_API_KEY', 'EMAIL_FROM']) {
+      for (const key of ['NODE_ENV', 'RESEND_API_KEY', 'BREVO_API_KEY', 'EMAIL_FROM']) {
         if (saved[key] === undefined) delete process.env[key];
         else process.env[key] = saved[key];
       }
@@ -249,7 +249,7 @@ describe('Admin-managed receptionists (e2e)', () => {
 
     it('is off in production without a verified sender, with a reason that never contains a key', async () => {
       process.env.NODE_ENV = 'production';
-      expect((await status().expect(200)).body).toEqual({ mode: 'disabled', testingSender: false, problem: 'RESEND_API_KEY is not set.' });
+      expect((await status().expect(200)).body).toEqual({ mode: 'disabled', testingSender: false, problem: 'No email provider key is set (BREVO_API_KEY or RESEND_API_KEY).' });
       process.env.RESEND_API_KEY = 're_a_secret_key';
       process.env.EMAIL_FROM = 'CareSlot <onboarding@resend.dev>';
       const refused = (await status().expect(200)).body as { mode: string; problem: string };
@@ -258,6 +258,20 @@ describe('Admin-managed receptionists (e2e)', () => {
       expect(JSON.stringify(refused)).not.toContain('re_a_secret_key');
       process.env.EMAIL_FROM = 'CareSlot <no-reply@clinic.example>';
       expect((await status().expect(200)).body).toMatchObject({ mode: 'provider', problem: null });
+    });
+
+    it('reports Brevo as a provider once its key and a sender are set, and off again without the sender', async () => {
+      process.env.NODE_ENV = 'production';
+      delete process.env.RESEND_API_KEY;
+      process.env.BREVO_API_KEY = 'xkeysib-a-secret-key';
+      delete process.env.EMAIL_FROM;
+      const missing = (await status().expect(200)).body as { mode: string; problem: string };
+      expect(missing.mode).toBe('disabled');
+      expect(missing.problem).toMatch(/EMAIL_FROM is not set.*verified in Brevo/);
+      expect(JSON.stringify(missing)).not.toContain('xkeysib-a-secret-key');
+      process.env.EMAIL_FROM = 'CareSlot <no-reply@clinic.example>';
+      expect((await status().expect(200)).body).toEqual({ mode: 'provider', testingSender: false, problem: null });
+      delete process.env.BREVO_API_KEY;
     });
   });
 

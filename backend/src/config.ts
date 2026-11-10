@@ -12,14 +12,16 @@ export interface AppConfig {
   bookingWindowDays: number;
   /**
    * How emails (sign-up codes, invitations, booking notices) are delivered, chosen from NODE_ENV:
-   * - development and tests: Resend when RESEND_API_KEY is set, otherwise the terminal ("log"), which sends nothing;
-   * - production: Resend, only with RESEND_API_KEY and an EMAIL_FROM on a domain verified in Resend, otherwise "disabled".
+   * - development and tests: Brevo (BREVO_API_KEY) or Resend (RESEND_API_KEY) when a key is set, otherwise the terminal ("log"),
+   *   which sends nothing. EMAIL_PROVIDER=brevo|resend picks one when both keys are present; otherwise Brevo is used;
+   * - production: the provider, only with its key and an EMAIL_FROM on a sender or domain verified there, otherwise "disabled".
    */
   emailDelivery: EmailDelivery;
-  /** Why email is "disabled" (never contains the key), or null. */
+  /** Why email is "disabled" (or, in development, falls back to the terminal) when a key is set. Never contains the key. Otherwise null. */
   emailProblem: string | null;
   resendApiKey: string;
-  /** The "from" address; with Resend it must be on a domain you have verified there. */
+  brevoApiKey: string;
+  /** The "from" address; it must be a sender (Brevo) or on a domain (Resend) you have verified with the provider. */
   emailFrom: string;
   clerk: ClerkConfig;
   payments: PaymentsConfig;
@@ -27,6 +29,13 @@ export interface AppConfig {
   notifications: NotificationDeliveryConfig;
   /** How many hours before an appointment a reminder email goes out (one email per entry). Empty turns reminders off. */
   reminderHoursBefore: number[];
+  /**
+   * Minimum notice for schedule changes (SCHEDULE_CHANGE_MIN_NOTICE_HOURS, default 2, 0 turns it off): a change that would affect an
+   * appointment less than this many hours away, or already under way, is refused. Counted in the clinic's time zone.
+   */
+  scheduleChangeNoticeHours: number;
+  /** Hours between contacts with a patient who has not chosen a new time (SCHEDULE_REMINDER_COOLDOWN_HOURS, default 24): the first message, then at most two reminders. */
+  scheduleReminderCooldownHours: number;
   /** Runs the background workers (expiring unpaid holds, sending due emails, settling refunds). Off in tests that call them directly. */
   backgroundJobs: boolean;
 }
@@ -70,7 +79,7 @@ export interface RefundPolicy {
   partialRefundPercent: number;
 }
 
-export type EmailDelivery = 'resend' | 'log' | 'disabled';
+export type EmailDelivery = 'brevo' | 'resend' | 'log' | 'disabled';
 
 /** Clerk (hosted sign-in). Off unless CLERK_SECRET_KEY is set, so the legacy login keeps working on its own. */
 export interface ClerkConfig {
@@ -94,19 +103,51 @@ export function usesResendTestingSender(from: string): boolean {
   return /@resend\.dev>?\s*$/i.test(from.trim());
 }
 
+/** The address part of an EMAIL_FROM such as `CareSlot <no-reply@clinic.example>` or `no-reply@clinic.example`, or null when it is not one. */
+export function parseSender(from: string): { name: string | null; email: string } | null {
+  const match = /^\s*(?:"?([^"<]*?)"?\s*)?<\s*([^<>\s@]+@[^<>\s@]+\.[^<>\s@]+)\s*>\s*$/.exec(from) ?? /^\s*()([^<>\s@]+@[^<>\s@]+\.[^<>\s@]+)\s*$/.exec(from);
+  return match ? { name: match[1]?.trim() || null, email: match[2] } : null;
+}
+
 /**
  * The one place that decides how email is delivered. Production never prints emails (an invitation link or sign-up code in a log
- * is a credential) and never uses the testing sender (it cannot reach real recipients), so without a key and a verified sender it
- * is switched off, with a reason that is safe to show. Anywhere else, no key means the terminal, which is for development only.
+ * is a credential) and never uses a shared testing sender (it cannot reach real recipients), so without a key and a verified
+ * sender it is switched off, with a reason that is safe to show. Anywhere else, no key means the terminal, which is for
+ * development only; a key without a usable sender also falls back to the terminal there, with the reason.
+ *
+ * Which provider: EMAIL_PROVIDER=brevo|resend when set; otherwise Brevo if BREVO_API_KEY is set, else Resend if RESEND_API_KEY is.
  */
-function chooseEmailDelivery(args: { production: boolean; hasKey: boolean; explicitFrom: string }): { delivery: EmailDelivery; problem: string | null } {
-  if (!args.production) return { delivery: args.hasKey ? 'resend' : 'log', problem: null };
-  if (!args.hasKey) return { delivery: 'disabled', problem: 'RESEND_API_KEY is not set.' };
-  if (!args.explicitFrom) return { delivery: 'disabled', problem: 'EMAIL_FROM is not set. Use an address on a domain you have verified in Resend.' };
-  if (usesResendTestingSender(args.explicitFrom)) {
-    return { delivery: 'disabled', problem: 'EMAIL_FROM uses Resend\'s testing sender (resend.dev), which cannot email real recipients. Use an address on a domain you have verified in Resend.' };
+function chooseEmailDelivery(args: {
+  production: boolean;
+  resendKey: boolean;
+  brevoKey: boolean;
+  explicitFrom: string;
+  provider: string;
+}): { delivery: EmailDelivery; problem: string | null } {
+  const requested = args.provider === 'brevo' || args.provider === 'resend' ? args.provider : null;
+  const provider = requested ?? (args.brevoKey ? 'brevo' : args.resendKey ? 'resend' : null);
+  const label = provider === 'brevo' ? 'Brevo' : 'Resend';
+  const keyName = provider === 'brevo' ? 'BREVO_API_KEY' : 'RESEND_API_KEY';
+  const hasKey = provider === 'brevo' ? args.brevoKey : provider === 'resend' ? args.resendKey : false;
+  const fallback = (problem: string): { delivery: EmailDelivery; problem: string } => ({ delivery: args.production ? 'disabled' : 'log', problem });
+
+  if (!provider || !hasKey) {
+    if (!args.production) return { delivery: 'log', problem: null };
+    return { delivery: 'disabled', problem: provider ? `${keyName} is not set.` : 'No email provider key is set (BREVO_API_KEY or RESEND_API_KEY).' };
   }
-  return { delivery: 'resend', problem: null };
+  if (provider === 'resend') {
+    if (!args.production) return { delivery: 'resend', problem: null };
+    if (!args.explicitFrom) return { delivery: 'disabled', problem: 'EMAIL_FROM is not set. Use an address on a domain you have verified in Resend.' };
+    if (usesResendTestingSender(args.explicitFrom)) {
+      return { delivery: 'disabled', problem: 'EMAIL_FROM uses Resend\'s testing sender (resend.dev), which cannot email real recipients. Use an address on a domain you have verified in Resend.' };
+    }
+    return { delivery: 'resend', problem: null };
+  }
+  // Brevo only sends from a sender you have verified in its dashboard, so an explicit, well-formed EMAIL_FROM is always required.
+  if (!args.explicitFrom) return fallback(`EMAIL_FROM is not set. Use a sender you have verified in ${label} (Senders, Domains & Dedicated IPs).`);
+  if (!parseSender(args.explicitFrom)) return fallback('EMAIL_FROM is not a valid address. Use NAME <address@your-domain> or address@your-domain.');
+  if (usesResendTestingSender(args.explicitFrom)) return fallback(`EMAIL_FROM is Resend's testing sender, which ${label} cannot send from. Use a sender you have verified in ${label}.`);
+  return { delivery: 'brevo', problem: null };
 }
 
 export function loadConfig(): AppConfig {
@@ -120,11 +161,14 @@ export function loadConfig(): AppConfig {
   };
 
   const resendApiKey = process.env.RESEND_API_KEY ?? '';
+  const brevoApiKey = (process.env.BREVO_API_KEY ?? '').trim();
   const emailFrom = process.env.EMAIL_FROM ?? 'CareSlot <onboarding@resend.dev>';
   const { delivery: emailDelivery, problem: emailProblem } = chooseEmailDelivery({
     production,
-    hasKey: resendApiKey.trim().length > 0,
+    resendKey: resendApiKey.trim().length > 0,
+    brevoKey: brevoApiKey.length > 0,
     explicitFrom: (process.env.EMAIL_FROM ?? '').trim(),
+    provider: (process.env.EMAIL_PROVIDER ?? '').trim().toLowerCase(),
   });
 
   const corsOrigins = (process.env.CORS_ORIGIN ?? 'http://localhost:3001')
@@ -162,6 +206,7 @@ export function loadConfig(): AppConfig {
     emailDelivery,
     emailProblem,
     resendApiKey,
+    brevoApiKey,
     emailFrom,
     clerk: {
       enabled: Boolean(clerkSecretKey),
@@ -198,5 +243,7 @@ export function loadConfig(): AppConfig {
       .map((hours) => Number(hours.trim()))
       .filter((hours) => Number.isFinite(hours) && hours > 0),
     backgroundJobs: process.env.BACKGROUND_JOBS !== 'false',
+    scheduleChangeNoticeHours: Math.min(numberFrom('SCHEDULE_CHANGE_MIN_NOTICE_HOURS', 2), 72),
+    scheduleReminderCooldownHours: Math.min(numberFrom('SCHEDULE_REMINDER_COOLDOWN_HOURS', 24), 168),
   };
 }

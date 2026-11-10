@@ -417,6 +417,22 @@ export interface OutsideHoursAppointment extends AffectedAppointment {
   asked: { at: string; status: string } | null;
   /** The change is recorded but the background job has not asked this patient yet. */
   noticePending: boolean;
+  followUp: FollowUp;
+}
+
+/** Where an unresolved patient stands, so the doctor knows who needs a personal follow-up. */
+export interface FollowUp {
+  state: 'NOT_ASKED' | 'WAITING' | 'NO_RESPONSE' | 'NO_ALTERNATIVES';
+  /** Automatic reminders sent after the first message (at most two). */
+  reminders: number;
+  lastContactAt: string | null;
+}
+
+/** What needs the doctor's attention (dashboard). */
+export interface AttentionSummary {
+  needsNewTime: number;
+  noResponse: number;
+  noAlternatives: number;
 }
 
 /** One page of appointments outside the doctor's hours; `nextCursor` asks for the following page. */
@@ -449,7 +465,16 @@ export interface AppointmentAlternatives {
   doctorId: string;
   needsNewTime: boolean;
   alternatives: OpenTime[];
+  /** Pass back as `cursor` for the next page of later times; null when there is no more. */
+  nextCursor: string | null;
   searchedUntil: string;
+}
+
+/** A date that has sessions, with how much room is left on it (the calendar). A date with no sessions is not listed. */
+export interface OpenDay {
+  date: string;
+  open: number;
+  places: number;
 }
 
 /** One working session on a date, with every slot cut from it. */
@@ -488,6 +513,8 @@ export interface DoctorAvailability {
   /** True when the doctor chose their own interval; false while it simply follows the visit length. */
   slotIntervalCustom: boolean;
   defaultCapacity: number;
+  /** What a new Wave session starts with: what the doctor already uses most, else the clinic default. */
+  suggestedCapacityPerSlot: number;
   weekly: WeeklyHours[];
   oneTime: OneTimeSession[];
   overrides: DateOverride[];

@@ -11,7 +11,8 @@ import { addDays, clinicNow, isValidDate } from '../scheduling/calendar.js';
 import { loadDaySchedule, toRule } from '../scheduling/day-schedule.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
-import { reconcileCoverage } from '../scheduling/schedule-reconciler.js';
+import { assertTransition } from '../appointments/appointment-lifecycle.js';
+import { AvailabilityChangeService, pendingRule } from './availability-change.service.js';
 import { hhmm, toMinutes } from '../scheduling/slots.js';
 
 /** What every availability row (weekly or one-time) can say. Everything but the times is optional: a plain row is STREAM, one patient per slot, the doctor's slot length. */
@@ -56,6 +57,7 @@ export class DoctorPortalService {
     private readonly dataSource: DataSource,
     private readonly payments: PaymentsService,
     private readonly notifications: NotificationsService,
+    private readonly changes: AvailabilityChangeService,
   ) {}
 
   /** Appointments booked with the signed-in doctor. `upcoming` = today onwards. */
@@ -92,6 +94,7 @@ export class DoctorPortalService {
         clinicNow(this.config.clinicTimezone),
       );
       if (blocked) throw new ConflictException(blocked);
+      assertTransition(appointment.status, 'CANCELLED');
       appointment.status = 'CANCELLED';
       appointment.cancelReason = reason;
       appointment.cancelledAt = new Date();
@@ -133,6 +136,8 @@ export class DoctorPortalService {
       /** True when the doctor chose their own interval, false while it simply follows the appointment length. */
       slotIntervalCustom: doctor.slotIntervalMinutes !== null,
       defaultCapacity: doctor.defaultDailyCapacity,
+      /** What a new Wave session starts with: what this doctor already uses most (so sessions stay consistent), else the clinic default. */
+      suggestedCapacityPerSlot: suggestedCapacityPerSlot([...weekly, ...oneTime]),
       weekly: weekly.map((row) => ({ id: row.id, dayOfWeek: row.dayOfWeek, ...describeRow(row) })),
       /** Sessions for one date only, from today on. They take priority over the weekly hours for the time they overlap. */
       oneTime: oneTime.map((row) => ({ id: row.id, date: row.specificDate, ...describeRow(row) })),
@@ -252,7 +257,7 @@ export class DoctorPortalService {
    * Replaces the doctor's whole weekly schedule (one-time sessions are not touched). Existing appointments are not changed. Rows
    * that come back unchanged keep their id, so the appointments booked from them keep pointing at them.
    */
-  async replaceWeekly(user: AuthUser, hours: WeeklyHoursInput[]) {
+  async replaceWeekly(user: AuthUser, hours: WeeklyHoursInput[], acknowledge = false) {
     const doctor = await this.profileFor(user);
     const wanted = hours.map((row) => ({
       ...this.completeRow(doctor, row),
@@ -263,7 +268,7 @@ export class DoctorPortalService {
     for (const row of wanted) this.assertRowValid(row, DAY_NAMES[row.dayOfWeek]);
     assertNoOverlap(wanted.map((row) => ({ ...row, label: DAY_NAMES[row.dayOfWeek], group: String(row.dayOfWeek) })));
 
-    const restored = await this.dataSource.transaction(async (manager) => {
+    const outcome = await this.dataSource.transaction(async (manager) => {
       await manager.findOne(Doctor, { where: { id: doctor.id }, lock: { mode: 'pessimistic_write' } });
       // Only the rows the editor showed. Ended rows are history and must survive a save.
       const today = clinicNow(this.config.clinicTimezone).date;
@@ -276,13 +281,37 @@ export class DoctorPortalService {
         if (same?.length) same.pop();
         else toInsert.push(row);
       }
-      const toDelete = [...unused.values()].flat().map((row) => row.id);
+      const removedRows = [...unused.values()].flat();
+      // Rows with upcoming bookings never go through the plain delete-and-insert below: a settings-only edit is done in place (never
+      // below the bookings made), a change of hours is refused (use Adjust hours), and a removal ends the session through the same
+      // safe workflow as Adjust hours (bookings stay, patients are asked, the minimum-notice window applies).
+      const guard = await this.changes.guardWeeklyReplace(manager, user, doctor, { remove: removedRows, add: toInsert, acknowledge });
+      const toDelete = removedRows.filter((row) => !guard.handledRowIds.has(row.id)).map((row) => row.id);
+      const inserts = toInsert.filter((_, index) => !guard.handledInserts.has(index));
+      // What the rules will be once the rows are written: the same minimum-notice rule applies to the whole result, so new weekly
+      // hours cannot bring a near appointment back inside the hours either.
+      const deleteIds = new Set(toDelete);
+      if (toDelete.length > 0 || inserts.length > 0) {
+        await this.changes.assertAdditionAllowed(manager, doctor, (rules) => [
+          ...rules.filter((rule) => !(rule.id && deleteIds.has(rule.id))),
+          ...inserts.map((row, index) => pendingRule(row, `pending-${index}`)),
+        ]);
+      }
       if (toDelete.length) await manager.delete(Availability, { id: In(toDelete) });
-      if (toInsert.length) await manager.insert(Availability, toInsert.map((row) => ({ ...row, doctorId: doctor.id })));
+      if (inserts.length) await manager.insert(Availability, inserts.map((row) => ({ ...row, doctorId: doctor.id })));
       // Wider weekly hours may bring appointments that were waiting for a new time back inside them.
-      return this.releaseWaiting(manager, doctor.id);
+      const restored = await this.changes.settleAddition(
+        manager,
+        user,
+        doctor,
+        inserts.length > 0
+          ? { availabilityId: null, applyFrom: today, start: inserts.map((row) => row.startTime).sort()[0], end: inserts.map((row) => row.endTime).sort().at(-1) as string }
+          : undefined,
+      );
+      return { restored, asked: guard.results.reduce((sum, result) => sum + result.patientsAsked, 0) };
     });
-    return { ...(await this.availability(user)), restoredAppointments: restored };
+    this.changes.afterCommit({ patientsAsked: outcome.asked, restoredAppointments: outcome.restored });
+    return { ...(await this.availability(user)), restoredAppointments: outcome.restored, patientsAsked: outcome.asked };
   }
 
   /** Adds a session for one date only. It takes priority over the weekly hours for the time it overlaps. */
@@ -300,25 +329,26 @@ export class DoctorPortalService {
         ...sameDay.map((other) => ({ ...rowFields(other), label: input.date, group: input.date })),
         { ...row, label: input.date, group: input.date },
       ]);
-      await manager.insert(Availability, { ...row, doctorId: doctor.id });
-      // The usual reason for adding a session: a patient was left outside the hours and needs somewhere to go.
-      return this.releaseWaiting(manager, doctor.id);
+      // Adding hours can bring a waiting appointment back inside them, so the minimum-notice rule is checked before anything is written.
+      await this.changes.assertAdditionAllowed(manager, doctor, (rules) => [...rules, pendingRule(row, 'pending-one-time')]);
+      const inserted = await manager.insert(Availability, { ...row, doctorId: doctor.id });
+      // The usual reason for adding a session: a patient was left outside the hours and needs somewhere to go. Those released are
+      // recorded as an extension, and told their appointment is valid again if they had been asked to choose a new time.
+      return this.changes.settleAddition(manager, user, doctor, {
+        availabilityId: (inserted.identifiers[0]?.id as string | undefined) ?? null,
+        applyFrom: input.date,
+        start: row.startTime,
+        end: row.endTime,
+      });
     });
     return { ...(await this.availability(user)), restoredAppointments: restored };
   }
 
   /** Deletes a one-time session, unless patients have booked in it: those appointments must be cancelled first. */
-  async deleteOneTime(user: AuthUser, id: string) {
-    const doctor = await this.profileFor(user);
-    await this.dataSource.transaction(async (manager) => {
-      await manager.findOne(Doctor, { where: { id: doctor.id }, lock: { mode: 'pessimistic_write' } });
-      const row = await manager.findOneBy(Availability, { id, doctorId: doctor.id, recurrenceType: 'ONE_TIME' });
-      if (!row || !row.specificDate) throw new NotFoundException('No one-time session exists with that id.');
-      await this.payments.releaseLapsedHolds(manager, doctor.id);
-      await this.assertNoBookings(manager, doctor.id, row.specificDate, row.startTime, row.endTime);
-      await manager.delete(Availability, { id: row.id });
-    });
-    return this.availability(user);
+  async deleteOneTime(user: AuthUser, id: string, acknowledge = false) {
+    // Patients who booked it stay booked and are asked to choose a new time (see AvailabilityChangeService.removeOneTimeSession).
+    const summary = await this.changes.removeOneTimeSession(user, id, acknowledge);
+    return { ...(await this.availability(user)), ...summary };
   }
 
   /**
@@ -446,7 +476,7 @@ export class DoctorPortalService {
   }
 
   /** Creates or replaces the exception for one date (a day off, or different hours). */
-  async upsertOverride(user: AuthUser, input: DateOverrideInput) {
+  async upsertOverride(user: AuthUser, input: DateOverrideInput, acknowledge = false) {
     const doctor = await this.profileFor(user);
     if (!isValidDate(input.date)) throw new BadRequestException('Date must be a valid YYYY-MM-DD date.');
     if (input.date < clinicNow(this.config.clinicTimezone).date) {
@@ -465,43 +495,17 @@ export class DoctorPortalService {
       if (!input.startTime || !input.endTime) throw new BadRequestException('Give both a start and an end time to block part of the day, or neither to block all of it.');
       if (toMinutes(input.endTime) <= toMinutes(input.startTime)) throw new BadRequestException('The end of the blocked time must be after its start.');
     }
-    // Under the doctor lock like every other change of hours, so the bookkeeping for appointments waiting on a new time can follow.
-    const restored = await this.dataSource.transaction(async (manager) => {
-      await manager.findOne(Doctor, { where: { id: doctor.id }, lock: { mode: 'pessimistic_write' } });
-      await manager.upsert(
-        ScheduleOverride,
-        {
-          doctorId: doctor.id,
-          overrideDate: input.date,
-          isAvailable: input.isAvailable,
-          startTime: input.startTime ?? null,
-          endTime: input.endTime ?? null,
-          capacity: input.isAvailable ? (input.capacity ?? null) : null,
-          reason: input.reason?.trim() || null,
-        },
-        ['doctorId', 'overrideDate'],
-      );
-      // Replacement hours can cover appointments the day off or the old hours left out. A day off or a block only removes time.
-      return input.isAvailable ? this.releaseWaiting(manager, doctor.id) : 0;
-    });
-    return { ...(await this.availability(user)), restoredAppointments: restored };
+    // The same safe workflow as Adjust hours: appointments the exception would leave outside the hours stay booked and their patients
+    // are asked to choose a new time; an exception that would affect an appointment too close to now is refused whole.
+    const summary = await this.changes.setOverride(user, input, acknowledge);
+    return { ...(await this.availability(user)), ...summary };
   }
 
-  async deleteOverride(user: AuthUser, date: string) {
-    const doctor = await this.profileFor(user);
-    const restored = await this.dataSource.transaction(async (manager) => {
-      await manager.findOne(Doctor, { where: { id: doctor.id }, lock: { mode: 'pessimistic_write' } });
-      const result = await manager.delete(ScheduleOverride, { doctorId: doctor.id, overrideDate: date });
-      if (!result.affected) throw new NotFoundException('No exception exists for that date.');
-      // Lifting a day off or a block gives the date its normal hours back.
-      return this.releaseWaiting(manager, doctor.id);
-    });
-    return { ...(await this.availability(user)), restoredAppointments: restored };
-  }
-
-  /** After hours may have widened: lets appointments that were waiting for a new time and are inside the hours again go (see reconcileCoverage). */
-  private async releaseWaiting(manager: EntityManager, doctorId: string): Promise<number> {
-    return (await reconcileCoverage(manager, doctorId, clinicNow(this.config.clinicTimezone))).restored;
+  async deleteOverride(user: AuthUser, date: string, acknowledge = false) {
+    await this.profileFor(user);
+    // Lifting an exception gives the date its normal hours back, which can bring waiting appointments back inside them.
+    const summary = await this.changes.removeOverride(user, date, acknowledge);
+    return { ...(await this.availability(user)), ...summary };
   }
 
   private async profileFor(user: AuthUser): Promise<Doctor> {
@@ -574,6 +578,17 @@ function rowFields(
 
 function rowKey(row: Parameters<typeof rowFields>[0] & { dayOfWeek: number | null }): string {
   return JSON.stringify([row.dayOfWeek, ...Object.values(rowFields(row))]);
+}
+
+/** The clinic-wide starting point for patients per slot when a doctor has no Wave session yet. */
+export const DEFAULT_PATIENTS_PER_SLOT = 3;
+
+/** The patients-per-slot the doctor uses most across their current Wave sessions (the larger one on a tie), or the clinic default. */
+function suggestedCapacityPerSlot(rows: Availability[]): number {
+  const counts = new Map<number, number>();
+  for (const row of rows) if (row.schedulingMode === 'WAVE' && row.capacityPerSlot > 0) counts.set(row.capacityPerSlot, (counts.get(row.capacityPerSlot) ?? 0) + 1);
+  const best = [...counts.entries()].sort((x, y) => y[1] - x[1] || y[0] - x[0])[0];
+  return best ? best[0] : DEFAULT_PATIENTS_PER_SLOT;
 }
 
 /** How one availability row is shown to the doctor. */

@@ -80,7 +80,7 @@ export class AdminService {
   emailStatus() {
     const config = loadConfig();
     return {
-      mode: config.emailDelivery === 'resend' ? ('provider' as const) : config.emailDelivery === 'log' ? ('dev-log' as const) : ('disabled' as const),
+      mode: config.emailDelivery === 'resend' || config.emailDelivery === 'brevo' ? ('provider' as const) : config.emailDelivery === 'log' ? ('dev-log' as const) : ('disabled' as const),
       testingSender: config.emailDelivery === 'resend' && usesResendTestingSender(config.emailFrom),
       problem: config.emailProblem,
     };

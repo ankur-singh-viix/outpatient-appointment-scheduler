@@ -9,6 +9,9 @@ const MAX_CHUNKS_IN_SWEEP = 10;
 
 export const WITHDRAWN_NOTICE = "Not sent: the appointment is within the doctor's hours again.";
 
+/** Called inside the release transaction with the appointments it just released (to queue the patients' "valid again" messages). */
+export type ReleasedHook = (manager: EntityManager, appointmentIds: string[]) => Promise<unknown>;
+
 export interface ReconcileResult {
   /** Appointments whose open tracking rows were closed as COVERED. */
   restored: number;
@@ -43,7 +46,13 @@ interface Waiting {
  * It must run in the transaction that changed the hours (with the doctor row locked), so the hours it checks are the new ones and
  * nobody can see the new hours with the old bookkeeping. It sends nothing. Every step is safe to repeat.
  */
-export async function reconcileCoverage(manager: EntityManager, doctorId: string, clock: { date: string; time: string }, maxChunks = MAX_CHUNKS_IN_REQUEST): Promise<ReconcileResult> {
+export async function reconcileCoverage(
+  manager: EntityManager,
+  doctorId: string,
+  clock: { date: string; time: string },
+  maxChunks = MAX_CHUNKS_IN_REQUEST,
+  onReleased?: ReleasedHook,
+): Promise<ReconcileResult> {
   const result: ReconcileResult = { restored: 0, withdrawn: 0, more: false };
   let after = '00000000-0000-0000-0000-000000000000';
   for (let chunk = 0; ; chunk++) {
@@ -61,7 +70,7 @@ export async function reconcileCoverage(manager: EntityManager, doctorId: string
           AND NOT (a.status = 'PENDING' AND a.hold_expires_at IS NOT NULL AND a.hold_expires_at <= now())
           AND (a.appointment_date > $3::date OR (a.appointment_date = $3::date AND a.start_time > $4::time))
           AND (EXISTS (SELECT 1 FROM schedule_change_appointments s WHERE s.appointment_id = a.id AND s.resolved_at IS NULL)
-               OR EXISTS (SELECT 1 FROM notifications n WHERE n.appointment_id = a.id AND n.kind = 'needs-new-time' AND n.status = 'PENDING'))
+               OR EXISTS (SELECT 1 FROM notifications n WHERE n.appointment_id = a.id AND n.kind IN ('needs-new-time', 'needs-new-time-reminder', 'new-times-available') AND n.status = 'PENDING'))
         ORDER BY a.id
         LIMIT ${CHUNK}
           FOR SHARE OF a`,
@@ -84,12 +93,15 @@ export async function reconcileCoverage(manager: EntityManager, doctorId: string
           RETURNING appointment_id`,
         [covered],
       ));
-      result.restored += new Set(closed.map((row) => row.appointment_id)).size;
+      const released = [...new Set(closed.map((row) => row.appointment_id))];
+      result.restored += released.length;
+      // Told in the same transaction (a database insert, never a send), only for appointments this call actually released.
+      if (onReleased && released.length > 0) await onReleased(manager, released);
       // After the rows above, so a message the notifier queued while we waited is seen too. A message the dispatcher is sending at
       // this moment is skipped (it is locked and cannot be recalled), and must not hold this transaction up for the length of an email.
       const withdrawn = returned<{ id: string }>(await manager.query(
         `UPDATE notifications SET status = 'CANCELLED', last_error = $2, updated_at = now()
-          WHERE id IN (SELECT id FROM notifications WHERE appointment_id = ANY($1::uuid[]) AND kind = 'needs-new-time' AND status = 'PENDING' FOR UPDATE SKIP LOCKED)
+          WHERE id IN (SELECT id FROM notifications WHERE appointment_id = ANY($1::uuid[]) AND kind IN ('needs-new-time', 'needs-new-time-reminder', 'new-times-available') AND status = 'PENDING' FOR UPDATE SKIP LOCKED)
           RETURNING id`,
         [covered, WITHDRAWN_NOTICE],
       ));
@@ -104,18 +116,18 @@ export async function reconcileCoverage(manager: EntityManager, doctorId: string
  * (a very large backlog, or a lock that was busy) and any change of hours made outside the application. Each doctor is handled in
  * its own short transaction.
  */
-export async function reconcileAllDoctors(dataSource: DataSource, clock: { date: string; time: string }): Promise<ReconcileResult> {
+export async function reconcileAllDoctors(dataSource: DataSource, clock: { date: string; time: string }, onReleased?: ReleasedHook): Promise<ReconcileResult> {
   const total: ReconcileResult = { restored: 0, withdrawn: 0, more: false };
   const doctors: { doctor_id: string }[] = await dataSource.query(
     // Starts from the two small partial indexes (open tracking rows, queued messages), never from the whole appointments table.
     `SELECT DISTINCT a.doctor_id
        FROM (SELECT appointment_id FROM schedule_change_appointments WHERE resolved_at IS NULL
              UNION
-             SELECT appointment_id FROM notifications WHERE status = 'PENDING' AND kind = 'needs-new-time' AND appointment_id IS NOT NULL) w
+             SELECT appointment_id FROM notifications WHERE status = 'PENDING' AND kind IN ('needs-new-time', 'needs-new-time-reminder', 'new-times-available') AND appointment_id IS NOT NULL) w
        JOIN appointments a ON a.id = w.appointment_id AND a.status IN ('PENDING', 'CONFIRMED')`,
   );
   for (const { doctor_id } of doctors) {
-    const done = await dataSource.transaction((manager) => reconcileCoverage(manager, doctor_id, clock, MAX_CHUNKS_IN_SWEEP));
+    const done = await dataSource.transaction((manager) => reconcileCoverage(manager, doctor_id, clock, MAX_CHUNKS_IN_SWEEP, onReleased));
     total.restored += done.restored;
     total.withdrawn += done.withdrawn;
     total.more ||= done.more;

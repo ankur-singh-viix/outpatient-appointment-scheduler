@@ -38,8 +38,22 @@ function changeOutcome(change: ScheduleChangeSummary): string {
   return [stranded, released].filter(Boolean).join(' ');
 }
 
+const FOLLOW_UP: Record<string, string> = {
+  NOT_ASKED: 'Not asked yet',
+  WAITING: 'Waiting for the patient',
+  NO_RESPONSE: 'No response after both reminders',
+  NO_ALTERNATIVES: 'No other time open',
+};
+const FILTERS = [
+  { value: 'ALL', label: 'All' },
+  { value: 'NO_RESPONSE', label: 'No response' },
+  { value: 'NO_ALTERNATIVES', label: 'No other time' },
+  { value: 'NOT_ASKED', label: 'Not asked' },
+  { value: 'WAITING', label: 'Waiting' },
+] as const;
+
 function askedText(appointment: OutsideHoursAppointment): string {
-  if (appointment.asked) return `Asked ${formatDateTime(appointment.asked.at)} (${ASKED[appointment.asked.status] ?? appointment.asked.status.toLowerCase()})`;
+  if (appointment.asked) return `Asked ${formatDateTime(appointment.asked.at)} (${ASKED[appointment.asked.status] ?? appointment.asked.status.toLowerCase()})${appointment.followUp.reminders > 0 ? `, ${plural(appointment.followUp.reminders, 'reminder')} sent` : ''}`;
   return appointment.noticePending ? 'Waiting to be asked (the email is being queued)' : 'Not asked yet';
 }
 
@@ -59,11 +73,13 @@ export function OutsideHoursCard({ session, version, onChanged, onAddSession }: 
   const [busy, setBusy] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
   const [cancelling, setCancelling] = useState<DoctorAppointment | null>(null);
+  const [filter, setFilter] = useState<(typeof FILTERS)[number]['value']>('ALL');
 
   const more = loaded && loaded.base === list.data ? loaded : null;
   const firstPage = (list.data ?? list.previous)?.appointments ?? [];
   const items = [...firstPage, ...(more?.items ?? []).filter((entry) => !firstPage.some((existing) => existing.id === entry.id))];
   const nextCursor = more ? more.cursor : (list.data ?? list.previous)?.nextCursor ?? null;
+  const shown = filter === 'ALL' ? items : items.filter((entry) => entry.followUp.state === filter);
   const changes = (history.data ?? history.previous)?.changes ?? [];
   if (items.length === 0 && !feedback && changes.length === 0) return null;
 
@@ -131,8 +147,17 @@ export function OutsideHoursCard({ session, version, onChanged, onAddSession }: 
           <p className="text-sm text-muted-foreground">Every appointment is now inside your hours.</p>
         ) : (
           <>
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Show">
+              {FILTERS.map((option) => (
+                <Button key={option.value} size="sm" variant={filter === option.value ? 'default' : 'outline'} aria-pressed={filter === option.value} onClick={() => setFilter(option.value)}>
+                  {option.label}
+                  {option.value !== 'ALL' && ` (${items.filter((entry) => entry.followUp.state === option.value).length})`}
+                </Button>
+              ))}
+            </div>
+            {shown.length === 0 && <p className="text-sm text-muted-foreground">No loaded appointment matches this filter.</p>}
             <ul className="divide-y rounded-xl border bg-card" aria-label="Appointments outside your hours">
-              {items.map((appointment) => (
+              {shown.map((appointment) => (
                 <li key={appointment.id} className="space-y-3 p-4">
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="space-y-0.5">
@@ -141,6 +166,11 @@ export function OutsideHoursCard({ session, version, onChanged, onAddSession }: 
                         <Badge variant="secondary" className="bg-amber-100 text-amber-900">
                           Needs a new time
                         </Badge>
+                        {appointment.followUp.state !== 'WAITING' && (
+                          <Badge variant="secondary" className={appointment.followUp.state === 'NOT_ASKED' ? 'bg-muted text-foreground' : 'bg-red-100 text-red-900'}>
+                            {FOLLOW_UP[appointment.followUp.state]}
+                          </Badge>
+                        )}
                         {appointment.status === 'PENDING' && (
                           <Badge variant="secondary" className="bg-amber-100 text-amber-900">
                             Awaiting payment

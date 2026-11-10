@@ -216,6 +216,8 @@ not been sent yet. `reconcileCoverage` (`scheduling/schedule-reconciler.ts`) doe
   A message withdrawn unsent does not count as having asked the patient, so a later reduction asks them as normal; one that was
   sent still prevents a repeat within 24 hours.
 
+Patients who were told are told again, once: if a patient had actually received the "choose a new time" email, the release also queues a "No action needed, your appointment is valid again" message for them (dedupe key per request that was sent, so it is never repeated; it is checked again just before sending and cancelled if the appointment has since been moved, cancelled or is outside the hours again). A patient who was never told gets nothing. Email goes out through Brevo or Resend (see the README, "Email with Brevo").
+
 Edge cases:
 
 | Case | Result |

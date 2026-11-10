@@ -7,7 +7,7 @@ import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { api, errorMessage } from '@/lib/api';
+import { ApiError, api, errorMessage } from '@/lib/api';
 import { DAY_LONG, WEEK_ORDER, formatDate, formatTimeRange } from '@/lib/format';
 import type { AvailabilityRow, DoctorAvailability, OneTimeSession, SchedulingMode, Session, WeeklyHours } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -52,12 +52,15 @@ export function AvailabilityList({
   const [adjusting, setAdjusting] = useState<AdjustTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
+  // Set once the server has said which booked appointments would be affected and the doctor presses the button again to agree.
+  const [agreed, setAgreed] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
   const minutes = availability.consultationMinutes;
 
   const close = () => {
     setRemoving(null);
     setDialogError(null);
+    setAgreed(false);
   };
 
   const confirm = async () => {
@@ -70,16 +73,18 @@ export function AvailabilityList({
         await api('/doctor-portal/availability/weekly', {
           method: 'PUT',
           token: session.accessToken,
-          body: { hours: kept.map((row) => ({ dayOfWeek: row.dayOfWeek, ...sessionBody(row, minutes) })) },
+          body: { hours: kept.map((row) => ({ dayOfWeek: row.dayOfWeek, ...sessionBody(row, minutes) })), ...(agreed ? { acknowledge: true } : {}) },
         });
         setFeedback({ tone: 'success', message: `Removed the ${DAY_LONG[removing.row.dayOfWeek]} session. Patients can no longer book that time.` });
       } else {
-        await api(`/doctor-portal/availability/one-time/${removing.row.id}`, { method: 'DELETE', token: session.accessToken });
+        await api(`/doctor-portal/availability/one-time/${removing.row.id}${agreed ? '?acknowledge=true' : ''}`, { method: 'DELETE', token: session.accessToken });
         setFeedback({ tone: 'success', message: `Deleted the session on ${formatDate(removing.row.date)}.` });
       }
       close();
       onChanged();
     } catch (error) {
+      // Booked appointments would fall outside the hours: the server lists nothing and changes nothing until the doctor agrees.
+      if (error instanceof ApiError && error.code === 'ACKNOWLEDGE_REQUIRED') setAgreed(true);
       setDialogError(errorMessage(error));
     } finally {
       setBusy(false);
@@ -202,9 +207,9 @@ export function AvailabilityList({
           removing &&
           (removing.kind === 'weekly'
             ? `${DAY_LONG[removing.row.dayOfWeek]} ${formatTimeRange(removing.row.startTime, removing.row.endTime)} will stop repeating. Patients can no longer book it; appointments already made are kept.`
-            : `${formatDate(removing.row.date, { weekday: 'long' })} ${formatTimeRange(removing.row.startTime, removing.row.endTime)} will be deleted. If patients have booked it, you will need to cancel those appointments first.`)
+            : `${formatDate(removing.row.date, { weekday: 'long' })} ${formatTimeRange(removing.row.startTime, removing.row.endTime)} will be deleted. If patients have booked it, they stay booked and are asked to choose a new time; you will be asked to confirm.`)
         }
-        confirmLabel={removing?.kind === 'weekly' ? 'Remove session' : 'Delete session'}
+        confirmLabel={agreed ? 'Yes, remove it and ask patients' : removing?.kind === 'weekly' ? 'Remove session' : 'Delete session'}
         busy={busy}
         error={dialogError}
         onConfirm={() => void confirm()}
