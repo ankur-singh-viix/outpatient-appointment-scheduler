@@ -10,6 +10,7 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { api, errorMessage } from '@/lib/api';
 import { formatDate, formatTime, formatTimeRange } from '@/lib/format';
 import { useClinicToday } from '@/lib/hooks';
+import { restoredNote } from './restored-note';
 import type { DoctorAvailability, Session } from '@/lib/types';
 
 interface EditorProps {
@@ -148,12 +149,12 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
 
-  const run = async (work: () => Promise<unknown>, success: string) => {
+  const run = async (work: () => Promise<{ restoredAppointments?: number }>, success: string) => {
     setBusy(true);
     setFeedback(null);
     try {
-      await work();
-      setFeedback({ tone: 'success', message: success });
+      const done = await work();
+      setFeedback({ tone: 'success', message: `${success}${restoredNote(done.restoredAppointments)}` });
       onSaved();
     } catch (error) {
       setFeedback({ tone: 'error', message: errorMessage(error) });
@@ -171,14 +172,14 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
           ? { date, isAvailable: false, startTime, endTime, reason: reason || undefined }
           : { date, isAvailable: true, startTime, endTime, capacity, reason: reason || undefined };
     void run(
-      () => api('/doctor-portal/availability/overrides', { method: 'PUT', token: session.accessToken, body }),
+      () => api<{ restoredAppointments?: number }>('/doctor-portal/availability/overrides', { method: 'PUT', token: session.accessToken, body }),
       `Saved the exception for ${formatDate(date)}.`,
     );
   };
 
   const remove = (overrideDate: string) =>
     run(
-      () => api(`/doctor-portal/availability/overrides/${overrideDate}`, { method: 'DELETE', token: session.accessToken }),
+      () => api<{ restoredAppointments?: number }>(`/doctor-portal/availability/overrides/${overrideDate}`, { method: 'DELETE', token: session.accessToken }),
       `Removed the exception for ${formatDate(overrideDate)}. Regular weekly hours apply again.`,
     );
 

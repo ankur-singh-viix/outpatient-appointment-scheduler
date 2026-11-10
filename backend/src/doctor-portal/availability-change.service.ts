@@ -7,9 +7,10 @@ import { ACTIVE_STATUSES, Appointment, Availability, Doctor, Notification, Sched
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { addDays, clinicNow, isValidDate } from '../scheduling/calendar.js';
 import { toRule } from '../scheduling/day-schedule.js';
-import { findAffected, planChange, type ElasticDoctor, type OpenSlot, type Placed, type Window } from '../scheduling/elastic.js';
+import { findAffected, findRestored, planChange, type ElasticDoctor, type OpenSlot, type Placed, type Window } from '../scheduling/elastic.js';
 import type { AvailabilityRule } from '../scheduling/availability-rules.js';
 import { appointmentsOutsideHours, toOverride } from '../scheduling/outside-hours.js';
+import { reconcileCoverage } from '../scheduling/schedule-reconciler.js';
 import { rescheduleLink, ScheduleChangeNotifier } from '../scheduling/schedule-change-notifier.service.js';
 import { bookedLoader, openTimes, type BookedOn } from '../scheduling/open-times.js';
 import { hhmm, type DateOverride } from '../scheduling/slots.js';
@@ -157,7 +158,23 @@ export class AvailabilityChangeService {
           [change.id, ids, ids.map((id) => suggestion(id)?.date ?? null), ids.map((id) => suggestion(id)?.startTime ?? null), ids.map((id) => suggestion(id)?.endTime ?? null)],
         );
       }
-      return { id: resultId, changeId: change.id, kind: view.kind, split, applyFrom, addedSlots: view.addedSlots, removedSlots: view.removedSlots, affectedAppointments: view.affectedCount, patientsAsked: view.affectedCount };
+      // Extending (or the extending side of a mixed change): appointments that were waiting for a new time and are inside the hours
+      // again are released here, in the same transaction, so nobody ever sees the new hours with the old bookkeeping.
+      const widened = view.kind === 'EXPAND' || view.kind === 'MIXED';
+      const released = widened ? await reconcileCoverage(manager, planned.doctor.id, planned.situation.clock) : { restored: 0, withdrawn: 0, more: false };
+      return {
+        id: resultId,
+        changeId: change.id,
+        kind: view.kind,
+        split,
+        applyFrom,
+        addedSlots: view.addedSlots,
+        removedSlots: view.removedSlots,
+        affectedAppointments: view.affectedCount,
+        patientsAsked: view.affectedCount,
+        restoredAppointments: released.restored,
+        withdrawnNotices: released.withdrawn,
+      };
     });
     // Best effort and outside the transaction: start asking now rather than waiting for the next background pass. A failure here
     // only delays the notices, because the rows are saved and the background job picks them up.
@@ -183,7 +200,8 @@ export class AvailabilityChangeService {
     const waiting = new Set<string>();
     if (targets.length > 0) {
       const ids = targets.map((target) => target.id);
-      const requests = await manager.find(Notification, { where: { appointmentId: In(ids), kind: 'needs-new-time', channel: 'email' }, order: { createdAt: 'ASC' } });
+      // A message withdrawn before it was sent (the hours were widened) is not a request the patient ever received.
+      const requests = await manager.find(Notification, { where: { appointmentId: In(ids), kind: 'needs-new-time', channel: 'email', status: In(['PENDING', 'SENT', 'FAILED']) }, order: { createdAt: 'ASC' } });
       for (const request of requests) if (request.appointmentId) asked.set(request.appointmentId, { at: request.createdAt, status: request.status });
       const open: { appointment_id: string }[] = await manager.query(
         `SELECT appointment_id FROM schedule_change_appointments WHERE appointment_id = ANY($1::uuid[]) AND resolved_at IS NULL AND notified_at IS NULL`,
@@ -211,14 +229,19 @@ export class AvailabilityChangeService {
               to_char(c.new_start_time, 'HH24:MI') AS "newStart", to_char(c.new_end_time, 'HH24:MI') AS "newEnd", c.affected_count AS "affected", c.created_at AS "createdAt",
               count(s.*) FILTER (WHERE s.resolved_at IS NULL) AS "unresolved",
               count(s.*) FILTER (WHERE s.resolution = 'RESCHEDULED') AS "rescheduled",
-              count(s.*) FILTER (WHERE s.resolution = 'CANCELLED') AS "cancelled"
+              count(s.*) FILTER (WHERE s.resolution = 'CANCELLED') AS "cancelled",
+              -- Appointments this change released: closed as COVERED in the very transaction that applied it (now() is that transaction's
+              -- start for both timestamps). Ones released later by the background sweep are not credited to a particular change.
+              CASE WHEN c.kind = 'SHRINK' THEN 0 ELSE
+                (SELECT count(DISTINCT r.appointment_id) FROM schedule_changes c2 JOIN schedule_change_appointments r ON r.change_id = c2.id
+                  WHERE c2.doctor_id = c.doctor_id AND r.resolution = 'COVERED' AND r.resolved_at = c.created_at) END AS "restored"
          FROM schedule_changes c LEFT JOIN schedule_change_appointments s ON s.change_id = c.id
-        WHERE c.doctor_id = $1 AND c.kind <> 'EXPAND'
+        WHERE c.doctor_id = $1
         GROUP BY c.id ORDER BY c.created_at DESC LIMIT $2`,
       [doctor.id, Math.min(Math.max(limit, 1), 50)],
     );
     return {
-      changes: rows.map((row) => ({ ...row, unresolved: Number(row.unresolved), rescheduled: Number(row.rescheduled), cancelled: Number(row.cancelled) })),
+      changes: rows.map((row) => ({ ...row, unresolved: Number(row.unresolved), rescheduled: Number(row.rescheduled), cancelled: Number(row.cancelled), restored: Number(row.restored) })),
     };
   }
 
@@ -241,7 +264,7 @@ export class AvailabilityChangeService {
       if (proposal && !chosen) throw new ConflictException('That suggested time is no longer open. Choose another.');
       // At most one request a day per patient, counting the one sent when the hours changed.
       const recent = await manager.findOne(Notification, {
-        where: { appointmentId: appointment.id, kind: 'needs-new-time', channel: 'email', createdAt: MoreThanOrEqual(new Date(Date.now() - 24 * 3_600_000)) },
+        where: { appointmentId: appointment.id, kind: 'needs-new-time', channel: 'email', status: In(['PENDING', 'SENT']), createdAt: MoreThanOrEqual(new Date(Date.now() - 24 * 3_600_000)) },
         order: { createdAt: 'DESC' },
       });
       if (recent) throw new ConflictException('You have already asked this patient in the last 24 hours. Their email may still be on its way.');
@@ -392,32 +415,51 @@ export class AvailabilityChangeService {
       affectedCount = ids.length;
       affected = await this.withPatients(manager, ids.slice(0, PREVIEW_APPOINTMENTS));
       // Everything that is affected is recorded when applied, not only the listed page.
-      return { doctor, row, applyFrom, split, plan, proposed, affected, affectedIds: ids, affectedCount, situation, overrides, afterRules };
+      return { doctor, row, applyFrom, split, plan, proposed, affected, affectedIds: ids, affectedCount, restored: [] as Appointment[], restoredCount: 0, situation, overrides, afterRules };
     }
-    return { doctor, row, applyFrom, split, plan, proposed, affected, affectedIds: [] as string[], affectedCount, situation, overrides, afterRules };
+    // Extending: booked appointments that are outside the hours now and would be inside them again.
+    let restored: Appointment[] = [];
+    let restoredCount = 0;
+    if (plan.problems.length === 0 && (plan.kind === 'EXPAND' || plan.kind === 'MIXED')) {
+      const candidates = await this.candidates(manager, row, proposed, applyFrom, situation, 'RESTORED');
+      const exact = new Set(findRestored({ appointments: candidates.map(placed), rules: situation.rules, afterRules, overrides, doctor: situation.elastic }));
+      const ids = candidates.filter((candidate) => exact.has(candidate.id)).map((candidate) => candidate.id);
+      restoredCount = ids.length;
+      restored = await this.withPatients(manager, ids.slice(0, PREVIEW_APPOINTMENTS));
+    }
+    return { doctor, row, applyFrom, split, plan, proposed, affected, affectedIds: [] as string[], affectedCount, restored, restoredCount, situation, overrides, afterRules };
   }
 
-  /** Appointments that could be left outside by shrinking this row: inside its old window, sticking out of the new one, on its days. */
-  private async candidates(manager: EntityManager, row: Availability, proposed: Window, applyFrom: string, situation: Situation): Promise<Appointment[]> {
+  /**
+   * Appointments a change of this row could affect, narrowed by the database before the exact rules decide each one, on the row's
+   * days. 'AFFECTED' (shrinking): inside the old window and sticking out of the new one. 'RESTORED' (extending): inside the new
+   * window but not entirely inside the old one.
+   */
+  private async candidates(manager: EntityManager, row: Availability, proposed: Window, applyFrom: string, situation: Situation, mode: 'AFFECTED' | 'RESTORED' = 'AFFECTED'): Promise<Appointment[]> {
     const from = row.effectiveFrom !== null && row.effectiveFrom > applyFrom ? row.effectiveFrom : applyFrom;
     const to = row.effectiveTo !== null && row.effectiveTo < situation.lastDate ? row.effectiveTo : situation.lastDate;
     if (from > to) return [];
     const query = this.liveUpcoming(manager, situation.doctor.id, situation.clock)
       .select(['a.id', 'a.appointmentDate', 'a.startTime', 'a.endTime', 'a.slotNumber'])
       .andWhere('a.appointmentDate BETWEEN :from AND :to', { from, to })
-      .andWhere('a.startTime >= :oldStart AND a.endTime <= :oldEnd', { oldStart: hhmm(row.startTime), oldEnd: hhmm(row.endTime) })
-      .andWhere('(a.startTime < :newStart OR a.endTime > :newEnd)', { newStart: hhmm(proposed.startTime), newEnd: hhmm(proposed.endTime) })
       .orderBy('a.appointmentDate', 'ASC')
       .addOrderBy('a.startTime', 'ASC')
       .addOrderBy('a.slotNumber', 'ASC')
       .addOrderBy('a.id', 'ASC');
+    const old = { oldStart: hhmm(row.startTime), oldEnd: hhmm(row.endTime) };
+    const next = { newStart: hhmm(proposed.startTime), newEnd: hhmm(proposed.endTime) };
+    if (mode === 'AFFECTED') {
+      query.andWhere('a.startTime >= :oldStart AND a.endTime <= :oldEnd', old).andWhere('(a.startTime < :newStart OR a.endTime > :newEnd)', next);
+    } else {
+      query.andWhere('a.startTime >= :newStart AND a.endTime <= :newEnd', next).andWhere('NOT (a.startTime >= :oldStart AND a.endTime <= :oldEnd)', old);
+    }
     if (row.recurrenceType === 'ONE_TIME') query.andWhere('a.appointmentDate = :only', { only: row.specificDate });
     else query.andWhere('EXTRACT(DOW FROM a.appointment_date) = :dow', { dow: row.dayOfWeek });
     return query.getMany();
   }
 
   private async describe(manager: EntityManager, planned: Awaited<ReturnType<AvailabilityChangeService['plan']>>) {
-    const { row, applyFrom, split, plan, proposed, affected, affectedCount, situation, overrides, afterRules } = planned;
+    const { row, applyFrom, split, plan, proposed, affected, affectedCount, restored, restoredCount, situation, overrides, afterRules } = planned;
     const problems = [...plan.problems];
     if (plan.kind === 'NONE') problems.push('These are already the hours.');
     const alternatives = await this.alternatives(affected, situation, afterRules, overrides, bookedLoader(manager, situation.doctor.id, situation.lastDate));
@@ -448,6 +490,10 @@ export class AvailabilityChangeService {
       affectedAppointments,
       /** How many in all (the list above shows the first few). */
       affectedCount,
+      /** Appointments waiting for a new time that this extension brings back inside the hours (the first few). They need nothing more. */
+      restoredAppointments: restored.map(appointmentView),
+      /** How many in all. */
+      restoredCount,
       /** How many of the listed ones have no other open time to move to. */
       withoutAlternatives: affectedAppointments.filter((appointment) => appointment.alternatives.length === 0).length,
       canApply: problems.length === 0,

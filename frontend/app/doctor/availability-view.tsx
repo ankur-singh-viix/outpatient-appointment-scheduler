@@ -52,6 +52,14 @@ function HowItWorks() {
           </p>
         </div>
         <div className="space-y-1 sm:col-span-2">
+          <p className="font-semibold text-foreground">Extending your hours</p>
+          <p>
+            Use Adjust hours to start earlier or finish later. The new slots open for booking at once, and nobody who has booked is moved or changed. If patients were waiting to choose a new time and
+            the wider hours now include their appointment, they are released: they do not need to do anything, and a request that has not been sent yet is withdrawn. The same happens when you add a
+            one-time session or remove a date exception that covers them. Patients who rescheduled, or whose appointment was cancelled, are never reverted.
+          </p>
+        </div>
+        <div className="space-y-1 sm:col-span-2">
           <p className="font-semibold text-foreground">Reducing your hours</p>
           <p>
             Use Adjust hours on a session to shorten it. You see which booked appointments would fall outside the new hours before anything is saved. Those appointments stay booked: nothing is moved or

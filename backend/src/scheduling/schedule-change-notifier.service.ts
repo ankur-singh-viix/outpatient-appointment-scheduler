@@ -3,7 +3,9 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, type EntityManager } from 'typeorm';
 import { loadConfig } from '../config.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
+import { clinicNow } from './calendar.js';
 import { appointmentsOutsideHours } from './outside-hours.js';
+import { reconcileAllDoctors } from './schedule-reconciler.js';
 import { hhmm } from './slots.js';
 
 /** How many patients one pass asks. A bigger change is simply worked through over several passes. */
@@ -50,6 +52,8 @@ export class ScheduleChangeNotifier {
 
   /** Runs passes until the queue is empty or `maxPasses` is reached. Returns how many patients were asked. */
   async drain(maxPasses = 20): Promise<number> {
+    // First let go of everyone the hours have already caught up with (including ones already told), so none of them is asked.
+    await reconcileAllDoctors(this.dataSource, clinicNow(this.config.clinicTimezone));
     let asked = 0;
     for (let pass = 0; pass < maxPasses; pass++) {
       const { claimed, queued } = await this.runBatch();
@@ -96,7 +100,8 @@ export class ScheduleChangeNotifier {
       // Already asked within the last day (by an earlier change, or by the doctor asking again)? Then do not ask twice.
       const recent = new Set<string>(
         (
-          await manager.query(`SELECT DISTINCT appointment_id FROM notifications WHERE appointment_id = ANY($1::uuid[]) AND kind = 'needs-new-time' AND created_at > $2`, [
+          // A message withdrawn before it was sent (CANCELLED) or one that could never be delivered (FAILED) did not ask the patient anything.
+          await manager.query(`SELECT DISTINCT appointment_id FROM notifications WHERE appointment_id = ANY($1::uuid[]) AND kind = 'needs-new-time' AND status IN ('PENDING', 'SENT') AND created_at > $2`, [
             todo.map((row) => row.appointment_id),
             new Date(Date.now() - REPEAT_WINDOW_MS),
           ])

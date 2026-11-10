@@ -383,6 +383,10 @@ export interface HoursChangePreview {
   /** Booked appointments the new hours would leave outside them. They stay booked; each patient is asked to choose a new time. */
   affectedAppointments: AffectedAppointment[];
   affectedCount: number;
+  /** Extending: booked appointments that were outside the hours and would be inside them again (the first few). They need nothing more. */
+  restoredAppointments: Omit<AffectedAppointment, 'alternatives'>[];
+  /** How many in all. */
+  restoredCount: number;
   /** How many of them have no other open time to move to. */
   withoutAlternatives: number;
   canApply: boolean;
@@ -421,10 +425,10 @@ export interface OutsideHoursPage {
   nextCursor: string | null;
 }
 
-/** A recent reduction of the doctor's hours and how its affected appointments stand. */
+/** A recent change of the doctor's hours and how its affected (or released) appointments stand. */
 export interface ScheduleChangeSummary {
   id: string;
-  kind: 'SHRINK' | 'MIXED';
+  kind: 'EXPAND' | 'SHRINK' | 'MIXED';
   applyFrom: string;
   oldStart: string;
   oldEnd: string;
@@ -434,6 +438,8 @@ export interface ScheduleChangeSummary {
   unresolved: number;
   rescheduled: number;
   cancelled: number;
+  /** Appointments waiting for a new time that this change brought back inside the hours. */
+  restored: number;
   createdAt: string;
 }
 

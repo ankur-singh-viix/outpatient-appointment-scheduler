@@ -153,6 +153,9 @@ describe('Shrinking hours, production readiness (e2e)', () => {
       await apply(id, '10:00', '11:00').expect(200);
       await notifier().drain();
       expect(await notices()).toHaveLength(1);
+      // The message really reached the patient. (One that is withdrawn unsent when the hours are widened does not count as asking: see expand-resolve.e2e-spec.ts.)
+      await app.get(NotificationsService).dispatchDue(new Date());
+      expect((await notices())[0].status).toBe('SENT');
 
       // The doctor widens the hours again (an expansion), then reduces them once more while the patient has not answered.
       const rowsNow = await rows<{ id: string }>('SELECT id FROM availability WHERE effective_to IS NULL');

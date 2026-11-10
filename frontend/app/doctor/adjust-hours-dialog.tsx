@@ -13,6 +13,7 @@ import { formatDate, formatTime, formatTimeRange } from '@/lib/format';
 import { useClinicToday, useDebounced, useQuery } from '@/lib/hooks';
 import type { HoursChangePreview, OpenTime, SchedulingMode, Session } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import { restoredNote } from './restored-note';
 
 /** The session whose hours are being changed. */
 export interface AdjustTarget {
@@ -81,6 +82,9 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
   // The list shows the first few; the count covers every affected appointment.
   const affectedTotal = settled && shown ? shown.affectedCount : 0;
   const needsAgreement = affectedTotal > 0;
+  // Extending: appointments that were waiting for a new time and would be inside the hours again.
+  const restoredTotal = settled && shown ? shown.restoredCount : 0;
+  const restored = settled && shown ? shown.restoredAppointments : [];
 
   const apply = async () => {
     if (!shown?.canApply || (needsAgreement && !agreed)) return;
@@ -91,7 +95,7 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
       return option ? [{ appointmentId: appointment.id, date: option.date, startTime: option.startTime }] : [];
     });
     try {
-      await api(`/doctor-portal/availability/${target.id}/change`, {
+      const done = await api<{ restoredAppointments?: number }>(`/doctor-portal/availability/${target.id}/change`, {
         method: 'POST',
         token: session.accessToken,
         body: {
@@ -106,7 +110,7 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
       if (shown.addedSlots) parts.push(`${plural(shown.addedSlots, 'new slot')} open for booking`);
       if (shown.removedSlots) parts.push(`${plural(shown.removedSlots, 'slot')} closed to new bookings`);
       onApplied(
-        `${target.title}: ${parts.join(', ')}.${needsAgreement ? ` ${plural(affectedTotal, 'patient')} ${affectedTotal === 1 ? 'is being' : 'are being'} asked to choose a new time; their appointments stay booked until they do.` : ''}`,
+        `${target.title}: ${parts.join(', ')}.${needsAgreement ? ` ${plural(affectedTotal, 'patient')} ${affectedTotal === 1 ? 'is being' : 'are being'} asked to choose a new time; their appointments stay booked until they do.` : ''}${restoredNote(done.restoredAppointments)}`,
       );
     } catch (err) {
       setError(errorMessage(err));
@@ -211,6 +215,29 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
                   {target.recurring && shown.splitsAtDate ? ` Dates before ${formatDate(shown.applyFrom)} keep their current hours.` : ''}
                 </p>
               </div>
+            )}
+
+            {shown.canApply && restoredTotal > 0 && (
+              <section aria-labelledby="restored-heading" className="space-y-2 rounded-xl border border-emerald-300 bg-emerald-50 p-4 text-sm text-emerald-950">
+                <h3 id="restored-heading" className="font-semibold">
+                  {plural(restoredTotal, 'booked appointment')} {restoredTotal === 1 ? 'is' : 'are'} back inside your hours
+                </h3>
+                <p>
+                  {restoredTotal === 1 ? 'This patient was' : 'These patients were'} waiting to choose a new time. After you save, they do not need to: the appointment
+                  stays exactly as booked, and a request that has not been sent yet is withdrawn. Nothing is moved, changed or refunded.
+                </p>
+                <ul className="max-h-40 divide-y divide-emerald-200 overflow-y-auto rounded-lg bg-white/70" aria-label="Appointments back inside your hours">
+                  {restored.map((appointment) => (
+                    <li key={appointment.id} className="flex flex-wrap items-center gap-x-2 p-2.5 font-medium text-foreground">
+                      {appointment.patient.name}
+                      <span className="font-normal text-muted-foreground">
+                        {formatDate(appointment.date, { weekday: 'short' })} · {formatTimeRange(appointment.startTime, appointment.endTime)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {restoredTotal > restored.length && <p className="text-muted-foreground">Showing the first {restored.length}. The other {restoredTotal - restored.length} are released the same way.</p>}
+              </section>
             )}
 
             {shown.canApply && reducing && affectedTotal === 0 && <p className="text-sm text-muted-foreground">No booked appointment falls outside the new hours, so nobody needs to be contacted.</p>}

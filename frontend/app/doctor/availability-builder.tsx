@@ -10,6 +10,7 @@ import { Label } from '@/components/ui/label';
 import { api, errorMessage } from '@/lib/api';
 import { DAY_LONG, DAY_SHORT, WEEK_ORDER, formatDate, formatTimeRange } from '@/lib/format';
 import { useClinicToday } from '@/lib/hooks';
+import { restoredNote } from './restored-note';
 import type { AvailabilityRow, DoctorAvailability, SchedulingMode, Session, WeeklyHours } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { SLOT_MINUTES, sessionBody, slotsInWindow, toMinutes } from './availability-model';
@@ -98,18 +99,18 @@ export function AvailabilityBuilder({
     const minutes = availability.consultationMinutes;
     try {
       if (!recurring) {
-        await api('/doctor-portal/availability/one-time', { method: 'POST', token: session.accessToken, body: { date, ...sessionBody(row, minutes) } });
-        onSaved(`Added a ${wave ? 'Wave' : 'Stream'} session on ${formatDate(date, { weekday: 'long' })}. Patients can book it now.`);
+        const added = await api<{ restoredAppointments?: number }>('/doctor-portal/availability/one-time', { method: 'POST', token: session.accessToken, body: { date, ...sessionBody(row, minutes) } });
+        onSaved(`Added a ${wave ? 'Wave' : 'Stream'} session on ${formatDate(date, { weekday: 'long' })}. Patients can book it now.${restoredNote(added.restoredAppointments)}`);
       } else {
         const weekly: (AvailabilityRow & { dayOfWeek: number })[] = editing
           ? availability.weekly.map((existing) => (existing.id === editing.id ? { ...row, dayOfWeek: days[0] } : existing))
           : [...availability.weekly, ...days.map((day) => ({ ...row, dayOfWeek: day }))];
-        await api('/doctor-portal/availability/weekly', {
+        const saved = await api<{ restoredAppointments?: number }>('/doctor-portal/availability/weekly', {
           method: 'PUT',
           token: session.accessToken,
           body: { hours: weekly.map((entry) => ({ dayOfWeek: entry.dayOfWeek, ...sessionBody(entry, minutes) })) },
         });
-        onSaved(editing ? 'Saved your changes. Patients now see the updated slots.' : `Added ${days.length === 1 ? 'the session' : `${days.length} sessions`}. Patients can book them now.`);
+        onSaved(editing ? 'Saved your changes. Patients now see the updated slots.' : `Added ${days.length === 1 ? 'the session' : `${days.length} sessions`}. Patients can book them now.${restoredNote(saved.restoredAppointments)}`);
         if (editing) onCancelEdit();
       }
     } catch (error) {

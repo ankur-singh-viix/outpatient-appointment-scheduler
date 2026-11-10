@@ -18,6 +18,26 @@ const ASKED: Record<string, string> = { SENT: 'email sent', PENDING: 'email on i
 const optionLabel = (option: OpenTime) => `${formatDate(option.date, { weekday: 'short' })} · ${formatTime(option.startTime)} (${option.remaining} left)`;
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
 
+/** One line on what a past change of hours did to the appointments it touched. */
+function changeOutcome(change: ScheduleChangeSummary): string {
+  const stranded =
+    change.kind === 'EXPAND'
+      ? ''
+      : change.affected === 0
+        ? 'No booked appointment was affected.'
+        : `${plural(change.affected, 'appointment')} affected: ${change.unresolved} still waiting for a new time, ${change.rescheduled} moved by the patient, ${change.cancelled} cancelled.`;
+  let released = '';
+  if (change.kind !== 'SHRINK') {
+    released =
+      change.restored > 0
+        ? `${plural(change.restored, 'appointment')} waiting for a new time ${change.restored === 1 ? 'was' : 'were'} back inside the hours, so ${change.restored === 1 ? 'its patient' : 'their patients'} did not need to move.`
+        : change.kind === 'EXPAND'
+          ? 'No waiting appointment was affected.'
+          : '';
+  }
+  return [stranded, released].filter(Boolean).join(' ');
+}
+
 function askedText(appointment: OutsideHoursAppointment): string {
   if (appointment.asked) return `Asked ${formatDateTime(appointment.asked.at)} (${ASKED[appointment.asked.status] ?? appointment.asked.status.toLowerCase()})`;
   return appointment.noticePending ? 'Waiting to be asked (the email is being queued)' : 'Not asked yet';
@@ -191,9 +211,7 @@ export function OutsideHoursCard({ session, version, onChanged, onAddSession }: 
               {changes.map((change) => (
                 <li key={change.id}>
                   <span className="font-medium text-foreground">{formatDateTime(change.createdAt)}</span>: {change.oldStart}–{change.oldEnd} became {change.newStart}–{change.newEnd} from {formatDate(change.applyFrom)}.{' '}
-                  {change.affected === 0
-                    ? 'No booked appointment was affected.'
-                    : `${plural(change.affected, 'appointment')} affected: ${change.unresolved} still waiting for a new time, ${change.rescheduled} moved by the patient, ${change.cancelled} cancelled.`}
+                  {changeOutcome(change)}
                 </li>
               ))}
             </ul>

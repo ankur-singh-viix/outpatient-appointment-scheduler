@@ -55,6 +55,12 @@ export function ChooseNewTime({ appointment: a, session, onMoved, onClose }: { a
         </Button>
       </div>
       {error && <Alert>{error}</Alert>}
+      {data && !data.needsNewTime && (
+        <div className="space-y-1 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-emerald-900" role="status">
+          <p className="font-semibold">Your appointment fits {a.doctor.name}&apos;s hours again</p>
+          <p>You do not need to choose a new time. It stays booked exactly as it was. You can still move it below if you would like a different time.</p>
+        </div>
+      )}
       {loading && !data && <Spinner label="Finding open times…" />}
       {data && data.alternatives.length === 0 && (
         <div className="space-y-2 text-foreground/80" role="status">

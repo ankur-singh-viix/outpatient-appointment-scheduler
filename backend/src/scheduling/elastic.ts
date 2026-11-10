@@ -194,6 +194,28 @@ export function findAffected(args: { appointments: Placed[]; rules: Availability
   return affected;
 }
 
+/**
+ * The mirror of findAffected, for extending hours: appointments that are outside the doctor's working time with the current rules
+ * and inside it with the proposed ones. An appointment that stays outside (a day off, a blocked time, or hours that still do not
+ * reach it) is not included, and neither is one that was inside already.
+ */
+export function findRestored(args: { appointments: Placed[]; rules: AvailabilityRule[]; afterRules: AvailabilityRule[]; overrides: Map<string, DateOverride>; doctor: ElasticDoctor }): string[] {
+  const sessions = new Map<string, { before: Session[]; after: Session[] }>();
+  const restored: string[] = [];
+  for (const appointment of args.appointments) {
+    let day = sessions.get(appointment.date);
+    if (!day) {
+      const override = args.overrides.get(appointment.date) ?? null;
+      day = { before: slotsOn(appointment.date, args.rules, override, args.doctor).sessions, after: slotsOn(appointment.date, args.afterRules, override, args.doctor).sessions };
+      sessions.set(appointment.date, day);
+    }
+    const start = hhmm(appointment.startTime);
+    const end = hhmm(appointment.endTime);
+    if (!isCovered(day.before, start, end) && isCovered(day.after, start, end)) restored.push(appointment.id);
+  }
+  return restored;
+}
+
 /** A slot someone could still book, with the places left in it. */
 export interface OpenSlot {
   date: string;

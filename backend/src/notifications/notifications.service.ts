@@ -4,6 +4,8 @@ import { zonedInstant } from '../common/zoned-time.js';
 import { loadConfig } from '../config.js';
 import { Appointment, Notification, NotificationPreference, Patient } from '../database/entities/index.js';
 import { clinicNow } from '../scheduling/calendar.js';
+import { appointmentsOutsideHours } from '../scheduling/outside-hours.js';
+import { WITHDRAWN_NOTICE } from '../scheduling/schedule-reconciler.js';
 import { hhmm } from '../scheduling/slots.js';
 import { isRetryable } from './delivery-error.js';
 import { NOTIFICATION_CHANNELS, type NotificationChannel } from './notification-channel.js';
@@ -522,7 +524,26 @@ export class NotificationsService {
       row.subject = content.subject.slice(0, 200);
       row.body = row.channel === 'sms' ? content.sms : content.body;
     }
+    if (row.kind === 'needs-new-time') return this.staleNewTimeRequest(manager, row);
     return null;
+  }
+
+  /**
+   * A "please choose a new time" message is only worth sending while it is true. Between queuing and sending the patient may have
+   * moved or cancelled, the appointment may have passed, or the doctor may have widened the hours so it fits again. Checked against
+   * the hours as they are at this moment, so a change that commits just before sending still stops the message.
+   */
+  private async staleNewTimeRequest(manager: EntityManager, row: Notification): Promise<string | null> {
+    if (!row.appointmentId) return 'Not sent: the message has no appointment.';
+    const appointment = await manager.findOneBy(Appointment, { id: row.appointmentId });
+    if (!appointment) return 'Not sent: the appointment no longer exists.';
+    if (appointment.status !== 'PENDING' && appointment.status !== 'CONFIRMED') return `Not sent: the appointment is ${appointment.status.toLowerCase().replace('_', ' ')}.`;
+    const now = clinicNow(this.config.clinicTimezone);
+    if (appointment.appointmentDate < now.date || (appointment.appointmentDate === now.date && hhmm(appointment.startTime) <= now.time)) return 'Not sent: the appointment has already started.';
+    const outside = await appointmentsOutsideHours(manager, appointment.doctorId, [
+      { id: appointment.id, date: appointment.appointmentDate, startTime: appointment.startTime, endTime: appointment.endTime },
+    ]);
+    return outside.has(appointment.id) ? null : WITHDRAWN_NOTICE;
   }
 
   private async preferencesOf(manager: EntityManager, userId: string): Promise<NotificationPreferences> {
