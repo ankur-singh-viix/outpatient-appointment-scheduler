@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { completeFinishedAppointments } from '../appointments/appointment-lifecycle.js';
+import { AssistantActionsService } from '../assistant/actions/assistant-actions.service.js';
 import { loadConfig } from '../config.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
@@ -25,6 +26,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     private readonly payments: PaymentsService,
     private readonly notifications: NotificationsService,
     private readonly scheduleChanges: ScheduleChangeNotifier,
+    private readonly assistantActions: AssistantActionsService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
@@ -49,6 +51,8 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
         ['settle refunds', () => this.payments.settleRefunds()],
         ['ask patients whose appointments left the hours', () => this.scheduleChanges.drain()],
         ['send due emails', () => this.notifications.dispatchDue()],
+        // Assistant confirmations that were interrupted: settled from the appointment data, never re-run.
+        ['settle interrupted assistant actions', () => this.assistantActions.reconcileStuck()],
         // Reminder upkeep is a scan of upcoming appointments, so it runs on the first pass after start-up and then every 10 minutes.
         ...(pass % 20 === 0
           ? ([

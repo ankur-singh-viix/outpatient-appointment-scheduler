@@ -10,5 +10,6 @@ import { DoctorPortalService } from './doctor-portal.service.js';
   imports: [PaymentsModule, NotificationsModule, ScheduleChangesModule],
   controllers: [DoctorPortalController],
   providers: [DoctorPortalService, AvailabilityChangeService],
+  exports: [DoctorPortalService, AvailabilityChangeService],
 })
 export class DoctorPortalModule {}

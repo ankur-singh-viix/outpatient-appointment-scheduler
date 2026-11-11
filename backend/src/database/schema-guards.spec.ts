@@ -1,4 +1,4 @@
-import { missingSchemaGuards } from './schema-guards.js';
+import { missingSchemaGuards, missingTables } from './schema-guards.js';
 
 const fake = (constraints: string[], indexes: string[]) => ({
   query: async (sql: string) => (sql.includes('pg_constraint') ? constraints.map((conname) => ({ conname })) : indexes.map((indexname) => ({ indexname }))),
@@ -18,5 +18,17 @@ describe('missingSchemaGuards', () => {
   it('reports a missing seat index and a missing check', async () => {
     const missing = await missingSchemaGuards(fake(['ex_appointments_no_overlap', 'ck_appointment_cancelled_by'], []));
     expect(missing.map((guard) => guard.name).sort((x, y) => x.localeCompare(y))).toEqual(['ck_appointment_seat', 'uq_active_slot_seat']);
+  });
+});
+
+describe('missingTables', () => {
+  const answering = (found: string | null) => ({ query: async () => [{ found }] });
+  it('reports the assistant table when migration 012 has not been applied, and says what stops working', async () => {
+    const missing = await missingTables(answering(null));
+    expect(missing).toEqual([expect.objectContaining({ name: 'assistant_actions', migration: '012_assistant_actions.sql' })]);
+    expect(missing[0].consequence).toMatch(/cannot prepare bookings/);
+  });
+  it('reports nothing when the table is there', async () => {
+    expect(await missingTables(answering('assistant_actions'))).toEqual([]);
   });
 });

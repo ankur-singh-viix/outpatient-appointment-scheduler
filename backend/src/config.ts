@@ -38,6 +38,25 @@ export interface AppConfig {
   scheduleReminderCooldownHours: number;
   /** Runs the background workers (expiring unpaid holds, sending due emails, settling refunds). Off in tests that call them directly. */
   backgroundJobs: boolean;
+  assistant: AssistantConfig;
+}
+
+/** The AI assistant (Google Gemini over plain HTTPS). It is off, with a clear message, until GEMINI_API_KEY is set. */
+export interface AssistantConfig {
+  geminiApiKey: string;
+  /** A low-cost Gemini Flash model; change it with GEMINI_MODEL. */
+  geminiModel: string;
+  /** Override only to point at a stand-in server in tests (GEMINI_BASE_URL). */
+  geminiBaseUrl: string;
+  /** The longest answer the model may write (ASSISTANT_MAX_OUTPUT_TOKENS). */
+  maxOutputTokens: number;
+  /** How long to wait for the model before giving up (ASSISTANT_TIMEOUT_SECONDS). */
+  timeoutMs: number;
+  /** Messages one user may send per window (ASSISTANT_RATE_LIMIT per ASSISTANT_RATE_WINDOW_MINUTES). */
+  rateLimit: number;
+  rateWindowMinutes: number;
+  /** How long a prepared booking, move or cancellation waits for the patient to press Confirm (ASSISTANT_CONFIRMATION_MINUTES). */
+  confirmationMinutes: number;
 }
 
 export type SmsProviderName = 'twilio' | 'mock' | 'disabled';
@@ -243,6 +262,16 @@ export function loadConfig(): AppConfig {
       .map((hours) => Number(hours.trim()))
       .filter((hours) => Number.isFinite(hours) && hours > 0),
     backgroundJobs: process.env.BACKGROUND_JOBS !== 'false',
+    assistant: {
+      geminiApiKey: (process.env.GEMINI_API_KEY ?? '').trim(),
+      geminiModel: (process.env.GEMINI_MODEL ?? '').trim() || 'gemini-3.5-flash-lite',
+      geminiBaseUrl: ((process.env.GEMINI_BASE_URL ?? '').trim() || 'https://generativelanguage.googleapis.com').replace(/\/+$/, ''),
+      maxOutputTokens: Math.max(64, Math.min(4096, Math.floor(numberFrom('ASSISTANT_MAX_OUTPUT_TOKENS', 800)))),
+      timeoutMs: Math.max(1, Math.min(120, numberFrom('ASSISTANT_TIMEOUT_SECONDS', 30))) * 1000,
+      rateLimit: Math.max(1, Math.floor(numberFrom('ASSISTANT_RATE_LIMIT', 20))),
+      rateWindowMinutes: Math.max(1, Math.floor(numberFrom('ASSISTANT_RATE_WINDOW_MINUTES', 10))),
+      confirmationMinutes: Math.max(1, Math.min(60, Math.floor(numberFrom('ASSISTANT_CONFIRMATION_MINUTES', 5)))),
+    },
     scheduleChangeNoticeHours: Math.min(numberFrom('SCHEDULE_CHANGE_MIN_NOTICE_HOURS', 2), 72),
     scheduleReminderCooldownHours: Math.min(numberFrom('SCHEDULE_REMINDER_COOLDOWN_HOURS', 24), 168),
   };

@@ -1,6 +1,6 @@
 'use client';
 
-import { BellIcon, CalendarCheckIcon, CalendarClockIcon, CalendarPlusIcon, LayoutDashboardIcon, UsersIcon, ReceiptIcon, SearchIcon, UserRoundIcon, type LucideIcon } from 'lucide-react';
+import { BellIcon, CalendarCheckIcon, CalendarClockIcon, CalendarPlusIcon, LayoutDashboardIcon, UsersIcon, ReceiptIcon, SearchIcon, SparklesIcon, UserRoundIcon, type LucideIcon } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import { useHydrated, useSession } from '@/lib/session';
 import type { Role } from '@/lib/types';
@@ -26,6 +26,7 @@ const NAV: Partial<Record<Role, NavDefinition[]>> = {
     { href: '/', label: 'Find Doctors', icon: SearchIcon, match: (p) => p === '/' || p.startsWith('/doctors') },
     { href: '/appointments', label: 'My Appointments', icon: CalendarCheckIcon, match: (p) => p.startsWith('/appointments') },
     { href: '/payments', label: 'Payments & Receipts', icon: ReceiptIcon, match: (p) => p.startsWith('/payments') },
+    { href: '/assistant', label: 'Assistant', icon: SparklesIcon, match: (p) => p.startsWith('/assistant') },
     { href: '/notifications', label: 'Notifications', icon: BellIcon, match: (p) => p.startsWith('/notifications') },
     { href: '/profile', label: 'My Profile', icon: UserRoundIcon, match: (p) => p.startsWith('/profile') },
   ],
@@ -33,6 +34,7 @@ const NAV: Partial<Record<Role, NavDefinition[]>> = {
     { href: '/doctor', label: 'Dashboard', icon: LayoutDashboardIcon, match: (p) => p === '/doctor' },
     { href: '/doctor/appointments', label: 'Appointments', icon: CalendarCheckIcon, match: (p) => p.startsWith('/doctor/appointments') },
     { href: '/doctor/availability', label: 'Availability', icon: CalendarClockIcon, match: (p) => p.startsWith('/doctor/availability') },
+    { href: '/assistant', label: 'Assistant', icon: SparklesIcon, match: (p) => p.startsWith('/assistant') },
     { href: '/doctor/profile', label: 'Profile', icon: UserRoundIcon, match: (p) => p.startsWith('/doctor/profile') },
   ],
   ADMIN: [{ href: '/admin/receptionists', label: 'Receptionists', icon: UsersIcon, match: (p) => p.startsWith('/admin') }],

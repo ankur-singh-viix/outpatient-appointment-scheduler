@@ -33,7 +33,7 @@ export async function loadDaySchedule(
   manager: EntityManager,
   doctorId: string,
   date: string,
-  options: { timeZone: string; bookingWindowDays: number; lockDoctor?: boolean },
+  options: { timeZone: string; bookingWindowDays: number; lockDoctor?: boolean; /** Leave this appointment out, as the move of it releases its old time first. */ ignoreAppointmentId?: string },
 ) {
   if (!isValidDate(date)) throw new BadRequestException('Date must be a valid YYYY-MM-DD date.');
   const today = clinicNow(options.timeZone);
@@ -52,14 +52,14 @@ export async function loadDaySchedule(
   const overrideRow = await manager.findOneBy(ScheduleOverride, { doctorId, overrideDate: date });
   const ruleRows = await manager.findBy(Availability, { doctorId });
   const activeRows = await manager.find(Appointment, {
-    select: { startTime: true, endTime: true, slotNumber: true, status: true, holdExpiresAt: true },
+    select: { id: true, startTime: true, endTime: true, slotNumber: true, status: true, holdExpiresAt: true },
     where: { doctorId, appointmentDate: date, status: In(ACTIVE_STATUSES) },
   });
   // An unpaid hold whose time has run out no longer occupies its slot, even before the background worker cancels it, so a
   // slow or sleeping worker can never keep a slot looking taken. Booking releases the row itself before it inserts.
   const nowMs = Date.now();
   const bookedRows = activeRows.filter(
-    (row) => !(row.status === 'PENDING' && row.holdExpiresAt !== null && row.holdExpiresAt.getTime() <= nowMs),
+    (row) => row.id !== options.ignoreAppointmentId && !(row.status === 'PENDING' && row.holdExpiresAt !== null && row.holdExpiresAt.getTime() <= nowMs),
   );
 
   const booked: BookedWindow[] = bookedRows.map((row) => ({ startTime: row.startTime, endTime: row.endTime, slotNumber: row.slotNumber }));
