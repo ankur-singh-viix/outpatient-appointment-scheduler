@@ -120,13 +120,15 @@ export function planChange(args: {
     );
   }
 
-  // The new hours must not run into another session of the same kind on the same weekday or date.
+  // The new hours must not run into another session of the same kind on the same weekday or date. Only the dates the change applies to
+  // count: a recurring session's new hours start at `applyFrom`, so a session that had already ended by then (history) is not a clash.
+  const applied = row.recurrenceType === 'WEEKLY' && (row.effectiveFrom === null || row.effectiveFrom < args.applyFrom) ? { effectiveFrom: args.applyFrom, effectiveTo: row.effectiveTo } : row;
   const clash = rules.find(
     (other) =>
       other.id !== row.id &&
       other.recurrenceType === row.recurrenceType &&
       (row.recurrenceType === 'WEEKLY' ? other.dayOfWeek === row.dayOfWeek : other.specificDate === row.specificDate) &&
-      effectiveRangesIntersect(row, other) &&
+      effectiveRangesIntersect(applied, other) &&
       toMinutes(proposed.startTime) < toMinutes(other.endTime) &&
       toMinutes(other.startTime) < toMinutes(proposed.endTime),
   );

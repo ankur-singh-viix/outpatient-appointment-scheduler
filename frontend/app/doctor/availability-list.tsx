@@ -1,6 +1,6 @@
 'use client';
 
-import { CalendarDaysIcon, ClockIcon, PencilIcon, RepeatIcon, Trash2Icon } from 'lucide-react';
+import { CalendarDaysIcon, ClockIcon, PencilIcon, RepeatIcon, Trash2Icon, UsersIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Alert, EmptyState } from '@/components/common';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -11,6 +11,7 @@ import { ApiError, api, errorMessage } from '@/lib/api';
 import { DAY_LONG, WEEK_ORDER, formatDate, formatTimeRange } from '@/lib/format';
 import type { AvailabilityRow, DoctorAvailability, OneTimeSession, SchedulingMode, Session, WeeklyHours } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import { AdjustCapacityDialog, type CapacityTarget } from './adjust-capacity-dialog';
 import { AdjustHoursDialog, type AdjustTarget } from './adjust-hours-dialog';
 import { MODE_LABEL, describeSettings, sessionBody } from './availability-model';
 
@@ -29,6 +30,17 @@ type Removing = { kind: 'weekly'; row: WeeklyHours } | { kind: 'oneoff'; row: On
 function effectiveText(row: AvailabilityRow): string | null {
   if (!row.effectiveFrom && !row.effectiveTo) return null;
   return `${row.effectiveFrom ? `From ${formatDate(row.effectiveFrom)}` : 'Until'}${row.effectiveTo ? `${row.effectiveFrom ? ' until' : ''} ${formatDate(row.effectiveTo)}` : ''}`;
+}
+
+/** Shown only while some upcoming slot holds more patients than its capacity now allows: everyone stays booked, and that slot takes no new bookings. */
+function OverCapacity({ row }: { row: AvailabilityRow }) {
+  if (!row.overCapacity) return null;
+  const { slots, maxBooked } = row.overCapacity;
+  return (
+    <p className="text-sm font-medium text-amber-800" role="status">
+      Over capacity on {slots} upcoming {slots === 1 ? 'slot' : 'slots'} (up to {maxBooked} booked). Nobody is moved; those slots take no new bookings until places free up.
+    </p>
+  );
 }
 
 /**
@@ -50,6 +62,7 @@ export function AvailabilityList({
 }) {
   const [removing, setRemoving] = useState<Removing>(null);
   const [adjusting, setAdjusting] = useState<AdjustTarget | null>(null);
+  const [capacity, setCapacity] = useState<CapacityTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   // Set once the server has said which booked appointments would be affected and the doctor presses the button again to agree.
@@ -126,6 +139,7 @@ export function AvailabilityList({
                           <ModeBadge mode={row.schedulingMode} />
                         </p>
                         <p className="text-sm text-muted-foreground">{describeSettings(row, minutes)}</p>
+                        <OverCapacity row={row} />
                         {effectiveText(row) && <p className="text-xs text-muted-foreground">{effectiveText(row)}</p>}
                       </div>
                       <div className="flex gap-2">
@@ -137,6 +151,16 @@ export function AvailabilityList({
                         >
                           <ClockIcon aria-hidden /> Adjust hours
                         </Button>
+                        {row.schedulingMode === 'WAVE' && row.id && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setCapacity({ id: row.id as string, title: DAY_LONG[row.dayOfWeek], capacityPerSlot: row.capacityPerSlot, maxBooked: row.maxBooked ?? 0 })}
+                            aria-label={`Adjust capacity for ${DAY_LONG[row.dayOfWeek]}`}
+                          >
+                            <UsersIcon aria-hidden /> Adjust capacity
+                          </Button>
+                        )}
                         <Button variant="outline" size="sm" onClick={() => onEdit(row)} aria-label={`Edit ${DAY_LONG[row.dayOfWeek]} session`}>
                           <PencilIcon aria-hidden /> Edit
                         </Button>
@@ -166,6 +190,7 @@ export function AvailabilityList({
                           <ModeBadge mode={row.schedulingMode} />
                         </p>
                         <p className="text-sm text-muted-foreground">{describeSettings(row, minutes)}</p>
+                        <OverCapacity row={row} />
                       </div>
                       <div className="flex gap-2">
                         <Button
@@ -176,6 +201,16 @@ export function AvailabilityList({
                         >
                           <ClockIcon aria-hidden /> Adjust hours
                         </Button>
+                        {row.schedulingMode === 'WAVE' && row.id && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setCapacity({ id: row.id as string, title: formatDate(row.date, { weekday: 'long' }), capacityPerSlot: row.capacityPerSlot, maxBooked: row.maxBooked ?? 0 })}
+                            aria-label={`Adjust capacity for ${formatDate(row.date)}`}
+                          >
+                            <UsersIcon aria-hidden /> Adjust capacity
+                          </Button>
+                        )}
                         <Button variant="outline" size="sm" onClick={() => setRemoving({ kind: 'oneoff', row })} aria-label={`Delete the session on ${formatDate(row.date)}`}>
                           <Trash2Icon aria-hidden /> Delete
                         </Button>
@@ -195,6 +230,17 @@ export function AvailabilityList({
         onClose={() => setAdjusting(null)}
         onApplied={(message) => {
           setAdjusting(null);
+          setFeedback({ tone: 'success', message });
+          onChanged();
+        }}
+      />
+
+      <AdjustCapacityDialog
+        session={session}
+        target={capacity}
+        onClose={() => setCapacity(null)}
+        onApplied={(message) => {
+          setCapacity(null);
           setFeedback({ tone: 'success', message });
           onChanged();
         }}

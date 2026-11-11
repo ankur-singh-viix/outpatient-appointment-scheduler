@@ -53,25 +53,26 @@ const availabilityFields = {
 
 const replaceWeeklySchema = z.strictObject({
   // `id` is what GET returns for a row; it is not needed to save (unchanged rows are recognised by their values).
-  hours: z.array(z.strictObject({ id: z.uuid().optional(), dayOfWeek: z.int().min(0).max(6), ...availabilityFields })).max(42),
+  // `maxBooked` and `overCapacity` are read-only facts GET returns with each row; they are accepted and ignored so a row can be sent back as it is.
+  hours: z.array(z.strictObject({ id: z.uuid().optional(), dayOfWeek: z.int().min(0).max(6), maxBooked: z.unknown().optional(), overCapacity: z.unknown().optional(), ...availabilityFields })).max(42),
   // Removing a session that has bookings: agree they stay booked until each patient chooses a new time.
   acknowledge: z.boolean().optional(),
 });
 
 const oneTimeSchema = z.strictObject({ date: dateSchema, ...availabilityFields });
 const idParam = z.strictObject({ id: z.uuid() });
+const capacityChangeSchema = z.strictObject({ capacityPerSlot: z.int().min(1).max(100) });
 
 // Changing the hours of an existing session. `applyFrom` is for recurring sessions: earlier dates keep their hours.
 const hoursChangeSchema = z.strictObject({ startTime: timeSchema, endTime: timeSchema, applyFrom: dateSchema.optional() });
 const applyHoursChangeSchema = hoursChangeSchema.extend({
   from: z.strictObject({ startTime: timeSchema, endTime: timeSchema }),
-  // Reducing hours: agree that affected appointments stay booked until each patient chooses a new time, and optionally suggest times.
+  // Reducing hours: agree that affected appointments stay booked until each patient chooses a new time (patients pick for themselves).
   acknowledge: z.boolean().optional(),
-  proposals: z.array(z.strictObject({ appointmentId: z.uuid(), date: dateSchema, startTime: timeSchema })).max(200).optional(),
 });
 const outsideQuery = z.object({ cursor: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).optional() });
 const historyQuery = z.object({ limit: z.coerce.number().int().min(1).max(50).optional() });
-const askNewTimeSchema = z.strictObject({ proposal: z.strictObject({ date: dateSchema, startTime: timeSchema }).optional() }).optional();
+const askNewTimeSchema = z.strictObject({}).optional();
 
 // A day off needs only a date. Add a start and an end to block just that part of the day. Custom hours also need a capacity.
 const dateOverrideSchema = z.discriminatedUnion('isAvailable', [
@@ -143,9 +144,9 @@ export class DoctorPortalController {
   askNewTime(
     @CurrentUser() user: AuthUser,
     @Param(new ZodValidationPipe(appointmentIdParam)) params: z.infer<typeof appointmentIdParam>,
-    @Body(new ZodValidationPipe(askNewTimeSchema)) body: z.infer<typeof askNewTimeSchema>,
+    @Body(new ZodValidationPipe(askNewTimeSchema)) _body: z.infer<typeof askNewTimeSchema>,
   ) {
-    return this.changes.askNewTime(user, params.id, body?.proposal);
+    return this.changes.askNewTime(user, params.id);
   }
 
   @Post('appointments/:id/cancel')
@@ -224,6 +225,17 @@ export class DoctorPortalController {
     @Query(new ZodValidationPipe(acknowledgeQuery)) query: z.infer<typeof acknowledgeQuery>,
   ) {
     return this.portal.deleteOneTime(user, params.id, query.acknowledge === 'true');
+  }
+
+  /** Raises or lowers the patients per slot of one Wave session. Never cancels or moves anyone; see AvailabilityChangeService.setCapacity. */
+  @Post('availability/:id/capacity')
+  @HttpCode(200)
+  setCapacity(
+    @CurrentUser() user: AuthUser,
+    @Param(new ZodValidationPipe(idParam)) params: z.infer<typeof idParam>,
+    @Body(new ZodValidationPipe(capacityChangeSchema)) body: z.infer<typeof capacityChangeSchema>,
+  ) {
+    return this.changes.setCapacity(user, params.id, body.capacityPerSlot);
   }
 
   /** Shows what changing a session's hours would do, without doing it. */

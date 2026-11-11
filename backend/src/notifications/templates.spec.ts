@@ -155,9 +155,10 @@ describe('messages for the Brevo notification set', () => {
   });
 
   it('asks the patient to choose a new time without cancelling anything, with the link and the original time', () => {
-    const message = templates.needsNewTime(full, { link: 'https://app.example.com/doctors/d1?reschedule=a1', proposed: { date: '2026-11-09', startTime: '10:00' } });
-    for (const part of ['Dr. Rohan Das', 'changed their hours', 'Nothing has been cancelled or moved', 'Mon, 2 Nov, 2026', 'The doctor suggests', 'https://app.example.com/doctors/d1?reschedule=a1', 'confirm the move']) expect(message.body).toContain(part);
+    const message = templates.needsNewTime(full, { link: 'https://app.example.com/doctors/d1?reschedule=a1' });
+    for (const part of ['Dr. Rohan Das', 'changed their hours', 'Nothing has been cancelled or moved', 'Mon, 2 Nov, 2026', 'https://app.example.com/doctors/d1?reschedule=a1', 'confirm the move']) expect(message.body).toContain(part);
     expect(message.body).not.toMatch(/appointment (was|has been) cancelled/);
+    expect(message.body).not.toMatch(/suggests/);
   });
 
   it('tells a patient who was asked that the original appointment is valid again and nothing is needed', () => {

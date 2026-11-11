@@ -400,24 +400,24 @@ describe('Schedule changes are safe, whichever route is used (e2e)', () => {
       await book(3, FAR, '10:00').expect(201);
     });
 
-    it('lowering places per slot below the bookings already made is refused; down to exactly the bookings is allowed', async () => {
+    it('lowering places per slot below the bookings already made is allowed: everyone stays, the slot takes no more', async () => {
       const id = await addRow(FAR, { perSlot: 3 });
       await book(0, FAR, '10:00').expect(201);
       await book(1, FAR, '10:00').expect(201);
       await book(2, FAR, '10:00').expect(201);
-      const refused = await putWeekly([weekly(FAR, { capacityPerSlot: 2 })]).expect(409);
-      expect(refused.body).toMatchObject({ code: 'CAPACITY_BELOW_BOOKINGS' });
-      expect(refused.body.message).toMatch(/already has 3 booked.*Keep at least 3/);
-      expect(await rows('SELECT capacity_per_slot FROM availability WHERE id = $1', [id])).toEqual([{ capacity_per_slot: 3 }]);
-      await putWeekly([weekly(FAR, { capacityPerSlot: 3 })]).expect(200);
+      await putWeekly([weekly(FAR, { capacityPerSlot: 2 })]).expect(200);
+      expect(await rows('SELECT capacity_per_slot FROM availability WHERE id = $1', [id])).toEqual([{ capacity_per_slot: 2 }]);
+      expect(await count("SELECT 1 FROM appointments WHERE status = 'CONFIRMED'")).toBe(3);
+      await book(3, FAR, '10:00').expect(409);
     });
 
-    it('turning a Wave session into one-patient-per-slot is a capacity reduction and is refused while a slot has two booked', async () => {
+    it('turning a Wave session into one-patient-per-slot keeps the two already booked, and the slot takes no more', async () => {
       await addRow(FAR, { perSlot: 2 });
       await book(0, FAR, '10:00').expect(201);
       await book(1, FAR, '10:00').expect(201);
-      const refused = await putWeekly([weekly(FAR, { schedulingMode: 'STREAM', capacityPerSlot: 1, capacity: 10 })]).expect(409);
-      expect(refused.body.code).toBe('CAPACITY_BELOW_BOOKINGS');
+      await putWeekly([weekly(FAR, { schedulingMode: 'STREAM', capacityPerSlot: 1, capacity: 10 })]).expect(200);
+      expect(await count("SELECT 1 FROM appointments WHERE status = 'CONFIRMED'")).toBe(2);
+      await book(2, FAR, '10:00').expect(409);
     });
 
     it('a session nobody has booked can be edited freely, as before', async () => {

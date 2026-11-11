@@ -337,4 +337,108 @@ describe('Coordinating affected patients automatically (e2e)', () => {
       expect(await rows("SELECT count(*)::int AS n FROM appointments WHERE status = 'CANCELLED' AND cancel_reason IS DISTINCT FROM 'Rescheduled by patient'")).toEqual([{ n: 0 }]);
     });
   });
+
+  describe('a fully booked slot is shifted away (09:00-10:00, 30 min, 3 per slot, 3 booked at 09:00; hours become 09:30-10:30)', () => {
+    it('is not blocked, tracks and notifies all three patients, keeps them confirmed, and each moves only by their own confirmation', async () => {
+      const row = await session(day(6), { start: '09:00', end: '10:00', perSlot: 3 });
+      const booked = [];
+      for (const patient of [0, 1, 2]) booked.push((await book(patient, day(6), '09:00').expect(201)).body);
+      const preview = await http().post(`/api/doctor-portal/availability/${row}/change/preview`).set(as(doctorToken)).send({ startTime: '09:30', endTime: '10:30' }).expect(200);
+      expect(preview.body).toMatchObject({ canApply: true, affectedCount: 3 });
+      await change(row, '09:30', '10:30', { startTime: '09:00', endTime: '10:00' }).expect(200);
+
+      expect(await rows('SELECT appointment_id FROM schedule_change_appointments ORDER BY appointment_id')).toHaveLength(3);
+      expect(await notifier().drain()).toBe(3);
+      const notices = await messages('needs-new-time');
+      expect(notices).toHaveLength(3);
+      expect(new Set(notices.map((n) => n.to_address))).toEqual(new Set(['co1@test.local', 'co2@test.local', 'co3@test.local']));
+      await dispatch();
+      expect(sent.filter((m) => /choose a new time/i.test(m.subject))).toHaveLength(3);
+      for (const [index, appointment] of booked.entries()) {
+        expect(await status(appointment.id)).toBe('CONFIRMED');
+        const mine = (await rows<{ body: string }>('SELECT body FROM notifications WHERE appointment_id = $1 AND kind = $2', [appointment.id, 'needs-new-time']))[0];
+        expect(mine.body).toContain(`reschedule=${appointment.id}`);
+        const alt = (await http().get(`/api/appointments/${appointment.id}/alternatives`).set(as(patientTokens[index])).expect(200)).body;
+        expect(alt.needsNewTime).toBe(true);
+        expect(alt.alternatives[0]).toMatchObject({ date: day(6), startTime: '09:30' });
+        expect(alt.alternatives.length).toBeGreaterThan(0);
+      }
+
+      // Each moves only when they confirm; the new slot (09:30, 3 places) takes all three and no more.
+      for (const [index, appointment] of booked.entries()) await reschedule(index, appointment.id, day(6), '09:30').expect(201);
+      expect(await rows("SELECT count(*)::int AS n FROM appointments WHERE start_time = '09:30' AND status = 'CONFIRMED'")).toEqual([{ n: 3 }]);
+      await book(3, day(6), '09:30').expect(409);
+    });
+
+    it('behaves the same for a recurring weekly session (the usual setup), including later weeks', async () => {
+      const date = day(8);
+      const dow = new Date(date + 'T00:00:00Z').getUTCDay();
+      const row = (
+        await db.query(
+          `INSERT INTO availability (doctor_id, recurrence_type, day_of_week, start_time, end_time, scheduling_mode, capacity_per_slot, slot_duration_minutes)
+           VALUES ($1, 'WEEKLY', $2, '09:00', '10:00', 'WAVE', 3, 30) RETURNING id`,
+          [doctorId, dow],
+        )
+      ).rows[0].id as string;
+      const booked = [];
+      for (const patient of [0, 1, 2]) booked.push((await book(patient, date, '09:00').expect(201)).body);
+      const preview = await http().post(`/api/doctor-portal/availability/${row}/change/preview`).set(as(doctorToken)).send({ startTime: '09:30', endTime: '10:30' }).expect(200);
+      expect(preview.body).toMatchObject({ canApply: true, affectedCount: 3 });
+      await change(row, '09:30', '10:30', { startTime: '09:00', endTime: '10:00' }).expect(200);
+      expect(await notifier().drain()).toBe(3);
+      expect(await messages('needs-new-time')).toHaveLength(3);
+      for (const appointment of booked) expect(await status(appointment.id)).toBe('CONFIRMED');
+    });
+
+    it('editing a session is never an overlap with itself or with its own finished history; a genuinely live neighbour still is', async () => {
+      const date = day(8);
+      const dow = new Date(date + 'T00:00:00Z').getUTCDay();
+      const weekly = async (start: string, end: string, extra: { from?: string | null; to?: string | null } = {}) =>
+        (
+          await db.query(
+            `INSERT INTO availability (doctor_id, recurrence_type, day_of_week, start_time, end_time, scheduling_mode, capacity_per_slot, slot_duration_minutes, effective_from, effective_to)
+             VALUES ($1, 'WEEKLY', $2, $3, $4, 'WAVE', 3, 30, $5, $6) RETURNING id`,
+            [doctorId, dow, start, end, extra.from ?? null, extra.to ?? null],
+          )
+        ).rows[0].id as string;
+      await weekly('09:00', '10:00', { to: day(-1) }); // the same hours, finished yesterday: history, not a neighbour
+      const row = await weekly('09:00', '10:00');
+      const booked = [];
+      for (const patient of [0, 1, 2]) booked.push((await book(patient, date, '09:00').expect(201)).body);
+
+      const preview = await http().post(`/api/doctor-portal/availability/${row}/change/preview`).set(as(doctorToken)).send({ startTime: '09:30', endTime: '10:00' }).expect(200);
+      expect(preview.body).toMatchObject({ canApply: true, problems: [], affectedCount: 3 });
+      await change(row, '09:30', '10:00', { startTime: '09:00', endTime: '10:00' }).expect(200);
+      expect(await notifier().drain()).toBe(3);
+      expect(await messages('needs-new-time')).toHaveLength(3);
+      for (const appointment of booked) expect(await status(appointment.id)).toBe('CONFIRMED');
+
+      // A real, live session in the way is still refused, and named.
+      const neighbour = await weekly('10:00', '11:00');
+      const clash = await http().post(`/api/doctor-portal/availability/${neighbour}/change/preview`).set(as(doctorToken)).send({ startTime: '09:30', endTime: '11:00' }).expect(200);
+      expect(clash.body).toMatchObject({ canApply: false });
+      expect(clash.body.problems[0]).toMatch(/overlap another session \(09:30-10:00\)/);
+    });
+
+    it('saving the whole weekly list with shifted hours is refused with a pointer to Adjust hours, and changes nothing', async () => {
+      const date = day(8);
+      const dow = new Date(date + 'T00:00:00Z').getUTCDay();
+      await db.query(
+        `INSERT INTO availability (doctor_id, recurrence_type, day_of_week, start_time, end_time, scheduling_mode, capacity_per_slot, slot_duration_minutes)
+         VALUES ($1, 'WEEKLY', $2, '09:00', '10:00', 'WAVE', 3, 30)`,
+        [doctorId, dow],
+      );
+      const booked = [];
+      for (const patient of [0, 1, 2]) booked.push((await book(patient, date, '09:00').expect(201)).body);
+      const res = await http()
+        .put('/api/doctor-portal/availability/weekly')
+        .set(as(doctorToken))
+        .send({ hours: [{ dayOfWeek: dow, startTime: '09:30', endTime: '10:30', schedulingMode: 'WAVE', capacityPerSlot: 3, slotDurationMinutes: 30 }], acknowledge: true });
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'USE_ADJUST_HOURS' });
+      expect(await rows("SELECT start_time::text AS s, end_time::text AS e FROM availability WHERE doctor_id = $1", [doctorId])).toEqual([{ s: '09:00:00', e: '10:00:00' }]);
+      expect(await rows('SELECT 1 FROM schedule_change_appointments')).toEqual([]);
+      for (const appointment of booked) expect(await status(appointment.id)).toBe('CONFIRMED');
+    });
+  });
 });

@@ -10,7 +10,6 @@ import { toRule } from './day-schedule.js';
 import { bookedLoader, openTimes } from './open-times.js';
 import { appointmentsOutsideHours, toOverride } from './outside-hours.js';
 import { reconcileAllDoctors } from './schedule-reconciler.js';
-import { hhmm } from './slots.js';
 
 /** How many patients one pass asks. A bigger change is simply worked through over several passes. */
 export const NOTIFY_BATCH = 200;
@@ -25,13 +24,10 @@ interface PendingRow {
   appointment_date: string;
   start_time: string;
   end_time: string;
-  proposed_date: string | null;
-  proposed_start_time: string | null;
-  proposed_end_time: string | null;
 }
 
-export function rescheduleLink(frontendUrl: string, doctorId: string, appointmentId: string, date?: string | null): string {
-  return `${frontendUrl}/doctors/${doctorId}?reschedule=${appointmentId}${date ? `&date=${date}` : ''}`;
+export function rescheduleLink(frontendUrl: string, doctorId: string, appointmentId: string): string {
+  return `${frontendUrl}/doctors/${doctorId}?reschedule=${appointmentId}`;
 }
 
 /**
@@ -76,8 +72,7 @@ export class ScheduleChangeNotifier {
     return this.dataSource.transaction(async (manager) => {
       const rows: PendingRow[] = await manager.query(
         `SELECT s.change_id, s.appointment_id, a.doctor_id, a.appointment_date::text AS appointment_date,
-                a.start_time::text AS start_time, a.end_time::text AS end_time,
-                s.proposed_date::text AS proposed_date, s.proposed_start_time::text AS proposed_start_time, s.proposed_end_time::text AS proposed_end_time
+                a.start_time::text AS start_time, a.end_time::text AS end_time
            FROM schedule_change_appointments s
            JOIN appointments a ON a.id = s.appointment_id
           WHERE s.notified_at IS NULL AND s.resolved_at IS NULL AND s.attempts < $2 AND a.status IN ('PENDING', 'CONFIRMED')
@@ -155,7 +150,7 @@ export class ScheduleChangeNotifier {
       const cutoff = new Date(Date.now() - this.config.scheduleReminderCooldownHours * 3_600_000);
       const claimed: (PendingRow & { created_at: Date })[] = await manager.query(
         `SELECT s.change_id, s.appointment_id, a.doctor_id, a.appointment_date::text AS appointment_date, a.start_time::text AS start_time, a.end_time::text AS end_time,
-                NULL AS proposed_date, NULL AS proposed_start_time, NULL AS proposed_end_time, s.created_at
+                s.created_at
            FROM schedule_change_appointments s JOIN appointments a ON a.id = s.appointment_id
           WHERE s.resolved_at IS NULL AND s.notified_at IS NOT NULL AND s.notified_at <= $1
             AND a.status IN ('PENDING', 'CONFIRMED') AND (a.appointment_date > $2::date OR (a.appointment_date = $2::date AND a.start_time > $3::time))
@@ -216,8 +211,7 @@ export class ScheduleChangeNotifier {
     await reconcileAllDoctors(this.dataSource, clock, (manager, ids) => this.notifications.appointmentsRestored(manager, ids));
     const result = await this.dataSource.transaction(async (manager) => {
       const claimed: PendingRow[] = await manager.query(
-        `SELECT s.change_id, s.appointment_id, a.doctor_id, a.appointment_date::text AS appointment_date, a.start_time::text AS start_time, a.end_time::text AS end_time,
-                NULL AS proposed_date, NULL AS proposed_start_time, NULL AS proposed_end_time
+        `SELECT s.change_id, s.appointment_id, a.doctor_id, a.appointment_date::text AS appointment_date, a.start_time::text AS start_time, a.end_time::text AS end_time
            FROM schedule_change_appointments s JOIN appointments a ON a.id = s.appointment_id
           WHERE s.resolved_at IS NULL AND s.notified_at IS NOT NULL
             AND a.status IN ('PENDING', 'CONFIRMED') AND (a.appointment_date > $1::date OR (a.appointment_date = $1::date AND a.start_time > $2::time))
@@ -326,14 +320,9 @@ export class ScheduleChangeNotifier {
   }
 
   private async queueOne(manager: EntityManager, row: PendingRow): Promise<void> {
-    const proposed =
-      row.proposed_date && row.proposed_start_time && row.proposed_end_time
-        ? { date: row.proposed_date, startTime: hhmm(row.proposed_start_time), endTime: hhmm(row.proposed_end_time) }
-        : undefined;
     await this.notifications.queueNewTimeRequest(manager, row.appointment_id, {
-      link: rescheduleLink(this.config.frontendUrl, row.doctor_id, row.appointment_id, proposed?.date),
+      link: rescheduleLink(this.config.frontendUrl, row.doctor_id, row.appointment_id),
       changeKey: row.change_id,
-      proposed,
     });
   }
 

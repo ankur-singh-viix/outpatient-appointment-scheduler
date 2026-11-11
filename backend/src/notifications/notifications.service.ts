@@ -151,7 +151,7 @@ export class NotificationsService {
   async appointmentNeedsNewTime(
     manager: EntityManager,
     appointmentId: string,
-    input: { link: string; changeKey: string; proposed?: { date: string; startTime: string; endTime: string } },
+    input: { link: string; changeKey: string },
   ): Promise<void> {
     await this.safely(manager, `new-time request for ${appointmentId}`, async (inner) => {
       const loaded = await this.load(inner, appointmentId);
@@ -167,7 +167,7 @@ export class NotificationsService {
   async queueNewTimeRequest(
     manager: EntityManager,
     appointmentId: string,
-    input: { link: string; changeKey: string; proposed?: { date: string; startTime: string; endTime: string } },
+    input: { link: string; changeKey: string },
   ): Promise<void> {
     const loaded = await this.load(manager, appointmentId);
     await this.enqueue(manager, this.toPatient(loaded, templates.needsNewTime(loaded.facts, input), `needs-new-time:${appointmentId}:${input.changeKey}`));

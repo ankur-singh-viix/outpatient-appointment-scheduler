@@ -129,6 +129,9 @@ export class DoctorPortalService {
       where: { doctorId: doctor.id, overrideDate: MoreThanOrEqual(today) },
       order: { overrideDate: 'ASC' },
     });
+    // The busiest upcoming slot of each Wave session, and whether any slot holds more patients than its capacity now allows.
+    const load = await this.changes.bookingLoad(doctor, [...weekly, ...oneTime]);
+    const loadOf = (row: Availability) => ({ maxBooked: load.get(row.id)?.maxBooked ?? 0, overCapacity: load.get(row.id)?.overCapacity ?? null });
     return {
       consultationMinutes: doctor.consultationMinutes,
       /** Minutes between the starts of slots. Equals consultationMinutes unless the doctor chose a shorter (overlapping) interval. */
@@ -138,9 +141,9 @@ export class DoctorPortalService {
       defaultCapacity: doctor.defaultDailyCapacity,
       /** What a new Wave session starts with: what this doctor already uses most (so sessions stay consistent), else the clinic default. */
       suggestedCapacityPerSlot: suggestedCapacityPerSlot([...weekly, ...oneTime]),
-      weekly: weekly.map((row) => ({ id: row.id, dayOfWeek: row.dayOfWeek, ...describeRow(row) })),
+      weekly: weekly.map((row) => ({ id: row.id, dayOfWeek: row.dayOfWeek, ...describeRow(row), ...loadOf(row) })),
       /** Sessions for one date only, from today on. They take priority over the weekly hours for the time they overlap. */
-      oneTime: oneTime.map((row) => ({ id: row.id, date: row.specificDate, ...describeRow(row) })),
+      oneTime: oneTime.map((row) => ({ id: row.id, date: row.specificDate, ...describeRow(row), ...loadOf(row) })),
       overrides: overrides.map((row) => ({
         date: row.overrideDate,
         isAvailable: row.isAvailable,

@@ -190,13 +190,14 @@ describe('Booking, capacity and lifecycle invariants (e2e)', () => {
       expect(await active(FAR, '09:00:00')).toHaveLength(5);
     });
 
-    it('raising capacity opens more places at once; lowering it below the bookings is refused', async () => {
+    it('raising capacity opens more places at once; lowering it below the bookings keeps everyone and blocks new bookings', async () => {
       await addRow(FAR);
       for (let n = 0; n < 5; n++) await book(n, FAR, '09:00').expect(201);
       await book(5, FAR, '09:00').expect(409);
       await putWeekly([weekly(FAR, { capacityPerSlot: 6 })]).expect(200);
       await book(5, FAR, '09:00').expect(201);
-      expect((await putWeekly([weekly(FAR, { capacityPerSlot: 5 })]).expect(409)).body.code).toBe('CAPACITY_BELOW_BOOKINGS');
+      await putWeekly([weekly(FAR, { capacityPerSlot: 5 })]).expect(200); // 6 are booked: over capacity, but nobody is cancelled
+      expect((await rows("SELECT count(*)::int AS n FROM appointments WHERE status = 'CONFIRMED'"))[0]).toEqual({ n: 6 });
       await book(6, FAR, '09:00').expect(409);
     });
   });

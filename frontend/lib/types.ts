@@ -286,6 +286,9 @@ export interface AvailabilityRow {
   capacityPerSlot: number;
   effectiveFrom: string | null;
   effectiveTo: string | null;
+  /** Wave rows, from the server: the most patients in any upcoming slot, and the slots holding more than the capacity allows (null when none). */
+  maxBooked?: number;
+  overCapacity?: { slots: number; maxBooked: number } | null;
 }
 
 export interface WeeklyHours extends AvailabilityRow {

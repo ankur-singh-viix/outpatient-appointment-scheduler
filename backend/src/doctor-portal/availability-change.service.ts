@@ -24,19 +24,11 @@ export interface ChangeInput {
   applyFrom?: string;
 }
 
-export interface Proposal {
-  appointmentId: string;
-  date: string;
-  startTime: string;
-}
-
 export interface ApplyChangeInput extends ChangeInput {
   /** The hours the doctor previewed against. If the session has changed since, the change is refused rather than applied blindly. */
   from: Window;
   /** Required when reducing the hours would leave booked appointments outside them: the doctor has seen the list and agrees. */
   acknowledge?: boolean;
-  /** Optional suggested new times for affected appointments, chosen from the alternatives the preview offered. */
-  proposals?: Proposal[];
 }
 
 /** How many example dates a preview lists (the totals always cover every date). */
@@ -104,7 +96,6 @@ export class AvailabilityChangeService {
           `${view.affectedCount} booked appointment${view.affectedCount === 1 ? '' : 's'} would fall outside the new hours. Review ${view.affectedCount === 1 ? 'it' : 'them'} and confirm that you understand ${view.affectedCount === 1 ? 'it stays' : 'they stay'} booked until the patient chooses a new time.`,
         );
       }
-      const chosen = this.checkProposals(view.affectedAppointments, input.proposals ?? []);
 
       const { row, applyFrom, split } = planned;
       const proposed = { startTime: input.startTime, endTime: input.endTime };
@@ -145,7 +136,6 @@ export class AvailabilityChangeService {
         planned.doctor.id,
         { availabilityId: resultId, kind: view.kind === 'NONE' ? 'SHRINK' : view.kind, applyFrom, old: { start: now.startTime, end: now.endTime }, now: { start: hhmm(input.startTime), end: hhmm(input.endTime) } },
         planned.affectedIds,
-        chosen,
       );
       // Extending (or the extending side of a mixed change): appointments that were waiting for a new time and are inside the hours
       // again are released here, in the same transaction, so nobody ever sees the new hours with the old bookkeeping.
@@ -278,8 +268,8 @@ export class AvailabilityChangeService {
     };
   }
 
-  /** Asks the patient again (at most once a day) to choose a new time, optionally suggesting one of the open times. */
-  async askNewTime(user: AuthUser, appointmentId: string, proposal?: { date: string; startTime: string }) {
+  /** Asks the patient again (at most once a day) to choose a new time. The patient browses the open times and picks for themselves. */
+  async askNewTime(user: AuthUser, appointmentId: string) {
     const asked = await this.dataSource.transaction(async (manager) => {
       const doctor = await this.requireDoctor(manager, user, true);
       const appointment = await manager.findOne(Appointment, { where: { id: appointmentId, doctorId: doctor.id }, relations: { patient: { user: true } } });
@@ -291,10 +281,6 @@ export class AvailabilityChangeService {
       if ((await appointmentsOutsideHours(manager, doctor.id, [placed(appointment)])).size === 0) {
         throw new ConflictException('This appointment is within your hours, so there is nothing to ask the patient.');
       }
-      const overrides = await this.overridesFor(manager, doctor.id, situation.clock.date, situation.lastDate);
-      const options = (await this.alternatives([appointment], situation, situation.rules, overrides, bookedLoader(manager, doctor.id, situation.lastDate))).get(appointment.id) ?? [];
-      const chosen = proposal ? options.find((option) => option.date === proposal.date && option.startTime === proposal.startTime) : undefined;
-      if (proposal && !chosen) throw new ConflictException('That suggested time is no longer open. Choose another.');
       // At most one request a day per patient, counting the one sent when the hours changed.
       const recent = await manager.findOne(Notification, {
         where: { appointmentId: appointment.id, kind: In(['needs-new-time', 'needs-new-time-reminder', 'new-times-available']), channel: 'email', status: In(['PENDING', 'SENT']), createdAt: MoreThanOrEqual(new Date(Date.now() - 24 * 3_600_000)) },
@@ -303,9 +289,8 @@ export class AvailabilityChangeService {
       if (recent) throw new ConflictException('You have already asked this patient in the last 24 hours. Their email may still be on its way.');
       const changeKey = `ask-${situation.clock.date}`;
       await this.notifications.appointmentNeedsNewTime(manager, appointment.id, {
-        link: rescheduleLink(this.config.frontendUrl, doctor.id, appointment.id, chosen?.date),
+        link: rescheduleLink(this.config.frontendUrl, doctor.id, appointment.id),
         changeKey,
-        proposed: chosen && { date: chosen.date, startTime: chosen.startTime, endTime: chosen.endTime },
       });
       return true;
     });
@@ -418,8 +403,7 @@ export class AvailabilityChangeService {
         if (next.slotDurationMinutes !== old.slotDurationMinutes || next.effectiveFrom !== old.effectiveFrom || next.effectiveTo !== old.effectiveTo) {
           throw useAdjustHours(`${label} ${hhmm(old.startTime)}-${hhmm(old.endTime)} has ${live.length} upcoming booking${live.length === 1 ? '' : 's'}, so its slot length or dates cannot be changed here.`);
         }
-        const perSlot = next.schedulingMode === 'WAVE' ? next.capacityPerSlot : 1;
-        this.assertFits(live, perSlot, next.schedulingMode === 'STREAM' ? next.capacity : null);
+        this.assertFits(live, next.schedulingMode === 'STREAM' ? next.capacity : null);
         await manager.update(Availability, { id: old.id }, { schedulingMode: next.schedulingMode, capacityPerSlot: next.capacityPerSlot, capacity: next.capacity });
         handledRowIds.add(old.id);
         handledInserts.add(sameHours.index);
@@ -435,25 +419,45 @@ export class AvailabilityChangeService {
   }
 
   /**
-   * Places per slot (and, for a one-patient-per-slot session, its total) may rise freely but not fall below the bookings already
-   * made. "Places taken" is counted by the slot engine's own function (placesTaken), so this rule and the slots patients are shown
-   * can never disagree about how full a slot is.
+   * The total of a one-patient-per-slot session may rise freely but not fall below the bookings already made. (Places per slot may
+   * fall below them: see setCapacity. Nobody is cancelled, and the slot takes no new bookings until it has room again.)
    */
-  private assertFits(live: Appointment[], perSlot: number, sessionCapacity: number | null): void {
+  private assertFits(live: Appointment[], sessionCapacity: number | null): void {
     const byDate = new Map<string, Appointment[]>();
     for (const a of live) byDate.set(a.appointmentDate, [...(byDate.get(a.appointmentDate) ?? []), a]);
     for (const [date, list] of [...byDate].sort((x, y) => x[0].localeCompare(y[0]))) {
-      const windows = list.map((a) => ({ start: toMinutes(hhmm(a.startTime)), end: toMinutes(hhmm(a.endTime)) }));
-      for (const a of [...list].sort((x, y) => hhmm(x.startTime).localeCompare(hhmm(y.startTime)))) {
-        const taken = placesTaken(windows, toMinutes(hhmm(a.startTime)), toMinutes(hhmm(a.endTime)));
-        if (taken > perSlot) {
-          throw capacityBelowBookings(`${whenText(date, a.startTime)} already has ${taken} booked, and you asked for ${perSlot} per slot. Keep at least ${taken}, or ask those patients to move first.`);
-        }
-      }
       if (sessionCapacity !== null && list.length > sessionCapacity) {
         throw capacityBelowBookings(`${whenText(date, '00:00').split(' at ')[0]} already has ${list.length} booked in this session, and you asked for room for ${sessionCapacity}. Keep at least ${list.length}.`);
       }
     }
+  }
+
+  /**
+   * Sets the patients per slot of one Wave session. Raising it opens the extra places at once. Lowering it never cancels or moves
+   * anyone: bookings above the new limit stay, those slots are over capacity and take no new bookings until enough patients have
+   * left them (cancelled, moved or finished), because places taken are always counted live from the bookings. It runs under the doctor
+   * row lock that bookings take, so a booking and a capacity change can never interleave.
+   */
+  async setCapacity(user: AuthUser, id: string, capacityPerSlot: number) {
+    return this.dataSource.transaction(async (manager) => {
+      const doctor = await this.requireDoctor(manager, user, true);
+      const row = await manager.findOneBy(Availability, { id, doctorId: doctor.id });
+      if (!row) throw new NotFoundException('No session exists with that id.');
+      if (row.schedulingMode !== 'WAVE') throw new BadRequestException('Only a Wave session has a patients-per-slot setting.');
+      const previous = row.capacityPerSlot;
+      if (capacityPerSlot !== previous) await manager.update(Availability, { id }, { capacityPerSlot });
+      const load = slotLoad(await this.liveBookingsIn(manager, doctor, row), capacityPerSlot);
+      return { id, capacityPerSlot, previousCapacityPerSlot: previous, overCapacitySlots: load.overCapacity?.slots ?? 0, maxBooked: load.maxBooked };
+    });
+  }
+
+  /** For the doctor's session list: the busiest upcoming slot of each Wave session, and whether any slot is over its capacity. */
+  async bookingLoad(doctor: Doctor, rows: Availability[]) {
+    const manager = this.dataSource.manager;
+    const situation = await this.situation(manager, doctor);
+    const result = new Map<string, ReturnType<typeof slotLoad>>();
+    for (const row of rows) if (row.schedulingMode === 'WAVE') result.set(row.id, slotLoad(await this.liveBookingsIn(manager, doctor, row, situation), row.capacityPerSlot));
+    return result;
   }
 
   /** Ends a weekly session from today (or deletes a one-time one), recording the appointments it strands. Runs in the caller's transaction. */
@@ -557,14 +561,13 @@ export class AvailabilityChangeService {
     return result;
   }
 
-  /** One tracking row per affected appointment, in one statement, with the time the doctor suggested for it, if any. */
-  private async insertTracking(manager: EntityManager, changeId: string, appointmentIds: string[], chosen?: Map<string, OpenSlot>): Promise<void> {
-    const pick = (id: string) => chosen?.get(id);
+  /** One tracking row per affected appointment, in one statement. */
+  private async insertTracking(manager: EntityManager, changeId: string, appointmentIds: string[]): Promise<void> {
     await manager.query(
-      `INSERT INTO schedule_change_appointments (change_id, appointment_id, proposed_date, proposed_start_time, proposed_end_time)
-       SELECT $1, t.id, t.d, t.s, t.e FROM unnest($2::uuid[], $3::date[], $4::time[], $5::time[]) AS t(id, d, s, e)
+      `INSERT INTO schedule_change_appointments (change_id, appointment_id)
+       SELECT $1, t.id FROM unnest($2::uuid[]) AS t(id)
        ON CONFLICT DO NOTHING`,
-      [changeId, appointmentIds, appointmentIds.map((id) => pick(id)?.date ?? null), appointmentIds.map((id) => pick(id)?.startTime ?? null), appointmentIds.map((id) => pick(id)?.endTime ?? null)],
+      [changeId, appointmentIds],
     );
   }
 
@@ -578,7 +581,6 @@ export class AvailabilityChangeService {
     doctorId: string,
     fields: { availabilityId: string | null; kind: 'EXPAND' | 'SHRINK' | 'MIXED'; applyFrom: string; old: { start: string; end: string }; now: { start: string; end: string } },
     affectedIds: string[],
-    chosen?: Map<string, OpenSlot>,
   ): Promise<ScheduleChange> {
     const change = await manager.save(
       manager.create(ScheduleChange, {
@@ -594,7 +596,7 @@ export class AvailabilityChangeService {
         createdByUserId: user.id,
       }),
     );
-    if (affectedIds.length > 0) await this.insertTracking(manager, change.id, affectedIds, chosen);
+    if (affectedIds.length > 0) await this.insertTracking(manager, change.id, affectedIds);
     return change;
   }
 
@@ -778,18 +780,6 @@ export class AvailabilityChangeService {
     });
   }
 
-  /** Each suggested time must be one of the open times offered for that appointment, so a stale or invented suggestion is refused. */
-  private checkProposals(affected: { id: string; alternatives: OpenSlot[] }[], proposals: Proposal[]): Map<string, OpenSlot> {
-    const chosen = new Map<string, OpenSlot>();
-    for (const proposal of proposals) {
-      const target = affected.find((appointment) => appointment.id === proposal.appointmentId);
-      const slot = target?.alternatives.find((option) => option.date === proposal.date && option.startTime === proposal.startTime);
-      if (!slot) throw new ConflictException('A suggested time is no longer open, or is not for an affected appointment. Preview the change again.');
-      chosen.set(proposal.appointmentId, slot);
-    }
-    return chosen;
-  }
-
   private async plan(manager: EntityManager, user: AuthUser, id: string, input: ChangeInput, options: { lock?: boolean } = {}) {
     const doctor = await this.requireDoctor(manager, user, options.lock);
     const row = await manager.findOneBy(Availability, { id, doctorId: doctor.id });
@@ -962,6 +952,31 @@ const restrictionView = (block: WindowBlock) => ({
 
 /** The change is refused whole (nothing was written) because it would affect an appointment that is too close or under way. */
 const tooClose = (block: WindowBlock) => new ConflictException({ statusCode: 409, error: 'Conflict', code: 'CHANGE_TOO_CLOSE', message: block.message, restriction: restrictionView(block) });
+
+/** The most patients in any one slot of these bookings, and how many slots hold more than perSlot (counted with the slot engine's own placesTaken). */
+export function slotLoad(live: Appointment[], perSlot: number): { maxBooked: number; overCapacity: { slots: number; maxBooked: number } | null } {
+  const byDate = new Map<string, Appointment[]>();
+  for (const a of live) byDate.set(a.appointmentDate, [...(byDate.get(a.appointmentDate) ?? []), a]);
+  let maxBooked = 0;
+  let overSlots = 0;
+  let overMax = 0;
+  for (const list of byDate.values()) {
+    const windows = list.map((a) => ({ start: toMinutes(hhmm(a.startTime)), end: toMinutes(hhmm(a.endTime)) }));
+    const seen = new Set<string>();
+    for (const a of list) {
+      const key = `${hhmm(a.startTime)}-${hhmm(a.endTime)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const taken = placesTaken(windows, toMinutes(hhmm(a.startTime)), toMinutes(hhmm(a.endTime)));
+      maxBooked = Math.max(maxBooked, taken);
+      if (taken > perSlot) {
+        overSlots++;
+        overMax = Math.max(overMax, taken);
+      }
+    }
+  }
+  return { maxBooked, overCapacity: overSlots > 0 ? { slots: overSlots, maxBooked: overMax } : null };
+}
 
 const capacityBelowBookings = (message: string) => new ConflictException({ statusCode: 409, error: 'Conflict', code: 'CAPACITY_BELOW_BOOKINGS', message });
 

@@ -110,10 +110,10 @@ export function bookingCancelled(
 
 /**
  * The doctor's hours changed and this appointment no longer fits them. Nothing has been moved or cancelled: the booking stands until
- * the patient chooses a new time. `link` opens the existing reschedule page (the patient signs in there and confirms the move), and
- * `proposed` is a time the doctor suggests, if they picked one.
+ * the patient chooses a new time. `link` opens the existing reschedule page, where the patient sees every open time, nearest first, and
+ * confirms the move themselves. The doctor never chooses a time for them.
  */
-export function needsNewTime(facts: AppointmentFacts, input: { link: string; proposed?: Pick<AppointmentFacts, 'date' | 'startTime' | 'endTime'> }): MessageContent {
+export function needsNewTime(facts: AppointmentFacts, input: { link: string }): MessageContent {
   return {
     kind: 'needs-new-time',
     subject: `Please choose a new time: ${facts.doctorName}, ${when(facts)}`,
@@ -126,9 +126,7 @@ ${facts.doctorName} has changed their hours, and your appointment is no longer w
 ${details(facts)}
 
 ` +
-      `${input.proposed ? `The doctor suggests: ${when(input.proposed)}
-
-` : ''}Choose a new time here (you will be asked to confirm the move): ${input.link}
+      `Choose a new time here (you will be asked to confirm the move): ${input.link}
 
 ` +
       'If none of the available times suit you, you can cancel from your appointments page or contact the clinic.',
