@@ -1,4 +1,4 @@
-import { AlertCircleIcon, CheckCircle2Icon, InfoIcon, Loader2Icon } from 'lucide-react';
+import { AlertCircleIcon, CheckCircle2Icon, InfoIcon, Loader2Icon, type LucideIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Alert as UiAlert, AlertAction, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -11,6 +11,19 @@ export function Spinner({ label = 'Loading…' }: { label?: string }) {
     <div role="status" className="flex items-center justify-center gap-3 py-10 text-sm text-muted-foreground">
       <Loader2Icon className="size-5 animate-spin text-primary" aria-hidden />
       {label}
+    </div>
+  );
+}
+
+/** Consistent page title block: heading, optional description and a right-aligned action. */
+export function PageHeader({ title, description, action }: { title: string; description?: ReactNode; action?: ReactNode }) {
+  return (
+    <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight text-foreground sm:text-3xl">{title}</h1>
+        {description && <p className="mt-1 text-sm text-muted-foreground sm:text-base">{description}</p>}
+      </div>
+      {action}
     </div>
   );
 }
@@ -40,9 +53,14 @@ export function Alert({
   );
 }
 
-export function EmptyState({ title, children }: { title: string; children?: ReactNode }) {
+export function EmptyState({ title, icon: Icon, children }: { title: string; icon?: LucideIcon; children?: ReactNode }) {
   return (
-    <div className="flex flex-col items-center rounded-xl border border-dashed border-border bg-card px-6 py-12 text-center">
+    <div className="flex flex-col items-center rounded-xl border border-dashed border-border bg-card px-6 py-12 text-center animate-in fade-in-0 duration-300">
+      {Icon && (
+        <span className="mb-3 flex size-12 items-center justify-center rounded-full bg-accent text-accent-foreground" aria-hidden>
+          <Icon className="size-6" />
+        </span>
+      )}
       <p className="font-semibold text-foreground">{title}</p>
       {children && <div className="mt-2 flex flex-col items-center gap-3 text-sm text-muted-foreground">{children}</div>}
     </div>
@@ -65,11 +83,14 @@ export function StatusBadge({ status }: { status: string }) {
   );
 }
 
-export function Avatar({ text }: { text: string }) {
+export function Avatar({ text, size = 'lg' }: { text: string; size?: 'sm' | 'lg' }) {
   return (
     <div
       aria-hidden
-      className="flex size-14 shrink-0 items-center justify-center rounded-full bg-accent text-lg font-bold text-accent-foreground ring-1 ring-primary/10"
+      className={cn(
+        'flex shrink-0 items-center justify-center rounded-full bg-accent font-bold text-accent-foreground ring-1 ring-primary/10',
+        size === 'lg' ? 'size-14 text-lg' : 'size-8 text-xs',
+      )}
     >
       {text}
     </div>

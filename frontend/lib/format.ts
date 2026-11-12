@@ -12,6 +12,40 @@ export function formatFee(amount: number): string {
   return inr.format(amount);
 }
 
+const inrWhole = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 0, maximumFractionDigits: 0 });
+const inrPaise = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/** Money held in paise (1/100 rupee), shown exactly: 32500 -> "₹325", 32550 -> "₹325.50" (never "₹325.5"). */
+export function formatPaise(paise: number): string {
+  return (paise % 100 === 0 ? inrWhole : inrPaise).format(paise / 100);
+}
+
+/** How long before the appointment a reminder goes out: "24 hours before", "1 hour before", "30 minutes before". */
+export function formatReminderInterval(hours: number): string {
+  if (hours >= 1) {
+    const whole = Math.round(hours * 10) / 10;
+    return `${whole} hour${whole === 1 ? '' : 's'} before`;
+  }
+  const minutes = Math.max(1, Math.round(hours * 60));
+  return `${minutes} minute${minutes === 1 ? '' : 's'} before`;
+}
+
+/**
+ * A start and end time as one range: "11:00 AM – 11:30 AM". With `compact`, the AM/PM is written once when both ends share it
+ * ("11:00 – 11:30 AM"), which is what fits inside a slot button.
+ */
+export function formatTimeRange(start: string, end: string, compact = false): string {
+  const from = formatTime(start);
+  const to = formatTime(end);
+  if (compact && from.slice(-2) === to.slice(-2)) return `${from.slice(0, -3)} – ${to}`;
+  return `${from} – ${to}`;
+}
+
+/** An instant (ISO timestamp) in clinic time: "29 Oct 2026, 2:30 pm". */
+export function formatDateTime(iso: string): string {
+  return new Date(iso).toLocaleString('en-IN', { timeZone: CLINIC_TIMEZONE, day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
 /** "14:30" -> "2:30 PM" */
 export function formatTime(time: string): string {
   const [h, m] = time.split(':').map(Number);
@@ -100,4 +134,40 @@ export function initials(name: string): string {
     .slice(0, 2)
     .map((part) => part[0]?.toUpperCase() ?? '')
     .join('');
+}
+
+/** The date and time of day (HH:MM) in the clinic time zone at the given moment. */
+export function clinicClock(nowMs: number): { date: string; time: string } {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: CLINIC_TIMEZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(new Date(nowMs))
+      .map((part) => [part.type, part.value]),
+  );
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}` };
+}
+
+/** "Today" or "Tomorrow" for the two nearest days, otherwise null. */
+export function relativeDay(date: string, today: string | null): string | null {
+  if (!today) return null;
+  if (date === today) return 'Today';
+  if (date === addDays(today, 1)) return 'Tomorrow';
+  return null;
+}
+
+/** "just now", "5 min ago", "3 h ago" or "2 d ago", for an ISO timestamp. */
+export function timeAgo(iso: string, now: number): string {
+  const minutes = Math.floor((now - Date.parse(iso)) / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.floor(hours / 24)} d ago`;
 }
