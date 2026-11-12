@@ -10,6 +10,7 @@ import { hashPassword } from '../src/auth/password.js';
 import { loadEnvFileIfPresent } from '../src/config.js';
 import { runMigrations } from '../src/database/migrator.js';
 import { addDays, clinicNow, dayOfWeek } from '../src/scheduling/calendar.js';
+import { ScheduleChangeNotifier } from '../src/scheduling/schedule-change-notifier.service.js';
 
 loadEnvFileIfPresent();
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -184,7 +185,7 @@ describe('Elastic scheduling: expanding availability (e2e)', () => {
       ]);
       expect(await rows('SELECT availability_id FROM appointments WHERE id = $1', [past])).toEqual([{ availability_id: id }]); // the past stays as it was
       expect(await rows('SELECT availability_id FROM appointments WHERE id = $1', [upcoming.id])).toEqual([{ availability_id: done.id }]);
-      expect(await times(addDays(today, -7))).toEqual([]); // not offered in the past, and the past row still describes its own hours
+      expect((await slots(addDays(today, -7))).slots.filter((slot) => slot.status === 'AVAILABLE')).toEqual([]); // nothing can be booked in the past
     });
 
     it('applies from a later date: the dates before it keep their hours', async () => {
@@ -377,7 +378,11 @@ describe('Elastic scheduling: expanding availability (e2e)', () => {
     type ShrinkPreview = Preview & { affectedAppointments: Affected[]; affectedCount: number; withoutAlternatives: number };
     const shrink = (id: string, startTime: string, endTime: string, extra: Record<string, unknown> = {}, from = { startTime: '10:00', endTime: '12:00' }) => apply(id, { startTime, endTime, from, ...extra });
     const outsideList = async (token = doctorToken) => (await http().get('/api/doctor-portal/appointments/outside-hours').set(as(token)).expect(200)).body.appointments as (Affected & { asked: { status: string } | null })[];
-    const asks = () => rows<{ to_address: string; body: string; status: string; subject: string; appointment_id: string }>("SELECT to_address, body, status, subject, appointment_id FROM notifications WHERE kind = 'needs-new-time' AND channel = 'email' ORDER BY created_at");
+    // The doctor's request only records who is affected; the background job asks them. Tests run that job on demand.
+    const asks = async () => {
+      await app.get(ScheduleChangeNotifier).drain();
+      return rows<{ to_address: string; body: string; status: string; subject: string; appointment_id: string }>("SELECT to_address, body, status, subject, appointment_id FROM notifications WHERE kind = 'needs-new-time' AND channel = 'email' ORDER BY created_at");
+    };
     const mine = async (patient: number) => (await http().get('/api/appointments/mine').set(as(patientTokens[patient])).expect(200)).body as { id: string; status: string; needsNewTime: boolean }[];
     const activeAt = (date: string) => rows<{ id: string; start_time: string; slot_number: number; status: string }>("SELECT id, start_time::text, slot_number, status FROM appointments WHERE appointment_date = $1 AND status IN ('PENDING','CONFIRMED') ORDER BY start_time, slot_number", [date]);
 
@@ -519,26 +524,28 @@ describe('Elastic scheduling: expanding availability (e2e)', () => {
       expect((await slots(open.date)).slots.find((slot) => slot.startTime === open.startTime)?.remaining).toBeLessThan(2);
     });
 
-    it('can suggest a time per patient, from the open times only, and the suggestion is in the message', async () => {
+    it('has no doctor-chosen times: the doctor only confirms, every affected patient is told and picks for themselves', async () => {
       const id = await addRow({ dow: 1, mode: 'WAVE', perSlot: 2 });
       const stranded = (await book(0, monday, '11:00').expect(201)).body;
-      const shown = (await preview(id, { startTime: '10:00', endTime: '11:00' }).expect(200)).body as ShrinkPreview;
-      const choice = shown.affectedAppointments[0].alternatives[1];
-      await shrink(id, '10:00', '11:00', { acknowledge: true, proposals: [{ appointmentId: stranded.id, date: choice.date, startTime: choice.startTime }] }).expect(200);
-      const [message] = await asks();
-      expect(message.body).toMatch(/The doctor suggests:/);
-      expect(message.body).toContain(`&date=${choice.date}`);
-
-      // A made-up time, or a time for an appointment that is not affected, is refused and nothing is saved.
-      await db.query('DELETE FROM notifications');
-      const other = await addRow({ dow: 2 });
-      const tuesday = nextWeekday(2);
-      await book(1, tuesday, '10:00').expect(201);
-      const unaffected = (await book(2, tuesday, '10:30').expect(201)).body;
-      await shrink(other, '10:30', '12:00', { acknowledge: true, proposals: [{ appointmentId: unaffected.id, date: tuesday, startTime: '11:00' }] }).expect(409);
-      await shrink(other, '10:30', '12:00', { acknowledge: true, proposals: [{ appointmentId: unaffected.id, date: '2031-01-01', startTime: '09:00' }] }).expect(409);
-      expect(await times(tuesday)).toEqual(['10:00', '10:30', '11:00', '11:30']);
+      const unaffected = (await book(1, monday, '10:00').expect(201)).body;
+      // A doctor-picked time is no longer accepted anywhere.
+      const choice = (await preview(id, { startTime: '10:00', endTime: '11:00' }).expect(200)).body.affectedAppointments[0].alternatives[0];
+      await shrink(id, '10:00', '11:00', { acknowledge: true, proposals: [{ appointmentId: stranded.id, date: choice.date, startTime: choice.startTime }] }).expect(400);
       expect(await asks()).toEqual([]);
+      expect(await rows('SELECT status, start_time::text FROM appointments WHERE id = $1', [stranded.id])).toEqual([{ status: 'CONFIRMED', start_time: '11:00:00' }]);
+
+      // Only the hours and the agreement: the affected patient is notified automatically, with no time chosen for them.
+      await shrink(id, '10:00', '11:00', { acknowledge: true }).expect(200);
+      const [message] = await asks();
+      expect(message.body).not.toMatch(/The doctor suggests/);
+      expect(message.body).not.toMatch(/&date=/);
+      expect(message.body).toContain(`reschedule=${stranded.id}`);
+      expect(await rows('SELECT proposed_date FROM schedule_change_appointments')).toEqual([{ proposed_date: null }]);
+      // Both stay booked until the patient confirms; the unaffected one is untouched.
+      expect(await rows("SELECT id, status FROM appointments WHERE id IN ($1, $2) ORDER BY start_time", [unaffected.id, stranded.id])).toEqual([
+        { id: unaffected.id, status: 'CONFIRMED' },
+        { id: stranded.id, status: 'CONFIRMED' },
+      ]);
     });
 
     it('lists appointments outside the hours, can ask again once a day, and refuses when there is nothing to ask', async () => {
@@ -548,7 +555,9 @@ describe('Elastic scheduling: expanding availability (e2e)', () => {
       await shrink(id, '10:00', '11:00', { acknowledge: true }).expect(200);
       const list = await outsideList();
       expect(list.map((appointment) => appointment.id)).toEqual([stranded.id]);
-      expect(list[0].asked).toMatchObject({ status: 'PENDING' }); // queued; it goes out with the next delivery run
+      expect(list[0]).toMatchObject({ asked: null, noticePending: true }); // recorded; the background job has not asked yet
+      await app.get(ScheduleChangeNotifier).drain();
+      expect((await outsideList())[0]).toMatchObject({ asked: { status: 'PENDING' }, noticePending: false }); // queued; it goes out with the next delivery run
       const ask = (appointmentId: string, token = doctorToken, body: Record<string, unknown> = {}) => http().post(`/api/doctor-portal/appointments/${appointmentId}/ask-new-time`).set(as(token)).send(body);
       expect((await ask(stranded.id).expect(409)).body.message).toMatch(/already asked this patient in the last 24 hours/);
       expect((await ask(inside.id).expect(409)).body.message).toMatch(/within your hours/);

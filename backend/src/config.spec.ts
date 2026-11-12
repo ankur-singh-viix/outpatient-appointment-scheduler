@@ -6,6 +6,8 @@ const KEYS = [
   'DATABASE_URL',
   'JWT_SECRET',
   'RESEND_API_KEY',
+  'BREVO_API_KEY',
+  'EMAIL_PROVIDER',
   'EMAIL_DELIVERY',
   'EMAIL_FROM',
   'CORS_ORIGIN',
@@ -72,7 +74,7 @@ describe('email delivery mode', () => {
   describe('production', () => {
     it('switches email off without a key, with the reason, rather than printing emails into the logs', () => {
       production();
-      expect(loadConfig()).toMatchObject({ emailDelivery: 'disabled', emailProblem: 'RESEND_API_KEY is not set.' });
+      expect(loadConfig()).toMatchObject({ emailDelivery: 'disabled', emailProblem: 'No email provider key is set (BREVO_API_KEY or RESEND_API_KEY).' });
     });
 
     it('needs a sender address: a key alone is not enough', () => {

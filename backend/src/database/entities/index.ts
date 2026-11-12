@@ -11,6 +11,7 @@ import { PaymentEvent } from './payment-event.entity.js';
 import { Payment } from './payment.entity.js';
 import { Refund } from './refund.entity.js';
 import { ReceptionistAssignment } from './receptionist-assignment.entity.js';
+import { ScheduleChange, ScheduleChangeAppointment, SCHEDULE_RESOLUTIONS, type ScheduleResolution } from './schedule-change.entity.js';
 import { ScheduleOverride } from './schedule-override.entity.js';
 import { Specialty } from './specialty.entity.js';
 import { User } from './user.entity.js';
@@ -31,6 +32,10 @@ export {
   ReceptionistAssignment,
   Refund,
   slotIntervalOf,
+  SCHEDULE_RESOLUTIONS,
+  ScheduleChange,
+  ScheduleChangeAppointment,
+  type ScheduleResolution,
   ScheduleOverride,
   Specialty,
   User,
@@ -54,4 +59,6 @@ export const ENTITIES = [
   PaymentEvent,
   Notification,
   NotificationPreference,
+  ScheduleChange,
+  ScheduleChangeAppointment,
 ];

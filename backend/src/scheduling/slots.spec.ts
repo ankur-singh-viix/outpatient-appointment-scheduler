@@ -1,5 +1,5 @@
 import { addDays, clinicNow, dayOfWeek, isValidDate } from './calendar.js';
-import { buildSlots, resolveSessions, type DateOverride } from './slots.js';
+import { buildSlots, placesTaken, resolveSessions, type DateOverride } from './slots.js';
 
 const weekly = [
   { startTime: '17:00:00', endTime: '18:00:00', capacity: 2 },
@@ -194,3 +194,28 @@ function toMinutesOf(time: string): number {
   const [hours, minutes] = time.split(':').map(Number);
   return hours * 60 + minutes;
 }
+
+describe('placesTaken (the one definition of how full a slot is)', () => {
+  const windows = [
+    { start: 540, end: 570 }, // 09:00-09:30
+    { start: 540, end: 570 },
+    { start: 570, end: 600 }, // 09:30-10:00
+    { start: 555, end: 585 }, // 09:15-09:45, straddles both slots
+  ];
+
+  it('counts every appointment that shares time with the slot', () => {
+    expect(placesTaken(windows, 540, 570)).toBe(3);
+    expect(placesTaken(windows, 570, 600)).toBe(2);
+    expect(placesTaken(windows, 600, 630)).toBe(0);
+  });
+
+  it('does not count back-to-back appointments', () => {
+    expect(placesTaken([{ start: 540, end: 570 }], 570, 600)).toBe(0);
+    expect(placesTaken([{ start: 570, end: 600 }], 540, 570)).toBe(0);
+  });
+
+  it('is exactly what buildSlots reports as booked, so the engine and the capacity rules cannot disagree', () => {
+    const { slots } = buildSlots([{ startTime: '09:00', endTime: '10:00', capacity: 20, slotMinutes: 30, capacityPerSlot: 5, mode: 'WAVE', source: 'WEEKLY' }], 30, windows.map((w) => ({ startTime: `${String(Math.floor(w.start / 60)).padStart(2, '0')}:${String(w.start % 60).padStart(2, '0')}`, endTime: `${String(Math.floor(w.end / 60)).padStart(2, '0')}:${String(w.end % 60).padStart(2, '0')}` })), null);
+    expect(slots.map((slot) => slot.booked)).toEqual([placesTaken(windows, 540, 570), placesTaken(windows, 570, 600)]);
+  });
+});

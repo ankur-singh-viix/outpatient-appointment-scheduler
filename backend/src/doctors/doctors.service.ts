@@ -2,11 +2,14 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Between, DataSource, In, Repository } from 'typeorm';
 import { loadConfig } from '../config.js';
-import { ACTIVE_STATUSES, Appointment, Clinic, Doctor, ScheduleOverride, Specialty, slotIntervalOf } from '../database/entities/index.js';
+import { ACTIVE_STATUSES, Appointment, Availability, Clinic, Doctor, ScheduleOverride, Specialty, slotIntervalOf } from '../database/entities/index.js';
 import { addDays, clinicNow } from '../scheduling/calendar.js';
 import { isCurrent } from '../scheduling/availability-rules.js';
 import { loadDaySchedule, toRule } from '../scheduling/day-schedule.js';
+import { daySummary } from '../scheduling/elastic.js';
 import { findNextAvailable, type NextSlot } from '../scheduling/next-available.js';
+import { bookedLoader } from '../scheduling/open-times.js';
+import { toOverride } from '../scheduling/outside-hours.js';
 import { hhmm, type DateOverride } from '../scheduling/slots.js';
 
 /** How far ahead a card looks for the "next available" time. */
@@ -124,6 +127,29 @@ export class DoctorsService {
       bookingWindowDays: this.config.bookingWindowDays,
     });
     return availableOnly ? { ...schedule, slots: schedule.slots.filter((slot) => slot.status === 'AVAILABLE') } : schedule;
+  }
+
+  /**
+   * Which dates in the next `days` days have sessions, and how much room each has left, worked out with the same slot rules booking
+   * uses (so a date shown as open can really be booked). Dates with no sessions, such as a day off, are left out. Public, like slots.
+   */
+  async openDays(id: string, days: number) {
+    const manager = this.dataSource.manager;
+    const doctor = await manager.findOneBy(Doctor, { id });
+    if (!doctor) throw new NotFoundException('Doctor not found.');
+    const clock = clinicNow(this.config.clinicTimezone);
+    const span = Math.min(days, this.config.bookingWindowDays + 1);
+    const lastDate = addDays(clock.date, span - 1);
+    const rules = (await manager.findBy(Availability, { doctorId: id })).map(toRule);
+    const overrides = new Map((await manager.find(ScheduleOverride, { where: { doctorId: id, overrideDate: Between(clock.date, lastDate) } })).map((row) => [row.overrideDate, toOverride(row)]));
+    const elastic = { consultationMinutes: doctor.consultationMinutes, defaultCapacity: doctor.defaultDailyCapacity, slotIntervalMinutes: slotIntervalOf(doctor) };
+    const bookedOn = bookedLoader(manager, id, lastDate);
+    const result: { date: string; open: number; places: number }[] = [];
+    for (let date = clock.date; date <= lastDate; date = addDays(date, 1)) {
+      const summary = daySummary(date, rules, overrides.get(date) ?? null, elastic, await bookedOn(date), date === clock.date ? clock.time : null);
+      if (summary.total > 0) result.push({ date, open: summary.open, places: summary.places });
+    }
+    return { days: result };
   }
 
   async specialties() {

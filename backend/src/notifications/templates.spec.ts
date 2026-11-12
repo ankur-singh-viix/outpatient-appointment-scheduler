@@ -132,3 +132,41 @@ describe('doctor messages, payment failure and text messages', () => {
     expect(sms('FAILED')).toContain('could not be completed');
   });
 });
+
+describe('messages for the Brevo notification set', () => {
+  const full = { ...facts, endTime: '14:35', specialty: 'ENT' };
+  const previous = { date: '2026-11-01', startTime: '10:00', endTime: '10:30' };
+
+  it('confirms the booking with patient, doctor, specialty, date, time and clinic', () => {
+    const message = templates.bookingConfirmed(full);
+    for (const part of ['Rahul Sharma', 'Dr. Rohan Das', 'Specialty: ENT', 'Mon, 2 Nov, 2026', '2:05 PM – 2:35 PM', 'City Clinic, 12 MG Road', 'confirmed']) expect(message.body).toContain(part);
+    expect(templates.bookingConfirmed(facts).body).not.toContain('Specialty'); // an older caller without one still reads well
+  });
+
+  it('shows the previous and the new time, the doctor, and says it was rescheduled', () => {
+    const message = templates.bookingRescheduled(full, previous);
+    expect(message.subject).toMatch(/^Appointment rescheduled:/);
+    for (const part of ['moved from Sun, 1 Nov, 2026 at 10:00 AM', 'New time:', 'Dr. Rohan Das', 'Specialty: ENT', '2:05 PM']) expect(message.body).toContain(part);
+  });
+
+  it('confirms the cancellation, shows the appointment, and says what to do next', () => {
+    const message = templates.bookingCancelled(full, { cancelledBy: 'PATIENT', reason: 'Changed plans', refundNote: 'A refund is on its way.' });
+    for (const part of ['cancelled by you', 'Changed plans', 'Dr. Rohan Das', 'City Clinic', 'A refund is on its way.', 'What you can do next', 'book another time']) expect(message.body).toContain(part);
+  });
+
+  it('asks the patient to choose a new time without cancelling anything, with the link and the original time', () => {
+    const message = templates.needsNewTime(full, { link: 'https://app.example.com/doctors/d1?reschedule=a1' });
+    for (const part of ['Dr. Rohan Das', 'changed their hours', 'Nothing has been cancelled or moved', 'Mon, 2 Nov, 2026', 'https://app.example.com/doctors/d1?reschedule=a1', 'confirm the move']) expect(message.body).toContain(part);
+    expect(message.body).not.toMatch(/appointment (was|has been) cancelled/);
+    expect(message.body).not.toMatch(/suggests/);
+  });
+
+  it('tells a patient who was asked that the original appointment is valid again and nothing is needed', () => {
+    const message = templates.appointmentRestored(full);
+    expect(message.kind).toBe('appointment-restored');
+    expect(message.subject).toContain('No action needed');
+    for (const part of ['Earlier we asked you to choose a new time', 'valid again', 'You do not need to do anything or reschedule', 'Dr. Rohan Das', 'Mon, 2 Nov, 2026', 'City Clinic']) expect(message.body).toContain(part);
+    expect(message.sms.length).toBeLessThanOrEqual(160);
+    expect(message.sms).toContain('no action needed');
+  });
+});

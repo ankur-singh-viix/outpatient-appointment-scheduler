@@ -73,6 +73,14 @@ export function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: num
   return aStart < bEnd && bStart < aEnd;
 }
 
+/**
+ * How many appointments share time with a slot [from, to): the one definition of "places taken". The slot engine uses it to say
+ * what is left, and the capacity rules use it to check a lower capacity against the bookings already made, so the two cannot disagree.
+ */
+export function placesTaken(windows: { start: number; end: number }[], from: number, to: number): number {
+  return windows.filter((window) => overlaps(from, to, window.start, window.end)).length;
+}
+
 /** "09:30" or "09:30:00" -> minutes after midnight. */
 export function toMinutes(time: string): number {
   const [hours, minutes] = time.split(':').map(Number);
@@ -169,7 +177,7 @@ export function buildSlots(
     const first = slots.length;
     for (let t = start; t + length <= end; t += step) {
       if (excluded.some((window) => overlaps(t, t + length, window.start, window.end))) continue;
-      const taken = windows.filter((window) => overlaps(t, t + length, window.start, window.end)).length;
+      const taken = placesTaken(windows, t, t + length);
       let status: SlotStatus = 'AVAILABLE';
       if (taken >= seats) status = 'BOOKED';
       else if (cutoff !== null && t <= cutoff) status = 'PAST';

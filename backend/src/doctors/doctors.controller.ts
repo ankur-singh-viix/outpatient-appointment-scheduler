@@ -14,6 +14,9 @@ const listDoctorsQuery = z.object({
 // `availableOnly=true` lists just the slots that can be booked now. Anything else (or nothing) lists every slot with its status.
 const slotsQuery = z.object({ date: dateSchema, availableOnly: z.enum(['true', 'false']).optional() });
 
+// How many days ahead the calendar summary covers (the booking window caps it).
+const openDaysQuery = z.object({ days: z.coerce.number().int().min(1).max(60).optional() });
+
 // Public: patients can browse doctors and open slots before signing in.
 @Controller()
 export class DoctorsController {
@@ -37,6 +40,12 @@ export class DoctorsController {
   @Get('doctors/:id')
   get(@Param('id', ParseUUIDPipe) id: string) {
     return this.doctors.get(id);
+  }
+
+  /** The dates that have sessions, with the slots and places still open on each: what the calendar shows. */
+  @Get('doctors/:id/open-days')
+  openDays(@Param('id', ParseUUIDPipe) id: string, @Query(new ZodValidationPipe(openDaysQuery)) query: z.infer<typeof openDaysQuery>) {
+    return this.doctors.openDays(id, query.days ?? 30);
   }
 
   @Get('doctors/:id/slots')

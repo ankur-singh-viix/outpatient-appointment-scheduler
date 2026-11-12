@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AvailabilityRule } from './availability-rules.js';
-import { alignedStarts, classify, findAffected, isCovered, openSlotsOn, planChange, slotsOn, slotStep, type ElasticDoctor, type Placed } from './elastic.js';
+import { alignedStarts, classify, findAffected, findRestored, isCovered, openSlotsOn, planChange, slotsOn, slotStep, type ElasticDoctor, type Placed } from './elastic.js';
 import type { DateOverride } from './slots.js';
 
 // 2030-01-07 is a Monday; 2030-01-14 the next one. The window the plan looks at is two weeks.
@@ -154,6 +154,23 @@ describe('expansion', () => {
     expect(plan(rule(), { startTime: '10:00', endTime: '12:10' }).problems[0]).toMatch(/shorter than one 30-minute slot/);
   });
 
+  it('never counts the session being edited, or a finished one that ended before the change starts, as an overlap', () => {
+    const editing = rule({ id: 'now', startTime: '09:00', endTime: '10:00', effectiveFrom: null, effectiveTo: null });
+    const ended = rule({ id: 'history', startTime: '09:00', endTime: '10:00', effectiveFrom: null, effectiveTo: '2030-01-06' }); // ended the day before the change starts
+    expect(plan(editing, { startTime: '09:30', endTime: '10:00' }, { rules: [editing] }).problems).toEqual([]);
+    const result = plan(editing, { startTime: '09:30', endTime: '10:00' }, { rules: [ended, editing], applyFrom: MONDAY });
+    expect(result.problems).toEqual([]);
+    expect(result.kind).toBe('SHRINK');
+  });
+
+  it('still refuses a different session that is in force on the dates the change applies to, and names it', () => {
+    const editing = rule({ id: 'now', startTime: '09:00', endTime: '10:00' });
+    const live = rule({ id: 'other', startTime: '09:15', endTime: '09:45', effectiveFrom: '2030-01-14', effectiveTo: null }); // starts the week after the change
+    expect(plan(editing, { startTime: '09:30', endTime: '10:00' }, { rules: [editing, live], applyFrom: MONDAY }).problems[0]).toMatch(/overlap another session \(09:15-09:45\)/);
+    const earlier = rule({ id: 'earlier', startTime: '09:15', endTime: '09:45', effectiveTo: '2030-01-06' });
+    expect(plan(editing, { startTime: '09:30', endTime: '10:00' }, { rules: [editing, earlier], applyFrom: NEXT_MONDAY }).problems).toEqual([]);
+  });
+
   it('refuses hours that overlap another session of the same kind, but not back-to-back ones', () => {
     const afternoon = rule({ id: 'row-2', startTime: '13:00', endTime: '15:00' });
     expect(plan(rule(), { startTime: '10:00', endTime: '14:00' }, { rules: [rule(), afternoon] }).problems[0]).toMatch(/overlap another session \(13:00-15:00\)/);
@@ -229,6 +246,54 @@ describe('findAffected', () => {
     const appointments = [at('pm', MONDAY, '14:30', '15:00'), at('am', MONDAY, '11:00', '11:30')];
     const affected = findAffected({ appointments, rules: [rule(), afternoon], afterRules: [reduce(rule(), { startTime: '10:00', endTime: '11:00' }), afternoon], overrides: noOverrides, doctor: DOCTOR });
     expect(affected).toEqual(['am']);
+  });
+});
+
+describe('findRestored', () => {
+  const at = (id: string, date: string, startTime: string, endTime: string): Placed => ({ id, date, startTime, endTime });
+  const reduced = rule({ endTime: '11:00' });
+  const widen = (to: { startTime: string; endTime: string }) => ({ ...reduced, ...to });
+  const args = (appointments: Placed[], to: { startTime: string; endTime: string }, overrides = noOverrides, rules = [reduced], afterRules = [widen(to)]) => ({ appointments, rules, afterRules, overrides, doctor: DOCTOR });
+
+  it('returns exactly the appointments that were outside the hours and are inside the wider ones', () => {
+    const appointments = [at('inside', MONDAY, '10:30', '11:00'), at('back', MONDAY, '11:00', '11:30'), at('still', MONDAY, '11:30', '12:00')];
+    expect(findRestored(args(appointments, { startTime: '10:00', endTime: '11:30' }))).toEqual(['back']); // partial: the 11:30 one stays outside
+    expect(findRestored(args(appointments, { startTime: '10:00', endTime: '12:00' }))).toEqual(['back', 'still']);
+  });
+
+  it('works when the start moves earlier', () => {
+    const appointments = [at('early', MONDAY, '09:00', '09:30'), at('tooearly', MONDAY, '08:00', '08:30')];
+    expect(findRestored(args(appointments, { startTime: '09:00', endTime: '11:00' }))).toEqual(['early']);
+  });
+
+  it('returns nothing when the hours only shrink or stay the same', () => {
+    const appointments = [at('a', MONDAY, '11:00', '11:30')];
+    expect(findRestored(args(appointments, { startTime: '10:00', endTime: '10:30' }))).toEqual([]);
+    expect(findRestored(args(appointments, { startTime: '10:00', endTime: '11:00' }))).toEqual([]);
+  });
+
+  it('does not release anyone on a day off, a blocked time, or a date whose replacement hours do not reach them', () => {
+    const appointments = [at('dayoff', MONDAY, '11:00', '11:30'), at('blocked', NEXT_MONDAY, '11:00', '11:30'), at('replaced', '2030-01-15', '11:00', '11:30')];
+    const overrides = new Map<string, DateOverride>([
+      [MONDAY, { isAvailable: false, startTime: null, endTime: null, capacity: null, reason: 'Away' }],
+      [NEXT_MONDAY, { isAvailable: false, startTime: '11:00', endTime: '11:30', capacity: null, reason: null }],
+      ['2030-01-15', { isAvailable: true, startTime: '13:00', endTime: '14:00', capacity: 4, reason: null }],
+    ]);
+    expect(findRestored(args(appointments, { startTime: '10:00', endTime: '12:00' }, overrides))).toEqual([]);
+  });
+
+  it('is not fooled by another session: only the row that changed can release an appointment, and only if it now covers it', () => {
+    const afternoon = rule({ id: 'row-2', startTime: '14:00', endTime: '16:00' });
+    const appointments = [at('pm', MONDAY, '14:30', '15:00'), at('am', MONDAY, '11:00', '11:30'), at('gap', MONDAY, '12:30', '13:00')];
+    expect(findRestored(args(appointments, { startTime: '10:00', endTime: '12:00' }, noOverrides, [reduced, afternoon], [widen({ startTime: '10:00', endTime: '12:00' }), afternoon]))).toEqual(['am']);
+  });
+
+  it('is the mirror of findAffected: whatever a reduction strands, the matching extension restores', () => {
+    const row = rule();
+    const smaller = { ...row, endTime: '11:00' };
+    const appointments = [at('a', MONDAY, '10:00', '10:30'), at('b', MONDAY, '11:00', '11:30'), at('c', MONDAY, '11:30', '12:00')];
+    const stranded = findAffected({ appointments, rules: [row], afterRules: [smaller], overrides: noOverrides, doctor: DOCTOR });
+    expect(findRestored({ appointments, rules: [smaller], afterRules: [row], overrides: noOverrides, doctor: DOCTOR })).toEqual(stranded);
   });
 });
 

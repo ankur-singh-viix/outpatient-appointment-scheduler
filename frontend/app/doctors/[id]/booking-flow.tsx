@@ -16,7 +16,7 @@ import { addDays, DAY_SHORT, dayOfWeek, formatDate, formatFee, formatTime, forma
 import { useClinicToday, useQuery } from '@/lib/hooks';
 import { useHydrated, useSession } from '@/lib/session';
 import { cn } from '@/lib/utils';
-import type { DaySchedule, Doctor, HeldAppointment, PatientAppointment, PaymentsConfig, Slot } from '@/lib/types';
+import type { DaySchedule, Doctor, HeldAppointment, OpenDay, PatientAppointment, PaymentsConfig, Slot } from '@/lib/types';
 
 export function BookingFlow() {
   const { id } = useParams<{ id: string }>();
@@ -237,7 +237,12 @@ function SlotPicker({
 
   const deepLinked = useRef(false);
 
-  const offeredDates = today ? Array.from({ length: BOOKING_DAYS_SHOWN }, (_, i) => addDays(today, i)) : [];
+  // Which dates really have room, worked out by the server with the booking rules (not guessed from the usual weekdays).
+  const openDays = useQuery(`open-days:${doctor.id}`, () => api<{ days: OpenDay[] }>(`/doctors/${doctor.id}/open-days?days=31`));
+  const openByDate = new Map((openDays.data?.days ?? []).map((day) => [day.date, day]));
+  const lastOpenDate = [...openByDate.keys()].sort((x, y) => x.localeCompare(y)).at(-1);
+  const offered = today ? Math.max(BOOKING_DAYS_SHOWN, lastOpenDate ? Math.round((Date.parse(lastOpenDate) - Date.parse(today)) / 86_400_000) + 1 : 0) : 0;
+  const offeredDates = today ? Array.from({ length: offered }, (_, i) => addDays(today, i)) : [];
   const linkedDate = requestedDate && offeredDates.includes(requestedDate) ? requestedDate : null;
   const date = pickedDate ?? linkedDate ?? today;
   const schedule = useQuery(date ? `slots:${doctor.id}:${date}` : null, () =>
@@ -325,28 +330,33 @@ function SlotPicker({
             <div ref={stripRef} className="-mx-1 mt-3 flex gap-2 overflow-x-auto px-1 pb-2" role="listbox" aria-label="Appointment date">
               {dates.map((d) => {
                 const active = d === date;
-                const works = workingDays.has(dayOfWeek(d));
+                const info = openByDate.get(d);
+                // A date with a session is open for business even on a weekday the doctor does not usually work (a one-time session).
+                const works = info !== undefined || workingDays.has(dayOfWeek(d));
+                const full = info !== undefined && info.open === 0;
                 return (
                   <button
                     key={d}
                     type="button"
                     role="option"
                     aria-selected={active}
-                    aria-label={`${formatDate(d, { weekday: 'long' })}${works ? '' : ', usually closed'}`}
+                    aria-label={`${formatDate(d, { weekday: 'long' })}${full ? ', no places left' : works ? '' : ', usually closed'}`}
                     onClick={() => chooseDate(d)}
                     className={cn(
                       'flex w-18 shrink-0 flex-col items-center rounded-xl border px-2 py-2.5 text-sm transition-all focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none',
                       active
                         ? 'border-primary bg-primary text-primary-foreground shadow-sm'
-                        : works
-                          ? 'bg-card text-foreground hover:-translate-y-0.5 hover:border-primary/60 hover:shadow-sm'
-                          : 'bg-muted text-muted-foreground hover:border-border',
+                        : full
+                          ? 'border-amber-200 bg-amber-50 text-amber-900 hover:border-amber-300'
+                          : works
+                            ? 'bg-card text-foreground hover:-translate-y-0.5 hover:border-primary/60 hover:shadow-sm'
+                            : 'bg-muted text-muted-foreground hover:border-border',
                     )}
                   >
                     <span className="text-xs font-medium">{d === today ? 'Today' : DAY_SHORT[dayOfWeek(d)]}</span>
                     <span className="text-xl font-bold">{Number(d.slice(8))}</span>
                     <span className="text-[11px]">
-                      {works ? formatDate(d, { weekday: undefined, day: undefined, year: undefined }) : 'Closed'}
+                      {full ? 'Full' : works ? formatDate(d, { weekday: undefined, day: undefined, year: undefined }) : 'Closed'}
                     </span>
                   </button>
                 );
@@ -391,7 +401,14 @@ function SlotPicker({
 
             {schedule.data && slots.length > 0 && (
               <div className="mt-4 space-y-6 animate-in fade-in-0 duration-300">
-                {availableCount === 0 && <Alert tone="info">All slots on this date are taken. Please choose another date.</Alert>}
+                {availableCount === 0 && (
+                  <NoRoomHere
+                    date={date}
+                    days={openDays.data?.days ?? null}
+                    clinic={doctor.clinic}
+                    onGo={chooseDate}
+                  />
+                )}
                 {schedule.data.sessions.map((s, sessionIndex) => {
                   // A slot belongs to the session it was cut from (sessions can overlap in time: a one-time session inside a weekly one).
                   const sessionSlots = slots.filter(
@@ -603,5 +620,34 @@ function BookingSuccess({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * Shown when every slot on the chosen date is taken. Rather than leave the patient to hunt, it names the nearest date that still has
+ * room (after this one if there is one, otherwise before it) and jumps there; when nothing is open it says so, and says who to ask.
+ */
+function NoRoomHere({ date, days, clinic, onGo }: { date: string | null; days: OpenDay[] | null; clinic: { name: string; address: string }; onGo: (date: string) => void }) {
+  const open = (days ?? []).filter((day) => day.open > 0 && day.date !== date);
+  const next = open.find((day) => (date ? day.date > date : true)) ?? open[0];
+  if (days === null) return <Alert tone="info">All times on this date are taken.</Alert>;
+  if (!next) {
+    return (
+      <Alert tone="info">
+        All times on this date are taken, and no other date has room right now. Please check again later, or contact {clinic.name} ({clinic.address}) for help.
+      </Alert>
+    );
+  }
+  return (
+    <Alert
+      tone="info"
+      action={
+        <Button size="sm" variant="outline" onClick={() => onGo(next.date)}>
+          Go to {formatDate(next.date, { weekday: 'short' })}
+        </Button>
+      }
+    >
+      All times on this date are taken. The nearest date with room is {formatDate(next.date, { weekday: 'long' })} ({next.open} {next.open === 1 ? 'time' : 'times'} open).
+    </Alert>
   );
 }

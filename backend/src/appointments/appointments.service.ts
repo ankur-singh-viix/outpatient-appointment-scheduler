@@ -6,19 +6,21 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { Between, DataSource, EntityManager, Repository } from 'typeorm';
 import type { AuthUser } from '../auth/auth.types.js';
 import { loadConfig } from '../config.js';
-import { ACTIVE_STATUSES, Appointment, Availability, Doctor, Patient } from '../database/entities/index.js';
+import { ACTIVE_STATUSES, Appointment, Availability, Doctor, Patient, ScheduleOverride, slotIntervalOf } from '../database/entities/index.js';
 import { isSlotConflict } from '../database/errors.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import type { PaymentSummary } from '../payments/payment-summary.js';
 import { changeBlockedReason } from '../scheduling/appointment-rules.js';
-import { clinicNow } from '../scheduling/calendar.js';
-import { loadDaySchedule } from '../scheduling/day-schedule.js';
-import { appointmentsOutsideHours } from '../scheduling/outside-hours.js';
+import { addDays, clinicNow, isValidDate } from '../scheduling/calendar.js';
+import { bookedLoader, openTimes } from '../scheduling/open-times.js';
+import { loadDaySchedule, toRule } from '../scheduling/day-schedule.js';
+import { appointmentsOutsideHours, toOverride } from '../scheduling/outside-hours.js';
 import { hhmm, nextFreeSeat, type Slot } from '../scheduling/slots.js';
+import { assertTransition } from './appointment-lifecycle.js';
 
 export interface BookAppointmentInput {
   doctorId: string;
@@ -31,6 +33,13 @@ export interface BookAppointmentInput {
 export interface RescheduleInput {
   date: string;
   startTime: string;
+}
+
+/** A cursor is "date|start", base64url. Anything else is a bad request, never a silent restart from the top. */
+function parseAlternativesCursor(cursor: string): { date: string; startTime: string } {
+  const [date, startTime] = Buffer.from(cursor, 'base64url').toString().split('|');
+  if (!date || !isValidDate(date) || !/^\d{2}:\d{2}$/.test(startTime ?? '')) throw new BadRequestException('That page marker is not valid. Reload the list of times.');
+  return { date, startTime };
 }
 
 const WITH_DOCTOR = { doctor: { user: true, specialty: true, clinic: true }, cancelledBy: true } as const;
@@ -111,6 +120,7 @@ export class AppointmentsService {
           }
         }
         const seat = claimSeat(schedule.booked, slot);
+        await this.assertNoDuplicate(manager, patientId, input.doctorId, input.date, slot);
 
         // With payments on, a booking with a fee is a HOLD: the slot is reserved but unconfirmed until payment succeeds.
         // The fee is read from the database here, never from the request. Without payments, or for a free doctor, it is confirmed as before.
@@ -161,6 +171,7 @@ export class AppointmentsService {
     const outcome = await this.dataSource.transaction(async (manager) => {
       const appointment = await this.lockOwn(manager, id, patientId);
       this.assertChangeable(appointment);
+      assertTransition(appointment.status, 'CANCELLED');
       appointment.status = 'CANCELLED';
       appointment.cancelReason = reason?.trim() || 'Cancelled by patient';
       appointment.cancelledAt = new Date();
@@ -214,6 +225,7 @@ export class AppointmentsService {
         }
 
         // Release the old slot first: a move inside a session that is full only because of this appointment must work.
+        assertTransition(current.status, 'CANCELLED');
         current.status = 'CANCELLED';
         current.cancelReason = 'Rescheduled by patient';
         current.cancelledAt = new Date();
@@ -227,6 +239,7 @@ export class AppointmentsService {
         const slot = schedule.slots.find((candidate) => candidate.startTime === input.startTime);
         assertBookable(slot);
         const seat = claimSeat(schedule.booked, slot);
+        await this.assertNoDuplicate(manager, patientId, current.doctorId, input.date, slot);
 
         const saved = await manager.save(
           manager.create(Appointment, {
@@ -254,6 +267,67 @@ export class AppointmentsService {
       if (isSlotConflict(error)) throw new ConflictException(SLOT_TAKEN);
       throw error;
     }
+  }
+
+  /** How many other times the patient is offered when choosing a new one. */
+  private static readonly ALTERNATIVES = 8;
+
+  /**
+   * Other times the patient can move their own upcoming appointment to: open slots of the same doctor under the doctor's current
+   * hours, with a free place, not started, searched from TODAY (so an earlier open date is never missed), nearest first, a page at a
+   * time. `cursor` resumes after the last time of the previous page. Times that overlap the patient's own other appointment with this
+   * doctor are left out, since moving there would be refused. Read-only; the move itself is the normal reschedule, which re-checks
+   * everything under the doctor lock, so a time taken in the meantime is refused there and nothing is overbooked.
+   * `needsNewTime` says the doctor's hours changed so that this appointment no longer fits them.
+   */
+  async alternativesFor(user: AuthUser, id: string, options: { limit?: number; cursor?: string } = {}) {
+    const patientId = await this.patientIdFor(user.id);
+    const manager = this.dataSource.manager;
+    const appointment = await manager.findOne(Appointment, { where: { id, patientId } });
+    if (!appointment) throw new NotFoundException('Appointment not found.');
+    this.assertChangeable(appointment);
+    if (appointment.status === 'PENDING') throw new ConflictException('Finish paying for this booking, or cancel it, before rescheduling.');
+    const limit = options.limit ?? AppointmentsService.ALTERNATIVES;
+    const after = options.cursor ? parseAlternativesCursor(options.cursor) : undefined;
+    const doctor = await manager.findOneByOrFail(Doctor, { id: appointment.doctorId });
+    const clock = clinicNow(this.config.clinicTimezone);
+    const lastDate = addDays(clock.date, this.config.bookingWindowDays);
+    const rules = (await manager.findBy(Availability, { doctorId: doctor.id })).map(toRule);
+    const overrides = new Map((await manager.find(ScheduleOverride, { where: { doctorId: doctor.id, overrideDate: Between(clock.date, lastDate) } })).map((row) => [row.overrideDate, toOverride(row)]));
+    // The patient's own other active appointments with this doctor: a time that overlaps one would be refused when confirmed.
+    const own = await manager
+      .createQueryBuilder(Appointment, 'a')
+      .select(['a.appointmentDate', 'a.startTime', 'a.endTime'])
+      .where('a.patientId = :patientId AND a.doctorId = :doctorId AND a.id <> :id', { patientId, doctorId: doctor.id, id: appointment.id })
+      .andWhere('a.status IN (:...statuses)', { statuses: ACTIVE_STATUSES })
+      .andWhere('a.appointmentDate BETWEEN :from AND :to', { from: clock.date, to: lastDate })
+      .getMany();
+    const busy = new Map<string, { start: string; end: string }[]>();
+    for (const row of own) busy.set(row.appointmentDate, [...(busy.get(row.appointmentDate) ?? []), { start: hhmm(row.startTime), end: hhmm(row.endTime) }]);
+    const found = await openTimes({
+      targets: [{ id: appointment.id, date: appointment.appointmentDate, startTime: appointment.startTime, from: clock.date, after }],
+      rules,
+      overrides,
+      elastic: { consultationMinutes: doctor.consultationMinutes, defaultCapacity: doctor.defaultDailyCapacity, slotIntervalMinutes: slotIntervalOf(doctor) },
+      clock,
+      lastDate,
+      bookedOn: bookedLoader(manager, doctor.id, lastDate),
+      limit: limit + 1, // one more than asked, to know whether there is another page
+      exclude: (date, slot) => (busy.get(date) ?? []).some((window) => slot.startTime < window.end && window.start < slot.endTime),
+    });
+    const all = found.get(appointment.id) ?? [];
+    const alternatives = all.slice(0, limit);
+    const last = alternatives[alternatives.length - 1];
+    const outside = await appointmentsOutsideHours(manager, doctor.id, [{ id: appointment.id, date: appointment.appointmentDate, startTime: appointment.startTime, endTime: appointment.endTime }]);
+    return {
+      appointmentId: appointment.id,
+      doctorId: doctor.id,
+      needsNewTime: outside.has(appointment.id),
+      alternatives,
+      /** Pass this back as `cursor` for the next page; null when there is no more in the booking window. */
+      nextCursor: all.length > limit && last ? Buffer.from(`${last.date}|${last.startTime}`).toString('base64url') : null,
+      searchedUntil: lastDate,
+    };
   }
 
   async listForPatient(user: AuthUser) {
@@ -287,6 +361,31 @@ export class AppointmentsService {
   private async findOne(id: string) {
     const row = await this.appointments.findOneOrFail({ where: { id }, relations: WITH_DOCTOR });
     return toAppointment(row, (await this.payments.summariesFor([id])).get(id));
+  }
+
+  /**
+   * One patient, one active appointment per doctor for overlapping times. A double click, a retried request or a second tab would
+   * otherwise take two of a slot's places for one person. Checked inside the doctor-locked transaction, so two requests arriving
+   * together are decided one after the other. (Booking for family members needs an explicit dependent-patient model, not this.)
+   * Back-to-back appointments do not overlap; a cancelled one, or an unpaid hold that has run out, does not count.
+   */
+  private async assertNoDuplicate(manager: EntityManager, patientId: string, doctorId: string, date: string, slot: { startTime: string; endTime: string }): Promise<void> {
+    const clash: unknown[] = await manager.query(
+      `SELECT 1 FROM appointments
+        WHERE patient_id = $1 AND doctor_id = $2 AND appointment_date = $3 AND status IN ('PENDING', 'CONFIRMED')
+          AND NOT (status = 'PENDING' AND hold_expires_at IS NOT NULL AND hold_expires_at <= now())
+          AND start_time < $5::time AND end_time > $4::time
+        LIMIT 1`,
+      [patientId, doctorId, date, slot.startTime, slot.endTime],
+    );
+    if (clash.length === 0) return;
+    const [doctor] = await manager.query('SELECT u.name FROM doctors d JOIN users u ON u.id = d.user_id WHERE d.id = $1', [doctorId]);
+    throw new ConflictException({
+      statusCode: 409,
+      error: 'Conflict',
+      code: 'DUPLICATE_APPOINTMENT',
+      message: `You already have an appointment with ${doctor?.name ?? 'this doctor'} at that time. Choose a different time, or reschedule or cancel the one you have.`,
+    });
   }
 
   /** Loads the patient's own appointment with a row lock. Someone else's appointment looks like a missing one. */

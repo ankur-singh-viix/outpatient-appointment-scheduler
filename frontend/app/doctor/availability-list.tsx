@@ -1,16 +1,17 @@
 'use client';
 
-import { CalendarDaysIcon, ClockIcon, PencilIcon, RepeatIcon, Trash2Icon } from 'lucide-react';
+import { CalendarDaysIcon, ClockIcon, PencilIcon, RepeatIcon, Trash2Icon, UsersIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Alert, EmptyState } from '@/components/common';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { api, errorMessage } from '@/lib/api';
+import { ApiError, api, errorMessage } from '@/lib/api';
 import { DAY_LONG, WEEK_ORDER, formatDate, formatTimeRange } from '@/lib/format';
 import type { AvailabilityRow, DoctorAvailability, OneTimeSession, SchedulingMode, Session, WeeklyHours } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import { AdjustCapacityDialog, type CapacityTarget } from './adjust-capacity-dialog';
 import { AdjustHoursDialog, type AdjustTarget } from './adjust-hours-dialog';
 import { MODE_LABEL, describeSettings, sessionBody } from './availability-model';
 
@@ -29,6 +30,17 @@ type Removing = { kind: 'weekly'; row: WeeklyHours } | { kind: 'oneoff'; row: On
 function effectiveText(row: AvailabilityRow): string | null {
   if (!row.effectiveFrom && !row.effectiveTo) return null;
   return `${row.effectiveFrom ? `From ${formatDate(row.effectiveFrom)}` : 'Until'}${row.effectiveTo ? `${row.effectiveFrom ? ' until' : ''} ${formatDate(row.effectiveTo)}` : ''}`;
+}
+
+/** Shown only while some upcoming slot holds more patients than its capacity now allows: everyone stays booked, and that slot takes no new bookings. */
+function OverCapacity({ row }: { row: AvailabilityRow }) {
+  if (!row.overCapacity) return null;
+  const { slots, maxBooked } = row.overCapacity;
+  return (
+    <p className="text-sm font-medium text-amber-800" role="status">
+      Over capacity on {slots} upcoming {slots === 1 ? 'slot' : 'slots'} (up to {maxBooked} booked). Nobody is moved; those slots take no new bookings until places free up.
+    </p>
+  );
 }
 
 /**
@@ -50,14 +62,18 @@ export function AvailabilityList({
 }) {
   const [removing, setRemoving] = useState<Removing>(null);
   const [adjusting, setAdjusting] = useState<AdjustTarget | null>(null);
+  const [capacity, setCapacity] = useState<CapacityTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
+  // Set once the server has said which booked appointments would be affected and the doctor presses the button again to agree.
+  const [agreed, setAgreed] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
   const minutes = availability.consultationMinutes;
 
   const close = () => {
     setRemoving(null);
     setDialogError(null);
+    setAgreed(false);
   };
 
   const confirm = async () => {
@@ -70,16 +86,18 @@ export function AvailabilityList({
         await api('/doctor-portal/availability/weekly', {
           method: 'PUT',
           token: session.accessToken,
-          body: { hours: kept.map((row) => ({ dayOfWeek: row.dayOfWeek, ...sessionBody(row, minutes) })) },
+          body: { hours: kept.map((row) => ({ dayOfWeek: row.dayOfWeek, ...sessionBody(row, minutes) })), ...(agreed ? { acknowledge: true } : {}) },
         });
         setFeedback({ tone: 'success', message: `Removed the ${DAY_LONG[removing.row.dayOfWeek]} session. Patients can no longer book that time.` });
       } else {
-        await api(`/doctor-portal/availability/one-time/${removing.row.id}`, { method: 'DELETE', token: session.accessToken });
+        await api(`/doctor-portal/availability/one-time/${removing.row.id}${agreed ? '?acknowledge=true' : ''}`, { method: 'DELETE', token: session.accessToken });
         setFeedback({ tone: 'success', message: `Deleted the session on ${formatDate(removing.row.date)}.` });
       }
       close();
       onChanged();
     } catch (error) {
+      // Booked appointments would fall outside the hours: the server lists nothing and changes nothing until the doctor agrees.
+      if (error instanceof ApiError && error.code === 'ACKNOWLEDGE_REQUIRED') setAgreed(true);
       setDialogError(errorMessage(error));
     } finally {
       setBusy(false);
@@ -121,6 +139,7 @@ export function AvailabilityList({
                           <ModeBadge mode={row.schedulingMode} />
                         </p>
                         <p className="text-sm text-muted-foreground">{describeSettings(row, minutes)}</p>
+                        <OverCapacity row={row} />
                         {effectiveText(row) && <p className="text-xs text-muted-foreground">{effectiveText(row)}</p>}
                       </div>
                       <div className="flex gap-2">
@@ -132,6 +151,16 @@ export function AvailabilityList({
                         >
                           <ClockIcon aria-hidden /> Adjust hours
                         </Button>
+                        {row.schedulingMode === 'WAVE' && row.id && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setCapacity({ id: row.id as string, title: DAY_LONG[row.dayOfWeek], capacityPerSlot: row.capacityPerSlot, maxBooked: row.maxBooked ?? 0 })}
+                            aria-label={`Adjust capacity for ${DAY_LONG[row.dayOfWeek]}`}
+                          >
+                            <UsersIcon aria-hidden /> Adjust capacity
+                          </Button>
+                        )}
                         <Button variant="outline" size="sm" onClick={() => onEdit(row)} aria-label={`Edit ${DAY_LONG[row.dayOfWeek]} session`}>
                           <PencilIcon aria-hidden /> Edit
                         </Button>
@@ -161,6 +190,7 @@ export function AvailabilityList({
                           <ModeBadge mode={row.schedulingMode} />
                         </p>
                         <p className="text-sm text-muted-foreground">{describeSettings(row, minutes)}</p>
+                        <OverCapacity row={row} />
                       </div>
                       <div className="flex gap-2">
                         <Button
@@ -171,6 +201,16 @@ export function AvailabilityList({
                         >
                           <ClockIcon aria-hidden /> Adjust hours
                         </Button>
+                        {row.schedulingMode === 'WAVE' && row.id && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setCapacity({ id: row.id as string, title: formatDate(row.date, { weekday: 'long' }), capacityPerSlot: row.capacityPerSlot, maxBooked: row.maxBooked ?? 0 })}
+                            aria-label={`Adjust capacity for ${formatDate(row.date)}`}
+                          >
+                            <UsersIcon aria-hidden /> Adjust capacity
+                          </Button>
+                        )}
                         <Button variant="outline" size="sm" onClick={() => setRemoving({ kind: 'oneoff', row })} aria-label={`Delete the session on ${formatDate(row.date)}`}>
                           <Trash2Icon aria-hidden /> Delete
                         </Button>
@@ -195,6 +235,17 @@ export function AvailabilityList({
         }}
       />
 
+      <AdjustCapacityDialog
+        session={session}
+        target={capacity}
+        onClose={() => setCapacity(null)}
+        onApplied={(message) => {
+          setCapacity(null);
+          setFeedback({ tone: 'success', message });
+          onChanged();
+        }}
+      />
+
       <ConfirmDialog
         open={removing !== null}
         title={removing?.kind === 'weekly' ? `Remove this ${DAY_LONG[removing.row.dayOfWeek]} session?` : 'Delete this session?'}
@@ -202,9 +253,9 @@ export function AvailabilityList({
           removing &&
           (removing.kind === 'weekly'
             ? `${DAY_LONG[removing.row.dayOfWeek]} ${formatTimeRange(removing.row.startTime, removing.row.endTime)} will stop repeating. Patients can no longer book it; appointments already made are kept.`
-            : `${formatDate(removing.row.date, { weekday: 'long' })} ${formatTimeRange(removing.row.startTime, removing.row.endTime)} will be deleted. If patients have booked it, you will need to cancel those appointments first.`)
+            : `${formatDate(removing.row.date, { weekday: 'long' })} ${formatTimeRange(removing.row.startTime, removing.row.endTime)} will be deleted. If patients have booked it, they stay booked and are asked to choose a new time; you will be asked to confirm.`)
         }
-        confirmLabel={removing?.kind === 'weekly' ? 'Remove session' : 'Delete session'}
+        confirmLabel={agreed ? 'Yes, remove it and ask patients' : removing?.kind === 'weekly' ? 'Remove session' : 'Delete session'}
         busy={busy}
         error={dialogError}
         onConfirm={() => void confirm()}

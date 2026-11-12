@@ -4,6 +4,8 @@ import { zonedInstant } from '../common/zoned-time.js';
 import { loadConfig } from '../config.js';
 import { Appointment, Notification, NotificationPreference, Patient } from '../database/entities/index.js';
 import { clinicNow } from '../scheduling/calendar.js';
+import { appointmentsOutsideHours } from '../scheduling/outside-hours.js';
+import { WITHDRAWN_NOTICE } from '../scheduling/schedule-reconciler.js';
 import { hhmm } from '../scheduling/slots.js';
 import { isRetryable } from './delivery-error.js';
 import { NOTIFICATION_CHANNELS, type NotificationChannel } from './notification-channel.js';
@@ -27,6 +29,8 @@ const BACKOFF_CAP_SECONDS = 60 * 60;
 const STALE_INTERVAL_SKIP = 'Not sent: this reminder interval is no longer configured.';
 /** Why a second reminder for the same appointment, interval and channel was cancelled. */
 const DUPLICATE_SKIP = 'Not sent: a duplicate of another reminder for the same appointment, interval and channel.';
+/** The most restoration notices one release queues; a very large release leaves the rest to see the new state on their page instead. */
+const MAX_RESTORED_NOTICES = 300;
 const PREFERENCES_SKIP = "Not sent: the recipient's notification preferences do not allow this message.";
 
 /**
@@ -147,12 +151,65 @@ export class NotificationsService {
   async appointmentNeedsNewTime(
     manager: EntityManager,
     appointmentId: string,
-    input: { link: string; changeKey: string; proposed?: { date: string; startTime: string; endTime: string } },
+    input: { link: string; changeKey: string },
   ): Promise<void> {
     await this.safely(manager, `new-time request for ${appointmentId}`, async (inner) => {
       const loaded = await this.load(inner, appointmentId);
       await this.enqueue(inner, this.toPatient(loaded, templates.needsNewTime(loaded.facts, input), `needs-new-time:${appointmentId}:${input.changeKey}`));
     });
+  }
+
+  /**
+   * Same request as appointmentNeedsNewTime, for the background notifier: it queues the message in the caller's transaction and
+   * lets a failure reach the caller (which retries and counts it) instead of swallowing it. Nothing is sent here; the outbox
+   * dispatcher sends it, so no transaction is ever open while an email or text goes out.
+   */
+  async queueNewTimeRequest(
+    manager: EntityManager,
+    appointmentId: string,
+    input: { link: string; changeKey: string },
+  ): Promise<void> {
+    const loaded = await this.load(manager, appointmentId);
+    await this.enqueue(manager, this.toPatient(loaded, templates.needsNewTime(loaded.facts, input), `needs-new-time:${appointmentId}:${input.changeKey}`));
+  }
+
+  /** A reminder that a patient has not yet chosen a new time. For the background notifier: queued in its transaction, failures reach it. */
+  async queueScheduleReminder(manager: EntityManager, appointmentId: string, input: { link: string; key: string; number: number }): Promise<void> {
+    const loaded = await this.load(manager, appointmentId);
+    await this.enqueue(manager, this.toPatient(loaded, templates.needsNewTimeReminder(loaded.facts, input), `needs-new-time-reminder:${appointmentId}:${input.key}`));
+  }
+
+  /** "New times are open", for a patient who had none. One per gap (the key names the gap), so it cannot repeat. */
+  async queueNewTimesAvailable(manager: EntityManager, appointmentId: string, input: { link: string; key: string }): Promise<void> {
+    const loaded = await this.load(manager, appointmentId);
+    await this.enqueue(manager, this.toPatient(loaded, templates.newTimesAvailable(loaded.facts, input), `new-times:${appointmentId}:${input.key}`));
+  }
+
+  /**
+   * Tells patients that the original appointment is valid again, after the doctor's hours were widened and covered it. Only for
+   * a patient who actually received the "choose a new time" email (a sent one: a request that was only queued is withdrawn, and
+   * they were never told, so there is nothing to take back). Queued in the caller's transaction; the outbox dispatcher sends it.
+   * One message per request that was sent (dedupe key), so replaying or repeating the release never emails twice. A failure for
+   * one patient is logged and skipped, and never fails the change of hours that caused it.
+   */
+  async appointmentsRestored(manager: EntityManager, appointmentIds: string[]): Promise<number> {
+    if (appointmentIds.length === 0) return 0;
+    // The latest request that really reached the patient decides it, so a patient who was reminded is still told only once.
+    const sent: { id: string; appointment_id: string }[] = await manager.query(
+      `SELECT DISTINCT ON (appointment_id) id, appointment_id FROM notifications
+        WHERE appointment_id = ANY($1::uuid[]) AND kind IN ('needs-new-time', 'needs-new-time-reminder', 'new-times-available') AND channel = 'email' AND status = 'SENT'
+        ORDER BY appointment_id, created_at DESC LIMIT $2`,
+      [appointmentIds, MAX_RESTORED_NOTICES],
+    );
+    let queued = 0;
+    for (const request of sent) {
+      await this.safely(manager, `restoration notice for ${request.appointment_id}`, async (inner) => {
+        const loaded = await this.load(inner, request.appointment_id);
+        await this.enqueue(inner, this.toPatient(loaded, templates.appointmentRestored(loaded.facts), `appointment-restored:${request.id}`));
+        queued++;
+      });
+    }
+    return queued;
   }
 
   /** A successful payment: the receipt goes to the patient (the doctor learns of the paid booking from the confirmation). */
@@ -221,6 +278,8 @@ export class NotificationsService {
           row.providerReference = sent.reference?.slice(0, 160) ?? null;
           row.lastError = null;
           result.sent++;
+          // The id and the provider's reference are enough to trace a message; the address and the content are not logged.
+          this.logger.log(`${sent.mode === 'dev-log' ? 'Printed (not sent)' : 'Sent'} ${row.kind} by ${row.channel}: notification ${row.id}${row.providerReference ? `, reference ${row.providerReference}` : ''}`);
         } catch (error) {
           row.lastError = (error as Error).message.slice(0, 500);
           if (!isRetryable(error) || row.attempts >= maxAttempts) row.status = 'FAILED';
@@ -508,7 +567,41 @@ export class NotificationsService {
       row.subject = content.subject.slice(0, 200);
       row.body = row.channel === 'sms' ? content.sms : content.body;
     }
+    if (row.kind === 'needs-new-time' || row.kind === 'needs-new-time-reminder' || row.kind === 'new-times-available') return this.staleNewTimeRequest(manager, row);
+    if (row.kind === 'appointment-restored') return this.staleRestoredNotice(manager, row);
     return null;
+  }
+
+  /**
+   * A "please choose a new time" message is only worth sending while it is true. Between queuing and sending the patient may have
+   * moved or cancelled, the appointment may have passed, or the doctor may have widened the hours so it fits again. Checked against
+   * the hours as they are at this moment, so a change that commits just before sending still stops the message.
+   */
+  private async staleNewTimeRequest(manager: EntityManager, row: Notification): Promise<string | null> {
+    if (!row.appointmentId) return 'Not sent: the message has no appointment.';
+    const appointment = await manager.findOneBy(Appointment, { id: row.appointmentId });
+    if (!appointment) return 'Not sent: the appointment no longer exists.';
+    if (appointment.status !== 'PENDING' && appointment.status !== 'CONFIRMED') return `Not sent: the appointment is ${appointment.status.toLowerCase().replace('_', ' ')}.`;
+    const now = clinicNow(this.config.clinicTimezone);
+    if (appointment.appointmentDate < now.date || (appointment.appointmentDate === now.date && hhmm(appointment.startTime) <= now.time)) return 'Not sent: the appointment has already started.';
+    const outside = await appointmentsOutsideHours(manager, appointment.doctorId, [
+      { id: appointment.id, date: appointment.appointmentDate, startTime: appointment.startTime, endTime: appointment.endTime },
+    ]);
+    return outside.has(appointment.id) ? null : WITHDRAWN_NOTICE;
+  }
+
+  /** "Your appointment is valid again" only makes sense while it is still booked, not started, and inside the hours. */
+  private async staleRestoredNotice(manager: EntityManager, row: Notification): Promise<string | null> {
+    if (!row.appointmentId) return 'Not sent: the message has no appointment.';
+    const appointment = await manager.findOneBy(Appointment, { id: row.appointmentId });
+    if (!appointment) return 'Not sent: the appointment no longer exists.';
+    if (appointment.status !== 'PENDING' && appointment.status !== 'CONFIRMED') return `Not sent: the appointment is ${appointment.status.toLowerCase().replace('_', ' ')}.`;
+    const now = clinicNow(this.config.clinicTimezone);
+    if (appointment.appointmentDate < now.date || (appointment.appointmentDate === now.date && hhmm(appointment.startTime) <= now.time)) return 'Not sent: the appointment has already started.';
+    const outside = await appointmentsOutsideHours(manager, appointment.doctorId, [
+      { id: appointment.id, date: appointment.appointmentDate, startTime: appointment.startTime, endTime: appointment.endTime },
+    ]);
+    return outside.has(appointment.id) ? 'Not sent: the appointment is outside the doctor\'s hours again.' : null;
   }
 
   private async preferencesOf(manager: EntityManager, userId: string): Promise<NotificationPreferences> {
@@ -589,7 +682,7 @@ export class NotificationsService {
   private async load(manager: EntityManager, appointmentId: string): Promise<Loaded> {
     const appointment = await manager.findOneOrFail(Appointment, {
       where: { id: appointmentId },
-      relations: { patient: { user: true }, doctor: { user: true, clinic: true } },
+      relations: { patient: { user: true }, doctor: { user: true, clinic: true, specialty: true } },
     });
     const patientPrefs = await this.preferencesOf(manager, appointment.patient.user.id);
     return {
@@ -620,6 +713,7 @@ export class NotificationsService {
         date: appointment.appointmentDate,
         startTime: hhmm(appointment.startTime),
         endTime: hhmm(appointment.endTime),
+        specialty: appointment.doctor.specialty?.name,
       },
     };
   }

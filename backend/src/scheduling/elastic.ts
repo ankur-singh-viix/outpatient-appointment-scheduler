@@ -120,13 +120,15 @@ export function planChange(args: {
     );
   }
 
-  // The new hours must not run into another session of the same kind on the same weekday or date.
+  // The new hours must not run into another session of the same kind on the same weekday or date. Only the dates the change applies to
+  // count: a recurring session's new hours start at `applyFrom`, so a session that had already ended by then (history) is not a clash.
+  const applied = row.recurrenceType === 'WEEKLY' && (row.effectiveFrom === null || row.effectiveFrom < args.applyFrom) ? { effectiveFrom: args.applyFrom, effectiveTo: row.effectiveTo } : row;
   const clash = rules.find(
     (other) =>
       other.id !== row.id &&
       other.recurrenceType === row.recurrenceType &&
       (row.recurrenceType === 'WEEKLY' ? other.dayOfWeek === row.dayOfWeek : other.specificDate === row.specificDate) &&
-      effectiveRangesIntersect(row, other) &&
+      effectiveRangesIntersect(applied, other) &&
       toMinutes(proposed.startTime) < toMinutes(other.endTime) &&
       toMinutes(other.startTime) < toMinutes(proposed.endTime),
   );
@@ -177,14 +179,26 @@ export interface Placed {
  * the proposed ones. An appointment that was already outside the hours before is not blamed on this change. Dates with a date
  * exception come out unaffected on their own, because the exception decides those days.
  */
-export function findAffected(args: { appointments: Placed[]; rules: AvailabilityRule[]; afterRules: AvailabilityRule[]; overrides: Map<string, DateOverride>; doctor: ElasticDoctor }): string[] {
+export function findAffected(args: {
+  appointments: Placed[];
+  rules: AvailabilityRule[];
+  afterRules: AvailabilityRule[];
+  overrides: Map<string, DateOverride>;
+  /** The date exceptions after the change, when the change is to an exception. Defaults to the same ones as before. */
+  afterOverrides?: Map<string, DateOverride>;
+  /** Ignore appointments before this date (a recurring change that starts later). */
+  fromDate?: string;
+  doctor: ElasticDoctor;
+}): string[] {
   const sessions = new Map<string, { before: Session[]; after: Session[] }>();
   const affected: string[] = [];
   for (const appointment of args.appointments) {
+    if (args.fromDate !== undefined && appointment.date < args.fromDate) continue;
     let day = sessions.get(appointment.date);
     if (!day) {
       const override = args.overrides.get(appointment.date) ?? null;
-      day = { before: slotsOn(appointment.date, args.rules, override, args.doctor).sessions, after: slotsOn(appointment.date, args.afterRules, override, args.doctor).sessions };
+      const afterOverride = (args.afterOverrides ?? args.overrides).get(appointment.date) ?? null;
+      day = { before: slotsOn(appointment.date, args.rules, override, args.doctor).sessions, after: slotsOn(appointment.date, args.afterRules, afterOverride, args.doctor).sessions };
       sessions.set(appointment.date, day);
     }
     const start = hhmm(appointment.startTime);
@@ -192,6 +206,53 @@ export function findAffected(args: { appointments: Placed[]; rules: Availability
     if (isCovered(day.before, start, end) && !isCovered(day.after, start, end)) affected.push(appointment.id);
   }
   return affected;
+}
+
+/**
+ * The mirror of findAffected, for extending hours: appointments that are outside the doctor's working time with the current rules
+ * and inside it with the proposed ones. An appointment that stays outside (a day off, a blocked time, or hours that still do not
+ * reach it) is not included, and neither is one that was inside already.
+ */
+export function findRestored(args: {
+  appointments: Placed[];
+  rules: AvailabilityRule[];
+  afterRules: AvailabilityRule[];
+  overrides: Map<string, DateOverride>;
+  afterOverrides?: Map<string, DateOverride>;
+  fromDate?: string;
+  doctor: ElasticDoctor;
+}): string[] {
+  const sessions = new Map<string, { before: Session[]; after: Session[] }>();
+  const restored: string[] = [];
+  for (const appointment of args.appointments) {
+    if (args.fromDate !== undefined && appointment.date < args.fromDate) continue;
+    let day = sessions.get(appointment.date);
+    if (!day) {
+      const override = args.overrides.get(appointment.date) ?? null;
+      const afterOverride = (args.afterOverrides ?? args.overrides).get(appointment.date) ?? null;
+      day = { before: slotsOn(appointment.date, args.rules, override, args.doctor).sessions, after: slotsOn(appointment.date, args.afterRules, afterOverride, args.doctor).sessions };
+      sessions.set(appointment.date, day);
+    }
+    const start = hhmm(appointment.startTime);
+    const end = hhmm(appointment.endTime);
+    if (!isCovered(day.before, start, end) && isCovered(day.after, start, end)) restored.push(appointment.id);
+  }
+  return restored;
+}
+
+/** How a date stands: how many slots it has, how many can still be booked, and the places left in those. A date with no sessions has total 0. */
+export function daySummary(
+  date: string,
+  rules: AvailabilityRule[],
+  override: DateOverride | null,
+  doctor: ElasticDoctor,
+  booked: BookedWindow[],
+  cutoff: string | null,
+): { total: number; open: number; places: number } {
+  const sessions = resolveDay(override, rules, date, { consultationMinutes: doctor.consultationMinutes, defaultCapacity: doctor.defaultCapacity });
+  const { slots } = buildSlots(sessions, doctor.consultationMinutes, booked, cutoff, doctor.slotIntervalMinutes);
+  const open = slots.filter((slot) => slot.status === 'AVAILABLE');
+  return { total: slots.length, open: open.length, places: open.reduce((sum, slot) => sum + (slot.remaining ?? 1), 0) };
 }
 
 /** A slot someone could still book, with the places left in it. */
