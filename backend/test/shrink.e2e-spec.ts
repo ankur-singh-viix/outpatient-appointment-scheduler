@@ -353,7 +353,7 @@ describe('Shrinking hours, production readiness (e2e)', () => {
       await notifier().drain();
       expect(await notices()).toHaveLength(count);
       expect((await tracking()).every((row) => row.notified_at !== null)).toBe(true);
-    });
+    }, 30_000); // it books 200 patients directly and runs the batches: about 5 seconds on a busy machine, over the default limit
 
     it('pages through the appointments outside the hours without repeats or gaps', async () => {
       const count = 60;

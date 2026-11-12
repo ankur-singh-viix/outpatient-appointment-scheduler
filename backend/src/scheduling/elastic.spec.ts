@@ -154,6 +154,23 @@ describe('expansion', () => {
     expect(plan(rule(), { startTime: '10:00', endTime: '12:10' }).problems[0]).toMatch(/shorter than one 30-minute slot/);
   });
 
+  it('never counts the session being edited, or a finished one that ended before the change starts, as an overlap', () => {
+    const editing = rule({ id: 'now', startTime: '09:00', endTime: '10:00', effectiveFrom: null, effectiveTo: null });
+    const ended = rule({ id: 'history', startTime: '09:00', endTime: '10:00', effectiveFrom: null, effectiveTo: '2030-01-06' }); // ended the day before the change starts
+    expect(plan(editing, { startTime: '09:30', endTime: '10:00' }, { rules: [editing] }).problems).toEqual([]);
+    const result = plan(editing, { startTime: '09:30', endTime: '10:00' }, { rules: [ended, editing], applyFrom: MONDAY });
+    expect(result.problems).toEqual([]);
+    expect(result.kind).toBe('SHRINK');
+  });
+
+  it('still refuses a different session that is in force on the dates the change applies to, and names it', () => {
+    const editing = rule({ id: 'now', startTime: '09:00', endTime: '10:00' });
+    const live = rule({ id: 'other', startTime: '09:15', endTime: '09:45', effectiveFrom: '2030-01-14', effectiveTo: null }); // starts the week after the change
+    expect(plan(editing, { startTime: '09:30', endTime: '10:00' }, { rules: [editing, live], applyFrom: MONDAY }).problems[0]).toMatch(/overlap another session \(09:15-09:45\)/);
+    const earlier = rule({ id: 'earlier', startTime: '09:15', endTime: '09:45', effectiveTo: '2030-01-06' });
+    expect(plan(editing, { startTime: '09:30', endTime: '10:00' }, { rules: [editing, earlier], applyFrom: NEXT_MONDAY }).problems).toEqual([]);
+  });
+
   it('refuses hours that overlap another session of the same kind, but not back-to-back ones', () => {
     const afternoon = rule({ id: 'row-2', startTime: '13:00', endTime: '15:00' });
     expect(plan(rule(), { startTime: '10:00', endTime: '14:00' }, { rules: [rule(), afternoon] }).problems[0]).toMatch(/overlap another session \(13:00-15:00\)/);

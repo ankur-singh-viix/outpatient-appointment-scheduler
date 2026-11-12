@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowRightIcon, ClockIcon, TriangleAlertIcon } from 'lucide-react';
+import { ArrowRightIcon, ClockIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Alert, Spinner } from '@/components/common';
 import { Badge } from '@/components/ui/badge';
@@ -11,7 +11,7 @@ import { Label } from '@/components/ui/label';
 import { api, errorMessage } from '@/lib/api';
 import { formatDate, formatTime, formatTimeRange } from '@/lib/format';
 import { useClinicToday, useDebounced, useQuery } from '@/lib/hooks';
-import type { HoursChangePreview, OpenTime, SchedulingMode, Session } from '@/lib/types';
+import type { HoursChangePreview, SchedulingMode, Session } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { restoredNote } from './restored-note';
 
@@ -28,15 +28,11 @@ export interface AdjustTarget {
   settings: string;
 }
 
-const KIND_LABEL: Record<HoursChangePreview['kind'], string> = { EXPAND: 'Extending', SHRINK: 'Reducing', MIXED: 'Changing both ends', NONE: 'No change' };
-
-const slotList = (slots: { startTime: string }[]) => slots.map((slot) => formatTime(slot.startTime)).join(', ');
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
-const optionLabel = (option: OpenTime) => `${formatDate(option.date, { weekday: 'short' })} · ${formatTime(option.startTime)} (${option.remaining} left)`;
 
 /**
  * Change the hours of a session that may already have bookings. The server works out the effect with the same rules booking uses,
- * and this shows it before anything is saved: the hours now and proposed, the slots that appear or go, and anything that cannot be
+ * and this shows it before anything is saved: the hours now and proposed, the patients affected, and anything that cannot be
  * done (with the nearest start times that can).
  *
  * Extending only adds slots. Reducing leaves booked appointments outside the hours: they are listed here first, they stay booked,
@@ -60,8 +56,6 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
   const [end, setEnd] = useState(target.endTime);
   const [applyFrom, setApplyFrom] = useState('');
   const [agreed, setAgreed] = useState(false);
-  /** A suggested new time per affected appointment: the index into its list of open times. */
-  const [suggested, setSuggested] = useState<Record<string, number>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -90,10 +84,6 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
     if (!shown?.canApply || (needsAgreement && !agreed)) return;
     setBusy(true);
     setError(null);
-    const proposals = affected.flatMap((appointment) => {
-      const option = appointment.alternatives[suggested[appointment.id] ?? -1];
-      return option ? [{ appointmentId: appointment.id, date: option.date, startTime: option.startTime }] : [];
-    });
     try {
       const done = await api<{ restoredAppointments?: number }>(`/doctor-portal/availability/${target.id}/change`, {
         method: 'POST',
@@ -103,7 +93,7 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
           endTime: end,
           from: { startTime: target.startTime, endTime: target.endTime },
           ...(target.recurring && applyFrom ? { applyFrom } : {}),
-          ...(needsAgreement ? { acknowledge: true, proposals } : {}),
+          ...(needsAgreement ? { acknowledge: true } : {}),
         },
       });
       const parts = [`hours changed to ${formatTimeRange(start, end)}`];
@@ -119,7 +109,6 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
   };
 
   const unchanged = start === target.startTime && end === target.endTime;
-  const reducing = shown?.kind === 'SHRINK' || shown?.kind === 'MIXED';
 
   return (
     <div className="space-y-5">
@@ -167,6 +156,39 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
         {preview.error && <Alert>{preview.error}</Alert>}
         {settled && shown && !unchanged && (
           <>
+            {needsAgreement && (
+              <section aria-labelledby="affected-heading" className="space-y-3">
+                <div className="flex items-baseline justify-between gap-2">
+                  <h3 id="affected-heading" className="text-sm font-semibold text-foreground">
+                    Affected patients
+                  </h3>
+                  <span className="text-sm text-muted-foreground">{affectedTotal} in total</span>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  Their appointments stay booked. After you save, each patient is emailed and chooses a new time themselves; nobody is moved or cancelled automatically.
+                </p>
+                <ul className="max-h-56 divide-y overflow-y-auto rounded-lg border bg-card" aria-label="Affected patients">
+                  {affected.map((appointment) => (
+                    <li key={appointment.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-sm">
+                      <div className="min-w-0">
+                        <p className="truncate font-medium text-foreground">{appointment.patient.name}</p>
+                        <p className="text-muted-foreground">
+                          {formatDate(appointment.date, { weekday: 'short' })} · {formatTimeRange(appointment.startTime, appointment.endTime)}
+                        </p>
+                      </div>
+                      <Badge variant="secondary" className={appointment.status === 'PENDING' ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-900'}>
+                        {appointment.status === 'PENDING' ? 'Pending payment' : 'Confirmed'}
+                      </Badge>
+                    </li>
+                  ))}
+                </ul>
+                {affectedTotal > affected.length && <p className="text-xs text-muted-foreground">Showing the first {affected.length}. The other {affectedTotal - affected.length} are asked the same way.</p>}
+                <label className="flex items-start gap-2 text-sm font-medium">
+                  <input type="checkbox" checked={agreed} onChange={(event) => setAgreed(event.target.checked)} className="mt-1 size-4 shrink-0 accent-primary" />
+                  <span>I understand these appointments stay booked until each patient chooses a new time, and that nobody is moved or cancelled automatically.</span>
+                </label>
+              </section>
+            )}
             {shown.problems.length > 0 && (
               <Alert>
                 <span className="block font-medium">This change cannot be made yet:</span>
@@ -187,36 +209,6 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
                 ))}
               </div>
             )}
-            {shown.canApply && (
-              <div className="space-y-2 rounded-xl border border-primary/25 bg-accent/40 p-4 text-sm">
-                <p className="flex flex-wrap items-center gap-2 font-semibold text-foreground">
-                  <Badge variant="secondary" className="bg-accent font-semibold text-accent-foreground">
-                    {KIND_LABEL[shown.kind]}
-                  </Badge>
-                  {[shown.addedSlots > 0 && `${plural(shown.addedSlots, 'new slot')} added`, shown.removedSlots > 0 && `${plural(shown.removedSlots, 'slot')} removed`].filter(Boolean).join(' · ') ||
-                    'No dates in the booking window change yet'}
-                  {shown.affectedDates > 0 && <span className="font-normal text-muted-foreground">on {plural(shown.affectedDates, 'date')}</span>}
-                </p>
-                {shown.days.length > 0 && (
-                  <ul className="space-y-0.5 text-foreground/90">
-                    {shown.days.slice(0, 4).map((day) => (
-                      <li key={day.date}>
-                        {formatDate(day.date, { weekday: 'short' })}:{' '}
-                        {day.added.length > 0 && <span className="font-medium">+ {slotList(day.added)}</span>}
-                        {day.added.length > 0 && day.removed.length > 0 && ' · '}
-                        {day.removed.length > 0 && <span className="font-medium">− {slotList(day.removed)}</span>}
-                      </li>
-                    ))}
-                    {shown.affectedDates > 4 && <li className="text-muted-foreground">…and {plural(shown.affectedDates - 4, 'more date')}</li>}
-                  </ul>
-                )}
-                <p className="text-muted-foreground">
-                  {reducing ? 'Slots that stay are exactly as they are. New bookings in the removed time stop as soon as you save.' : 'Existing slots and bookings stay exactly as they are.'}
-                  {target.recurring && shown.splitsAtDate ? ` Dates before ${formatDate(shown.applyFrom)} keep their current hours.` : ''}
-                </p>
-              </div>
-            )}
-
             {shown.canApply && restoredTotal > 0 && (
               <section aria-labelledby="restored-heading" className="space-y-2 rounded-xl border border-emerald-300 bg-emerald-50 p-4 text-sm text-emerald-950">
                 <h3 id="restored-heading" className="font-semibold">
@@ -240,73 +232,6 @@ function AdjustForm({ session, target, onClose, onApplied }: { session: Session;
               </section>
             )}
 
-            {shown.canApply && reducing && affectedTotal === 0 && <p className="text-sm text-muted-foreground">No booked appointment falls outside the new hours, so nobody needs to be contacted.</p>}
-
-            {needsAgreement && (
-              <section aria-labelledby="affected-heading" className="space-y-3 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
-                <h3 id="affected-heading" className="flex items-center gap-2 font-semibold">
-                  <TriangleAlertIcon className="size-4 shrink-0" aria-hidden />
-                  {plural(affectedTotal, 'booked appointment')} {affectedTotal === 1 ? 'falls' : 'fall'} outside the new hours
-                </h3>
-                <p>
-                  They stay booked. After you save, each patient is emailed and asked to choose a new time; an appointment moves only when its patient confirms. Cancelling is
-                  always your own last step, from the list that appears on this page.
-                </p>
-                <ul className="max-h-64 divide-y divide-amber-200 overflow-y-auto rounded-lg bg-white/70" aria-label="Affected appointments">
-                  {affected.map((appointment) => (
-                    <li key={appointment.id} className="space-y-1.5 p-3">
-                      <p className="flex flex-wrap items-center gap-x-2 font-medium text-foreground">
-                        {appointment.patient.name}
-                        <span className="font-normal text-muted-foreground">
-                          {formatDate(appointment.date, { weekday: 'short' })} · {formatTimeRange(appointment.startTime, appointment.endTime)}
-                        </span>
-                        {appointment.status === 'PENDING' && (
-                          <Badge variant="secondary" className="bg-amber-100 text-amber-900">
-                            Awaiting payment
-                          </Badge>
-                        )}
-                      </p>
-                      {appointment.alternatives.length > 0 ? (
-                        <div className="flex flex-wrap items-center gap-2">
-                          <label htmlFor={`suggest-${appointment.id}`} className="text-muted-foreground">
-                            Suggest a time (optional)
-                          </label>
-                          <select
-                            id={`suggest-${appointment.id}`}
-                            value={suggested[appointment.id] ?? -1}
-                            onChange={(event) => setSuggested((current) => ({ ...current, [appointment.id]: Number(event.target.value) }))}
-                            className="h-9 max-w-full rounded-lg border border-input bg-card px-2 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-                          >
-                            <option value={-1}>No suggestion</option>
-                            {appointment.alternatives.map((option, index) => (
-                              <option key={`${option.date}-${option.startTime}`} value={index}>
-                                {optionLabel(option)}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      ) : (
-                        <p className="text-amber-900">No other time is open for this patient. They can still contact you, and you can cancel as a last resort.</p>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-                {affectedTotal > affected.length && (
-                  <p className="text-muted-foreground">
-                    Showing the first {affected.length}. The other {affectedTotal - affected.length} are asked the same way; you can follow all of them from the list that appears on this page.
-                  </p>
-                )}
-                {shown.withoutAlternatives > 0 && (
-                  <p className="font-medium">
-                    {plural(shown.withoutAlternatives, 'appointment')} {shown.withoutAlternatives === 1 ? 'has' : 'have'} no open alternative right now.
-                  </p>
-                )}
-                <label className="flex items-start gap-2 font-medium">
-                  <input type="checkbox" checked={agreed} onChange={(event) => setAgreed(event.target.checked)} className="mt-1 size-4 shrink-0 accent-primary" />
-                  <span>I understand these appointments stay booked until each patient chooses a new time, and that nobody is moved or cancelled automatically.</span>
-                </label>
-              </section>
-            )}
           </>
         )}
         {unchanged && <p className="text-sm text-muted-foreground">Change the start or end time to see what it would do.</p>}

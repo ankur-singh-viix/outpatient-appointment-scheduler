@@ -141,7 +141,7 @@ once with the proposed ones: the hours now and proposed, the slots that appear o
   - new bookings in the removed time stop at once;
   - **every affected appointment stays booked.** Nothing is moved, changed or cancelled automatically;
   - each affected patient is emailed (and texted when SMS is set up) and asked to choose a new time. The link opens the normal
-    reschedule page, where the patient confirms the move themselves; the doctor may suggest one of the open times;
+    reschedule page, where the patient confirms the move themselves; the doctor never chooses a time for a patient: the patient browses every open time, nearest first, and picks;
   - the appointment shows "needs a new time" to the patient and appears under **Appointments outside your hours** for the doctor,
     who can ask again (at most once a day) and, only as a last resort, cancel it with the usual reason, notice and refund.
 - **Recurring sessions** change from a chosen date (today by default). The old row ends the day before and a new row starts, so
@@ -174,7 +174,7 @@ payment. What it *is* comes from the facts around it:
 
 Audit. `schedule_changes` has one row per applied change (who, which row, from when, old and new hours, how many were affected).
 `schedule_change_appointments` has one row per affected appointment: when the patient was asked (`notified_at`), failed attempts,
-the time the doctor suggested, and how it ended (`RESCHEDULED`, `CANCELLED`, `COVERED` when the hours were widened again, `CLOSED`
+how it ended (`RESCHEDULED`, `CANCELLED`, `COVERED` when the hours were widened again, `CLOSED`
 otherwise). Both are written in the same short transaction as the change; neither touches appointments or payments.
 
 Notices. The request sends nothing. A background job (every 30 s, plus one immediate pass after a change) claims up to 200 unsent
@@ -215,6 +215,8 @@ not been sent yet. `reconcileCoverage` (`scheduling/schedule-reconciler.ts`) doe
   appointment has since been moved, cancelled, has started, or is inside the hours again, the message is cancelled instead of sent.
   A message withdrawn unsent does not count as having asked the patient, so a later reduction asks them as normal; one that was
   sent still prevents a repeat within 24 hours.
+
+Patients who were told are told again, once: if a patient had actually received the "choose a new time" email, the release also queues a "No action needed, your appointment is valid again" message for them (dedupe key per request that was sent, so it is never repeated; it is checked again just before sending and cancelled if the appointment has since been moved, cancelled or is outside the hours again). A patient who was never told gets nothing. Email goes out through Brevo or Resend (see the README, "Email with Brevo").
 
 Edge cases:
 
@@ -317,7 +319,7 @@ database; old code ignores it). Rollback: `DROP TABLE schedule_change_appointmen
 
 - `schedule_changes`: the audit row of each applied change of an availability row's hours.
 - `schedule_change_appointments`: one row per appointment a reduction left outside the hours, primary key
-  `(change_id, appointment_id)`, with `notified_at`, `attempts`, the doctor's suggested time, and `resolved_at` + `resolution`
+  `(change_id, appointment_id)`, with `notified_at`, `attempts` (the old `proposed_*` columns are unused and always empty), and `resolved_at` + `resolution`
   (a CHECK keeps the two in step). A partial index holds only the rows still waiting to be asked, and another finds the open rows of
   one appointment. Changes made before this migration have no rows; their appointments are still found and shown, because the
   doctor's list is worked out from the current hours.

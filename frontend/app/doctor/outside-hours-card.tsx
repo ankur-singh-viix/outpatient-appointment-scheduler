@@ -7,15 +7,14 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { api, errorMessage } from '@/lib/api';
-import { formatDate, formatDateTime, formatTime, formatTimeRange } from '@/lib/format';
+import { formatDate, formatDateTime, formatTimeRange } from '@/lib/format';
 import { useQuery } from '@/lib/hooks';
-import type { DoctorAppointment, OpenTime, OutsideHoursAppointment, OutsideHoursPage, ScheduleChangeSummary, Session } from '@/lib/types';
+import type { DoctorAppointment, OutsideHoursAppointment, OutsideHoursPage, ScheduleChangeSummary, Session } from '@/lib/types';
 import { CancelAppointmentDialog } from './cancel-appointment-dialog';
 
 type Feedback = { tone: 'success' | 'error'; message: string } | null;
 
 const ASKED: Record<string, string> = { SENT: 'email sent', PENDING: 'email on its way', FAILED: 'email could not be sent', CANCELLED: 'email withdrawn' };
-const optionLabel = (option: OpenTime) => `${formatDate(option.date, { weekday: 'short' })} · ${formatTime(option.startTime)} (${option.remaining} left)`;
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
 
 /** One line on what a past change of hours did to the appointments it touched. */
@@ -38,8 +37,22 @@ function changeOutcome(change: ScheduleChangeSummary): string {
   return [stranded, released].filter(Boolean).join(' ');
 }
 
+const FOLLOW_UP: Record<string, string> = {
+  NOT_ASKED: 'Not asked yet',
+  WAITING: 'Waiting for the patient',
+  NO_RESPONSE: 'No response after both reminders',
+  NO_ALTERNATIVES: 'No other time open',
+};
+const FILTERS = [
+  { value: 'ALL', label: 'All' },
+  { value: 'NO_RESPONSE', label: 'No response' },
+  { value: 'NO_ALTERNATIVES', label: 'No other time' },
+  { value: 'NOT_ASKED', label: 'Not asked' },
+  { value: 'WAITING', label: 'Waiting' },
+] as const;
+
 function askedText(appointment: OutsideHoursAppointment): string {
-  if (appointment.asked) return `Asked ${formatDateTime(appointment.asked.at)} (${ASKED[appointment.asked.status] ?? appointment.asked.status.toLowerCase()})`;
+  if (appointment.asked) return `Asked ${formatDateTime(appointment.asked.at)} (${ASKED[appointment.asked.status] ?? appointment.asked.status.toLowerCase()})${appointment.followUp.reminders > 0 ? `, ${plural(appointment.followUp.reminders, 'reminder')} sent` : ''}`;
   return appointment.noticePending ? 'Waiting to be asked (the email is being queued)' : 'Not asked yet';
 }
 
@@ -55,15 +68,16 @@ export function OutsideHoursCard({ session, version, onChanged, onAddSession }: 
   // Pages loaded after the first one, remembered together with the first page they follow: a fresh first page discards them.
   const [loaded, setLoaded] = useState<{ base: OutsideHoursPage | undefined; items: OutsideHoursAppointment[]; cursor: string | null } | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [choice, setChoice] = useState<Record<string, number>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
   const [cancelling, setCancelling] = useState<DoctorAppointment | null>(null);
+  const [filter, setFilter] = useState<(typeof FILTERS)[number]['value']>('ALL');
 
   const more = loaded && loaded.base === list.data ? loaded : null;
   const firstPage = (list.data ?? list.previous)?.appointments ?? [];
   const items = [...firstPage, ...(more?.items ?? []).filter((entry) => !firstPage.some((existing) => existing.id === entry.id))];
   const nextCursor = more ? more.cursor : (list.data ?? list.previous)?.nextCursor ?? null;
+  const shown = filter === 'ALL' ? items : items.filter((entry) => entry.followUp.state === filter);
   const changes = (history.data ?? history.previous)?.changes ?? [];
   if (items.length === 0 && !feedback && changes.length === 0) return null;
 
@@ -81,14 +95,13 @@ export function OutsideHoursCard({ session, version, onChanged, onAddSession }: 
   };
 
   const ask = async (appointment: OutsideHoursAppointment) => {
-    const option = appointment.alternatives[choice[appointment.id] ?? -1];
     setBusy(appointment.id);
     setFeedback(null);
     try {
       await api(`/doctor-portal/appointments/${appointment.id}/ask-new-time`, {
         method: 'POST',
         token: session.accessToken,
-        body: option ? { proposal: { date: option.date, startTime: option.startTime } } : {},
+        body: {},
       });
       setFeedback({ tone: 'success', message: `${appointment.patient.name} was asked to choose a new time. Their appointment stays booked until they do.` });
       list.reload();
@@ -131,8 +144,17 @@ export function OutsideHoursCard({ session, version, onChanged, onAddSession }: 
           <p className="text-sm text-muted-foreground">Every appointment is now inside your hours.</p>
         ) : (
           <>
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Show">
+              {FILTERS.map((option) => (
+                <Button key={option.value} size="sm" variant={filter === option.value ? 'default' : 'outline'} aria-pressed={filter === option.value} onClick={() => setFilter(option.value)}>
+                  {option.label}
+                  {option.value !== 'ALL' && ` (${items.filter((entry) => entry.followUp.state === option.value).length})`}
+                </Button>
+              ))}
+            </div>
+            {shown.length === 0 && <p className="text-sm text-muted-foreground">No loaded appointment matches this filter.</p>}
             <ul className="divide-y rounded-xl border bg-card" aria-label="Appointments outside your hours">
-              {items.map((appointment) => (
+              {shown.map((appointment) => (
                 <li key={appointment.id} className="space-y-3 p-4">
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="space-y-0.5">
@@ -141,6 +163,11 @@ export function OutsideHoursCard({ session, version, onChanged, onAddSession }: 
                         <Badge variant="secondary" className="bg-amber-100 text-amber-900">
                           Needs a new time
                         </Badge>
+                        {appointment.followUp.state !== 'WAITING' && (
+                          <Badge variant="secondary" className={appointment.followUp.state === 'NOT_ASKED' ? 'bg-muted text-foreground' : 'bg-red-100 text-red-900'}>
+                            {FOLLOW_UP[appointment.followUp.state]}
+                          </Badge>
+                        )}
                         {appointment.status === 'PENDING' && (
                           <Badge variant="secondary" className="bg-amber-100 text-amber-900">
                             Awaiting payment
@@ -156,24 +183,7 @@ export function OutsideHoursCard({ session, version, onChanged, onAddSession }: 
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     {appointment.alternatives.length > 0 ? (
-                      <>
-                        <label htmlFor={`outside-${appointment.id}`} className="text-sm text-muted-foreground">
-                          Suggest a time (optional)
-                        </label>
-                        <select
-                          id={`outside-${appointment.id}`}
-                          value={choice[appointment.id] ?? -1}
-                          onChange={(event) => setChoice((current) => ({ ...current, [appointment.id]: Number(event.target.value) }))}
-                          className="h-9 max-w-full rounded-lg border border-input bg-card px-2 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-                        >
-                          <option value={-1}>No suggestion</option>
-                          {appointment.alternatives.map((option, index) => (
-                            <option key={`${option.date}-${option.startTime}`} value={index}>
-                              {optionLabel(option)}
-                            </option>
-                          ))}
-                        </select>
-                      </>
+                      <p className="text-sm text-muted-foreground">The patient picks their own new time from {appointment.alternatives.length === 1 ? 'the open time' : 'the open times'}, nearest first.</p>
                     ) : (
                       <>
                         <p className="text-sm text-amber-900">No other time is open for this patient right now.</p>
