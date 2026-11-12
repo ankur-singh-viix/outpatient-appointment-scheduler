@@ -8,6 +8,7 @@ import { DoctorPortalService } from '../doctor-portal/doctor-portal.service.js';
 import { DoctorsService } from '../doctors/doctors.service.js';
 import type { ActionCard } from './actions/action-cards.js';
 import { AssistantActionsService } from './actions/assistant-actions.service.js';
+import { ScheduleChangeActionsService } from './actions/schedule-change-actions.service.js';
 import { clinicNow } from '../scheduling/calendar.js';
 import { LLM_CLIENT, LlmError, type LlmClient, type LlmMessage, type ToolCall, type ToolResult } from './llm/llm-client.js';
 import { DECLINED_REPLY, EMPTY_REPLY, systemPrompt, type AssistantRole, type PromptOptions } from './prompts.js';
@@ -51,9 +52,10 @@ export class AssistantService {
     appointments: AppointmentsService,
     dataSource: DataSource,
     actions: AssistantActionsService,
+    scheduleChanges: ScheduleChangeActionsService,
   ) {
     this.toolsByRole = {
-      DOCTOR: doctorTools({ portal, changes, doctors, dataSource }),
+      DOCTOR: doctorTools({ portal, changes, doctors, dataSource, scheduleChanges }),
       PATIENT: patientTools({ appointments, doctors, actions }),
     };
   }

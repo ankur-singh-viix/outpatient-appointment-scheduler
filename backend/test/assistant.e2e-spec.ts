@@ -419,7 +419,7 @@ describe('AI assistant, phase 1: read-only chat (e2e)', () => {
       // Phase 1's four read-only tools are all still there; phase 2 adds the three "prepare" tools and the two status lookups.
       expect(offered(requests[0])).toEqual(['get_available_slots', 'get_my_appointments', 'get_payment_status', 'get_refund_status', 'prepare_booking', 'prepare_cancellation', 'prepare_reschedule', 'search_doctors', 'suggest_alternative_slots']);
       await ask(tokenA, 'get_working_hours');
-      expect(offered(requests[0])).toEqual(['find_scheduling_conflicts', 'get_appointment_statistics', 'get_appointments_on_date', 'get_next_available_slot', 'get_slots_on_date', 'get_working_hours']);
+      expect(offered(requests[0])).toEqual(['find_scheduling_conflicts', 'get_appointment_statistics', 'get_appointments_on_date', 'get_next_available_slot', 'get_slots_on_date', 'get_working_hours', 'prepare_schedule_change']);
     });
 
     it('accepts only turns of text: no ids, roles to act as, or tool results can be sent', async () => {
@@ -599,7 +599,7 @@ describe('voice and language hints (phase 3)', () => {
       await chat(patientTokens[0], say()).expect(200);
       expect(requests[0].tools.map((tool) => tool.name).sort()).toEqual(requests[1].tools.map((tool) => tool.name).sort());
       await chatWith(tokenA, { voice: true }).expect(200);
-      expect(requests[2].tools.some((tool) => tool.name.startsWith('prepare_'))).toBe(false); // a doctor still has no way to book, move or cancel
+      expect(requests[2].tools.filter((tool) => tool.name.startsWith('prepare_')).map((tool) => tool.name)).toEqual(['prepare_schedule_change']); // a doctor still has no way to book, move or cancel: only to prepare a change to their own hours
       await chatWith(receptionToken, { voice: true }).expect(403);
     });
   });
