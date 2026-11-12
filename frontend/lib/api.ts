@@ -1,5 +1,6 @@
 import { API_URL } from './config';
 import { saveSession } from './session';
+import { fetchWithTimeout, RequestTimeoutError } from './fetch-timeout';
 import type { TokenGetter } from './types';
 
 export class ApiError extends Error {
@@ -22,10 +23,12 @@ interface RequestOptions {
   body?: unknown;
   /** A stored token (legacy login) or a function that fetches a fresh one (Clerk). */
   token?: string | TokenGetter | null;
+  /** Give up after this long (the assistant chat uses it so a stuck request ends with a clear message). Off by default. */
+  timeoutMs?: number;
 }
 
 /** Calls the backend API and returns parsed JSON, throwing ApiError with a readable message. */
-export async function api<T>(path: string, { method = 'GET', body, token }: RequestOptions = {}): Promise<T> {
+export async function api<T>(path: string, { method = 'GET', body, token, timeoutMs }: RequestOptions = {}): Promise<T> {
   // Clerk tokens are fetched fresh for each request, because they expire within about a minute.
   let bearer: string | null | undefined;
   try {
@@ -36,15 +39,16 @@ export async function api<T>(path: string, { method = 'GET', body, token }: Requ
 
   let response: Response;
   try {
-    response = await fetch(`${API_URL}${path}`, {
+    response = await fetchWithTimeout(fetch, `${API_URL}${path}`, {
       method,
       headers: {
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-  } catch {
+    }, timeoutMs);
+  } catch (error) {
+    if (error instanceof RequestTimeoutError) throw new ApiError(0, 'This is taking longer than expected, so I stopped waiting. Please try again.');
     throw new ApiError(0, 'Could not reach the server. Check your connection and try again.');
   }
 
