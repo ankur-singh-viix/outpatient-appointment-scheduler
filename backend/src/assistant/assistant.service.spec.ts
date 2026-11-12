@@ -16,7 +16,7 @@ function build(portal: Record<string, unknown>, script: (request: LlmRequest, ro
       return script(request, requests.length - 1);
     },
   };
-  const service = new AssistantService(llm, portal as never, {} as never, {} as never, {} as never, {} as never, {} as never);
+  const service = new AssistantService(llm, portal as never, {} as never, {} as never, {} as never, {} as never, {} as never, {} as never);
   return { service, requests };
 }
 
@@ -98,7 +98,7 @@ describe('AssistantService', () => {
         },
       };
       const portal = { availability: async () => ({ consultationMinutes: 30, slotIntervalMinutes: 30, weekly: [], oneTime: [], overrides: [] }) };
-      const service = new AssistantService(llm, portal as never, {} as never, {} as never, {} as never, {} as never, {} as never);
+      const service = new AssistantService(llm, portal as never, {} as never, {} as never, {} as never, {} as never, {} as never, {} as never);
       await expect(service.chat(doctor, [{ role: 'user', content: 'hi' }])).rejects.toBeInstanceOf(BadGatewayException);
       expect(timeouts).toEqual([60_000, 20_000]); // twice the per-call allowance in all; the third round was never started
     } finally {

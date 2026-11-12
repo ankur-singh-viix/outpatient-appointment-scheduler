@@ -5,7 +5,8 @@ import { AvailabilityChangeService } from '../../doctor-portal/availability-chan
 import { DoctorPortalService } from '../../doctor-portal/doctor-portal.service.js';
 import { DoctorsService } from '../../doctors/doctors.service.js';
 import { addDays, dayOfWeek } from '../../scheduling/calendar.js';
-import { DATE_PROPERTY, ToolInputError, calendarDate, defineTool, objectSchema, type AssistantTool } from './tool-types.js';
+import { ScheduleChangeActionsService } from '../actions/schedule-change-actions.service.js';
+import { DATE_PROPERTY, ToolInputError, calendarDate, clockTime, defineTool, objectSchema, type AssistantTool } from './tool-types.js';
 import { DAY_NAMES, clip, doctorAppointmentView, isActiveStatus } from './format.js';
 
 const MAX_STATS_DAYS = 366;
@@ -15,11 +16,14 @@ export interface DoctorToolDeps {
   changes: AvailabilityChangeService;
   doctors: DoctorsService;
   dataSource: DataSource;
+  scheduleChanges: ScheduleChangeActionsService;
 }
 
 /**
- * The doctor assistant's tools. All read-only, and all about the signed-in doctor: the doctor is found from the verified user inside
- * the existing services (or, for the public directory, from the user's own account), never from anything the model or the person typed.
+ * The doctor assistant's tools. All about the signed-in doctor: the doctor is found from the verified user inside the existing
+ * services (or, for the public directory, from the user's own account), never from anything the model or the person typed. They only
+ * read, except prepare_schedule_change, which still changes nothing: it shows the doctor a confirmation card that only the doctor's
+ * button press (a separate, signed request the model cannot make) can act on.
  */
 export function doctorTools(deps: DoctorToolDeps): AssistantTool[] {
   return [
@@ -164,6 +168,8 @@ export function doctorTools(deps: DoctorToolDeps): AssistantTool[] {
               ...doctorAppointmentView(appointment),
               patientStatus: appointment.followUp.state,
               remindersSent: appointment.followUp.reminders,
+              // The "choose a new time" email: SENT, PENDING (still being delivered, retried automatically), FAILED (could not be delivered), or not yet sent.
+              noticeEmail: appointment.asked?.status ?? (appointment.noticePending ? 'QUEUED' : 'NOT_SENT'),
             })),
           },
           overCapacity: over.map((row) => ({ session: row.label, patientsPerSlot: row.perSlot, slotsOver: row.over?.slots, mostBooked: row.over?.maxBooked })),
@@ -171,6 +177,70 @@ export function doctorTools(deps: DoctorToolDeps): AssistantTool[] {
           noResponseAfterReminders: waiting.noResponse,
           noOtherTimeOpen: waiting.noAlternatives,
         };
+      },
+    }),
+
+    defineTool({
+      name: 'prepare_schedule_change',
+      description:
+        "PREPARES (does not apply) a change to the hours of one of the signed-in doctor's sessions, to shorten or extend it. It previews who is affected and shows the doctor a confirmation card; nothing changes, and no patient is contacted, until the doctor presses Confirm on that card. Name the session by weekday (a weekly session: the change applies from applyFrom onwards, default today) or by date (a one-time session on that date). Give the new start and end time as HH:MM. If the doctor has more than one session that day, also give currentStartTime. Use it only when the doctor clearly asks for a specific change; ask if the day or the new hours are unclear.",
+      parameters: objectSchema(
+        {
+          weekday: { type: 'string', enum: DAY_NAMES, description: 'The weekday of a weekly session, e.g. Monday.' },
+          date: { ...DATE_PROPERTY, description: 'The date of a ONE-TIME session (not for a weekly session).' },
+          currentStartTime: { type: 'string', description: 'The session\'s current start time as HH:MM, only to tell two sessions on the same day apart.' },
+          newStartTime: { type: 'string', description: 'The new start time as HH:MM, 24-hour.' },
+          newEndTime: { type: 'string', description: 'The new end time as HH:MM, 24-hour.' },
+          applyFrom: { ...DATE_PROPERTY, description: 'Weekly sessions only: the first date the new hours apply to. Defaults to today.' },
+        },
+        ['newStartTime', 'newEndTime'],
+      ),
+      input: z
+        .object({
+          weekday: z.enum(DAY_NAMES as [string, ...string[]]).optional(),
+          date: calendarDate.optional(),
+          currentStartTime: clockTime.optional(),
+          newStartTime: clockTime,
+          newEndTime: clockTime,
+          applyFrom: calendarDate.optional(),
+        })
+        .refine((value) => (value.weekday === undefined) !== (value.date === undefined), { message: 'give either weekday (weekly session) or date (one-time session), not both and not neither' }),
+      run: async (context, input) => {
+        if (context.cards.length > 0 || context.preparing) return { error: 'A confirmation card is already waiting for the doctor. Ask them to confirm or cancel it before preparing another.' };
+        context.preparing = true;
+        try {
+          const availability = await deps.portal.availability(context.user);
+          const from = input.applyFrom ?? context.today;
+          let rows: { id: string; startTime: string; endTime: string }[] = input.weekday
+            ? availability.weekly.filter((row) => row.dayOfWeek === DAY_NAMES.indexOf(input.weekday as string) && (!row.effectiveTo || row.effectiveTo >= from))
+            : availability.oneTime.filter((row) => row.date === input.date);
+          if (input.currentStartTime) rows = rows.filter((row) => row.startTime === input.currentStartTime);
+          if (rows.length === 0) {
+            const weeklyThatDay = input.date ? availability.weekly.some((row) => row.dayOfWeek === dayOfWeek(input.date as string)) : false;
+            return {
+              error: weeklyThatDay
+                ? `There is no one-time session on ${input.date}. That day belongs to a weekly session; changing it affects every such weekday from a start date. Ask the doctor whether they mean the weekly session, then use weekday.`
+                : 'No matching session was found. Check get_working_hours for the sessions the doctor has.',
+            };
+          }
+          if (rows.length > 1) return { error: 'More than one session matches. Ask the doctor which one, then pass currentStartTime.', sessions: rows.map((row) => ({ startTime: row.startTime, endTime: row.endTime })) };
+
+          const prepared = await deps.scheduleChanges.prepare(context.user, {
+            availabilityId: rows[0].id,
+            startTime: input.newStartTime,
+            endTime: input.newEndTime,
+            applyFrom: input.weekday ? input.applyFrom : undefined,
+          });
+          if (!prepared.prepared) return { prepared: false, cannotBeApplied: prepared.problems };
+          context.cards.push(prepared.card);
+          return {
+            prepared: true,
+            preview: prepared.summary,
+            note: 'A confirmation card is now on the doctor\'s screen listing every affected patient with alternative times. Nothing has been changed and nobody has been contacted. Never say the change was made: only the doctor pressing Confirm can do that.',
+          };
+        } finally {
+          context.preparing = false;
+        }
       },
     }),
 

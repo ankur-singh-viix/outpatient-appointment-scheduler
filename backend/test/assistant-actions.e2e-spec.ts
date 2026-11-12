@@ -504,7 +504,7 @@ describe('AI assistant, phase 2: confirmed appointment actions (e2e)', () => {
       expect(attempt.outputs[0]).toEqual({ error: 'That tool does not exist.' });
       expect(attempt.card).toBeNull();
       const offered = requests[0].tools.map((tool) => tool.name);
-      expect(offered.some((name) => name.startsWith('prepare_'))).toBe(false);
+      expect(offered.filter((name) => name.startsWith('prepare_'))).toEqual(['prepare_schedule_change']); // never booking, moving or cancelling: only a change to the doctor's own hours (see assistant-schedule-changes.e2e-spec.ts)
       const { card } = await prepare(0, 'prepare_booking', { doctorId: freeDoctor, date: day(3), startTime: '09:00' });
       await confirm(doctorToken, card!.ref).expect(403);
       await dismiss(doctorToken, card!.ref).expect(403);
