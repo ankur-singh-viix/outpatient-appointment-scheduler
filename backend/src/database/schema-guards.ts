@@ -24,3 +24,28 @@ export async function missingSchemaGuards(dataSource: Queryable): Promise<Missin
   const indexes = new Set<string>(((await dataSource.query("SELECT indexname FROM pg_indexes WHERE tablename = 'appointments'")) as { indexname: string }[]).map((row) => row.indexname));
   return GUARDS.filter((guard) => !(guard.kind === 'constraint' ? constraints : indexes).has(guard.name)).map(({ name, consequence }) => ({ name, consequence }));
 }
+
+/** Tables later migrations add, and what stops working without them, so a database that was not migrated is reported at start-up. */
+const REQUIRED_TABLES = [
+  {
+    name: 'assistant_actions',
+    migration: '012_assistant_actions.sql',
+    consequence: 'the assistant cannot prepare bookings, moves or cancellations (they fail as "temporarily unavailable")',
+  },
+];
+
+export interface MissingTable {
+  name: string;
+  migration: string;
+  consequence: string;
+}
+
+/** The required tables this database does not have (an empty list when migrations are up to date). */
+export async function missingTables(dataSource: Queryable): Promise<MissingTable[]> {
+  const missing: MissingTable[] = [];
+  for (const table of REQUIRED_TABLES) {
+    const rows = (await dataSource.query(`SELECT to_regclass('public.${table.name}') AS found`)) as { found: string | null }[];
+    if (!rows[0]?.found) missing.push(table);
+  }
+  return missing;
+}

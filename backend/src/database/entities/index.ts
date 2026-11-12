@@ -1,3 +1,4 @@
+import { AssistantAction } from './assistant-action.entity.js';
 import { ACTIVE_STATUSES, Appointment } from './appointment.entity.js';
 import { Availability } from './availability.entity.js';
 import { Clinic } from './clinic.entity.js';
@@ -19,6 +20,7 @@ import { User } from './user.entity.js';
 export {
   ACTIVE_STATUSES,
   Appointment,
+  AssistantAction,
   Availability,
   Clinic,
   Doctor,
@@ -61,4 +63,5 @@ export const ENTITIES = [
   NotificationPreference,
   ScheduleChange,
   ScheduleChangeAppointment,
+  AssistantAction,
 ];
