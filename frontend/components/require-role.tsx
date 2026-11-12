@@ -8,7 +8,7 @@ import type { Role, Session } from '@/lib/types';
 import { EmptyState, Spinner } from './common';
 
 /**
- * Shows `children` only to signed-in users with the given role. This is for UX only:
+ * Shows `children` only to signed-in users with the given role (or any one of several roles). This is for UX only:
  * the API enforces the same rule on every request.
  */
 export function RequireRole({
@@ -16,10 +16,12 @@ export function RequireRole({
   nextPath,
   children,
 }: {
-  role: Role;
+  role: Role | Role[];
   nextPath: string;
   children: (session: Session) => ReactNode;
 }) {
+  const allowed = Array.isArray(role) ? role : [role];
+  const roleWords = allowed.map((each) => each.toLowerCase()).join(' or ');
   const state = useAuthState();
   const session = useSession();
 
@@ -38,17 +40,17 @@ export function RequireRole({
   if (!session) {
     return (
       <EmptyState title="Please sign in">
-        <p>You need to sign in as a {role.toLowerCase()} to view this page.</p>
+        <p>You need to sign in as a {roleWords} to view this page.</p>
         <Link href={`/login?next=${encodeURIComponent(nextPath)}`} className={buttonVariants({ size: 'lg', className: 'h-10' })}>
           Sign in
         </Link>
       </EmptyState>
     );
   }
-  if (session.user.role !== role) {
+  if (!allowed.includes(session.user.role)) {
     return (
       <EmptyState title="Not available for this account">
-        This page is for {role.toLowerCase()}s. You are signed in as {session.user.name} ({session.user.role.toLowerCase()}).
+        This page is for {roleWords}s. You are signed in as {session.user.name} ({session.user.role.toLowerCase()}).
       </EmptyState>
     );
   }
