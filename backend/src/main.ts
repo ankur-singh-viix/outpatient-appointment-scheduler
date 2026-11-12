@@ -5,7 +5,7 @@ import { AppModule } from './app.module.js';
 import { configureApp } from './app.setup.js';
 import { announceEmailMode } from './auth/email-sender.js';
 import { loadConfig, loadEnvFileIfPresent } from './config.js';
-import { missingSchemaGuards } from './database/schema-guards.js';
+import { missingSchemaGuards, missingTables } from './database/schema-guards.js';
 
 async function bootstrap() {
   loadEnvFileIfPresent();
@@ -17,6 +17,7 @@ async function bootstrap() {
   // Say so loudly if a database protection against double booking is missing (it is added conditionally by migration 007).
   try {
     for (const guard of await missingSchemaGuards(app.get(DataSource))) new Logger('Schema').warn(`Database guard ${guard.name} is missing: ${guard.consequence}.`);
+    for (const table of await missingTables(app.get(DataSource))) new Logger('Schema').warn(`Table ${table.name} is missing (migration ${table.migration} has not been applied): ${table.consequence}. Run "npm run db:migrate".`);
   } catch {
     // The check is advisory; never stop the server for it.
   }
