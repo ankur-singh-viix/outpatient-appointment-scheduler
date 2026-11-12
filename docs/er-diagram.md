@@ -380,4 +380,6 @@ CHECK ((resolved_at IS NULL) = (resolution IS NULL))
 -- partial index idx_sca_open_by_appointment (appointment_id) WHERE resolved_at IS NULL
 ```
 
-`resolution` is `RESCHEDULED` when the patient moved, `CANCELLED` when the appointment was cancelled, `COVERED` when the hours were widened again, and `CLOSED` for any other end.
+`resolution` is `RESCHEDULED` when the patient moved, `CANCELLED` when the appointment was cancelled, `COVERED` when the hours were widened again so the appointment is inside them, and `CLOSED` for any other end.
+
+Extensions use the same two tables, with no new columns. An extension is a `schedule_changes` row with `kind` `EXPAND` (or `MIXED`) and `affected_count` 0. The open rows it releases are closed in the same transaction, so their `resolved_at` equals that change's `created_at` (`now()` is the transaction's start); that is how the history counts how many an extension released. Rows released later by the background sweep carry their own time and are not credited to a change. Rows are only inserted or closed, never deleted, and a row that already has a `resolution` is never changed again.

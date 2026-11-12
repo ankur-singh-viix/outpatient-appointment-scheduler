@@ -8,7 +8,7 @@ import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { api, errorMessage } from '@/lib/api';
+import { ApiError, api, errorMessage } from '@/lib/api';
 import { formatDate, formatTimeRange } from '@/lib/format';
 import { useClinicToday, useQuery } from '@/lib/hooks';
 import { SLOT_CHIP_STYLES, slotStatusText } from '@/lib/slot-display';
@@ -38,19 +38,24 @@ export function UpcomingScheduleCard({ session, version, onChanged }: { session:
   const [target, setTarget] = useState<Target>(null);
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
+  // Set once the server has said which booked appointments a deletion would affect and the doctor presses the button again to agree.
+  const [agreed, setAgreed] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
 
   const data = schedule.data ?? schedule.previous;
   const close = () => {
     setTarget(null);
     setDialogError(null);
+    setAgreed(false);
   };
 
   /** Why the chosen slot or session cannot be cancelled right now, or null when it can. */
   const unavailable = (chosen: NonNullable<Target>): string | null => {
     const { day, session: part, slot } = chosen;
     const booked = slot ? (slot.booked ?? 0) > 0 : bookedIn(part);
-    if (booked) return `${slot ? 'Patients have booked this slot' : 'Patients have booked in this session'}. Cancel their appointments from Appointments first, so each patient is told and refunded.`;
+    // Deleting a whole one-time session is allowed with bookings: they stay booked and the patients are asked to choose a new time.
+    const deletesOneTimeSession = !slot && part.source === 'ONE_TIME' && Boolean(part.availabilityId);
+    if (booked && !deletesOneTimeSession) return `${slot ? 'Patients have booked this slot' : 'Patients have booked in this session'}. Cancel their appointments from Appointments first, so each patient is told and refunded.`;
     if (part.source === 'OVERRIDE') return 'This date has custom hours. Change them under Date exceptions.';
     if (day.exception && !(part.source === 'ONE_TIME' && !slot)) return 'This date already has an exception (a day off or a blocked time). Change it under Date exceptions.';
     return null;
@@ -63,7 +68,7 @@ export function UpcomingScheduleCard({ session, version, onChanged }: { session:
     setDialogError(null);
     try {
       if (!slot && part.source === 'ONE_TIME' && part.availabilityId) {
-        await api(`/doctor-portal/availability/one-time/${part.availabilityId}`, { method: 'DELETE', token: session.accessToken });
+        await api(`/doctor-portal/availability/one-time/${part.availabilityId}${agreed ? '?acknowledge=true' : ''}`, { method: 'DELETE', token: session.accessToken });
         setFeedback({ tone: 'success', message: `Deleted the session on ${formatDate(day.date)}.` });
       } else {
         const [startTime, endTime] = slot ? [slot.startTime, slot.endTime] : [part.startTime, part.endTime];
@@ -74,6 +79,8 @@ export function UpcomingScheduleCard({ session, version, onChanged }: { session:
       schedule.reload();
       onChanged();
     } catch (error) {
+      // Booked appointments would fall outside the hours: nothing was changed, and the doctor may agree and press the button again.
+      if (error instanceof ApiError && error.code === 'ACKNOWLEDGE_REQUIRED') setAgreed(true);
       setDialogError(errorMessage(error));
     } finally {
       setBusy(false);
@@ -215,7 +222,7 @@ export function UpcomingScheduleCard({ session, version, onChanged }: { session:
             slotTarget ? formatTimeRange(slotTarget.startTime, slotTarget.endTime) : formatTimeRange(target.session.startTime, target.session.endTime)
           }`
         }
-        confirmLabel={slotTarget ? 'Cancel slot' : target?.session.source === 'ONE_TIME' ? 'Delete session' : 'Cancel session'}
+        confirmLabel={agreed ? 'Yes, delete it and ask patients' : slotTarget ? 'Cancel slot' : target?.session.source === 'ONE_TIME' ? 'Delete session' : 'Cancel session'}
         busy={busy}
         error={dialogError}
         unavailableReason={

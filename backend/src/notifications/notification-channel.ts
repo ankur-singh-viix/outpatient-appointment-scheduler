@@ -1,5 +1,6 @@
 import type { EmailSender } from '../auth/email-sender.js';
 import type { SendResult } from './delivery-error.js';
+import { renderEmailHtml } from './email-html.js';
 import type { SmsProvider } from './sms-provider.js';
 
 export interface OutgoingMessage {
@@ -22,7 +23,7 @@ export interface NotificationChannel {
 
 export const NOTIFICATION_CHANNELS = Symbol('NOTIFICATION_CHANNELS');
 
-/** Email through the sender the app already uses for sign-up codes (Resend, or the server log in development). */
+/** Email through the sender the app already uses for sign-up codes (Brevo or Resend, or the server log in development), as plain text plus a responsive HTML version. */
 export class EmailChannel implements NotificationChannel {
   readonly name = 'email';
   readonly enabled = true;
@@ -30,7 +31,7 @@ export class EmailChannel implements NotificationChannel {
   constructor(private readonly sender: EmailSender) {}
 
   async send(message: OutgoingMessage): Promise<SendResult> {
-    return (await this.sender.send({ to: message.to, subject: message.subject, text: message.body })) ?? {};
+    return (await this.sender.send({ to: message.to, subject: message.subject, text: message.body, html: renderEmailHtml({ subject: message.subject, body: message.body }) })) ?? {};
   }
 }
 

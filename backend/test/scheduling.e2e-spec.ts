@@ -485,13 +485,25 @@ describe('Wave and stream scheduling (e2e)', () => {
       expect((await activeAppointments(date))[0].availability_id).toBe(availabilityId);
     });
 
-    it('never deletes an appointment when its availability row is replaced', async () => {
+    it('refuses to replace a session that has bookings by changing its hours, keeps the booking and its row, and points to Adjust hours', async () => {
       const date = nextDay();
       await putWeekly([weeklyOn(date)]).expect(200);
+      const availabilityId = (await rows<{ id: string }>('SELECT id FROM availability'))[0].id;
       await book(0, date, '09:00').expect(201);
+      const refused = await putWeekly([weeklyOn(date, { startTime: '08:00', endTime: '13:00' })]).expect(409);
+      expect(refused.body).toMatchObject({ code: 'USE_ADJUST_HOURS' });
+      expect(refused.body.message).toMatch(/Adjust hours/);
+      // Nothing changed: the same row, the same hours, the booking still tied to it.
+      expect(await rows('SELECT id, start_time::text, end_time::text FROM availability')).toEqual([{ id: availabilityId, start_time: '09:00:00', end_time: '12:00:00' }]);
+      expect((await activeAppointments(date))[0]).toMatchObject({ start_time: '09:00:00', availability_id: availabilityId });
+      expect(await rows('SELECT 1 FROM schedule_changes')).toEqual([]);
+    });
+
+    it('a session with no bookings can still be replaced freely', async () => {
+      const date = nextDay();
+      await putWeekly([weeklyOn(date)]).expect(200);
       await putWeekly([weeklyOn(date, { startTime: '08:00', endTime: '13:00' })]).expect(200);
-      const [appointment] = await activeAppointments(date);
-      expect(appointment).toMatchObject({ start_time: '09:00:00', availability_id: null });
+      expect(await rows('SELECT start_time::text AS s, end_time::text AS e FROM availability')).toEqual([{ s: '08:00:00', e: '13:00:00' }]);
     });
 
     it('changing the slot length rewrites the rows that follow it, and refuses while appointments exist', async () => {
@@ -560,15 +572,29 @@ describe('Wave and stream scheduling (e2e)', () => {
       await cancelTime({ date, startTime: '09:30', endTime: '10:00' }).expect(200);
     });
 
-    it('refuses to delete a one-time session that has bookings, and deletes it once they are cancelled', async () => {
+    it('deleting a one-time session that has bookings needs the doctor to agree, keeps the booking, and asks the patient to choose a new time', async () => {
       const date = nextDay();
       await postOneTime({ date, startTime: '09:00', endTime: '10:00' }).expect(201);
       const id = (await rows<{ id: string }>('SELECT id FROM availability'))[0].id;
       const booked = (await book(0, date, '09:00').expect(201)).body;
-      const refused = await http().delete(`/api/doctor-portal/availability/one-time/${id}`).set(as(doctorToken)).expect(409);
-      expect(refused.body.message).toMatch(/1 patient has an appointment/i);
-      expect(await rows('SELECT 1 FROM availability')).toHaveLength(1);
-      await http().post(`/api/doctor-portal/appointments/${booked.id}/cancel`).set(as(doctorToken)).send({ reason: 'Clinic closed' }).expect(200);
+      const asked = await http().delete(`/api/doctor-portal/availability/one-time/${id}`).set(as(doctorToken)).expect(409);
+      expect(asked.body).toMatchObject({ code: 'ACKNOWLEDGE_REQUIRED', affectedCount: 1 });
+      expect(asked.body.message).toMatch(/1 booked appointment would fall outside.*stays booked.*nothing is moved or cancelled/i);
+      expect(await rows('SELECT 1 FROM availability')).toHaveLength(1); // the refusal wrote nothing
+      expect(await rows('SELECT 1 FROM schedule_changes')).toEqual([]);
+
+      const done = (await http().delete(`/api/doctor-portal/availability/one-time/${id}?acknowledge=true`).set(as(doctorToken)).expect(200)).body;
+      expect(done).toMatchObject({ affectedAppointments: 1, patientsAsked: 1 });
+      expect(await rows('SELECT 1 FROM availability')).toEqual([]);
+      // Never cancelled: still booked, with a tracking row waiting for the patient to choose a new time.
+      expect(await rows('SELECT status FROM appointments WHERE id = $1', [booked.id])).toEqual([{ status: 'CONFIRMED' }]);
+      expect(await rows('SELECT s.resolution FROM schedule_change_appointments s WHERE s.appointment_id = $1', [booked.id])).toEqual([{ resolution: null }]);
+    });
+
+    it('deleting a one-time session nobody booked needs no agreement', async () => {
+      const date = nextDay();
+      await postOneTime({ date, startTime: '09:00', endTime: '10:00' }).expect(201);
+      const id = (await rows<{ id: string }>('SELECT id FROM availability'))[0].id;
       await http().delete(`/api/doctor-portal/availability/one-time/${id}`).set(as(doctorToken)).expect(200);
       expect(await rows('SELECT 1 FROM availability')).toEqual([]);
     });

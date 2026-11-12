@@ -37,10 +37,14 @@ export function bookedLoader(manager: EntityManager, doctorId: string, lastDate:
 
 export interface OpenTimeTarget {
   id: string;
-  /** Where the search starts: the target's own date (or today, if that has passed). */
+  /** The target's own date. The search starts here (or today, if that has passed) unless `from` says otherwise. */
   date: string;
   /** Its own start time, never offered back as an alternative. */
   startTime: string;
+  /** Where the search starts instead of the target's own date: a patient is searched from today, so earlier open dates are not missed. */
+  from?: string;
+  /** Resume after this time (a cursor): nothing at or before it is returned. */
+  after?: { date: string; startTime: string };
 }
 
 /**
@@ -58,6 +62,8 @@ export async function openTimes(args: {
   lastDate: string;
   bookedOn: BookedOn;
   limit: number;
+  /** A time that must not be offered whatever the rules say (for example one that overlaps the patient's own other appointment). */
+  exclude?: (date: string, slot: OpenSlot) => boolean;
 }): Promise<Map<string, OpenSlot[]>> {
   const { clock } = args;
   const open = new Map<string, OpenSlot[]>();
@@ -72,9 +78,16 @@ export async function openTimes(args: {
   const result = new Map<string, OpenSlot[]>();
   for (const target of args.targets) {
     const found: OpenSlot[] = [];
-    for (let date = target.date < clock.date ? clock.date : target.date; date <= args.lastDate && found.length < args.limit; date = addDays(date, 1)) {
+    let start = target.from ?? target.date;
+    if (start < clock.date) start = clock.date;
+    if (target.after && target.after.date > start) start = target.after.date;
+    for (let date = start; date <= args.lastDate && found.length < args.limit; date = addDays(date, 1)) {
       for (const slot of await openOn(date)) {
-        if (found.length < args.limit && !(date === target.date && slot.startTime === hhmm(target.startTime))) found.push(slot);
+        if (found.length >= args.limit) break;
+        if (date === target.date && slot.startTime === hhmm(target.startTime)) continue;
+        if (target.after && (date < target.after.date || (date === target.after.date && slot.startTime <= target.after.startTime))) continue;
+        if (args.exclude?.(date, slot)) continue;
+        found.push(slot);
       }
     }
     result.set(target.id, found);

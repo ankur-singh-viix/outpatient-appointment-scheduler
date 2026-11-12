@@ -141,7 +141,7 @@ once with the proposed ones: the hours now and proposed, the slots that appear o
   - new bookings in the removed time stop at once;
   - **every affected appointment stays booked.** Nothing is moved, changed or cancelled automatically;
   - each affected patient is emailed (and texted when SMS is set up) and asked to choose a new time. The link opens the normal
-    reschedule page, where the patient confirms the move themselves; the doctor may suggest one of the open times;
+    reschedule page, where the patient confirms the move themselves; the doctor never chooses a time for a patient: the patient browses every open time, nearest first, and picks;
   - the appointment shows "needs a new time" to the patient and appears under **Appointments outside your hours** for the doctor,
     who can ask again (at most once a day) and, only as a last resort, cancel it with the usual reason, notice and refund.
 - **Recurring sessions** change from a chosen date (today by default). The old row ends the day before and a new row starts, so
@@ -174,12 +174,12 @@ payment. What it *is* comes from the facts around it:
 
 Audit. `schedule_changes` has one row per applied change (who, which row, from when, old and new hours, how many were affected).
 `schedule_change_appointments` has one row per affected appointment: when the patient was asked (`notified_at`), failed attempts,
-the time the doctor suggested, and how it ended (`RESCHEDULED`, `CANCELLED`, `COVERED` when the hours were widened again, `CLOSED`
+how it ended (`RESCHEDULED`, `CANCELLED`, `COVERED` when the hours were widened again, `CLOSED`
 otherwise). Both are written in the same short transaction as the change; neither touches appointments or payments.
 
 Notices. The request sends nothing. A background job (every 30 s, plus one immediate pass after a change) claims up to 200 unsent
 rows with `FOR UPDATE SKIP LOCKED`, skips and closes any appointment that is inside the hours again, skips a patient already asked
-in the last 24 hours (no repeat email when the doctor shrinks again), and puts the rest into the existing notification outbox with
+in the last 24 hours (a notice that is queued or sent counts; one withdrawn unsent does not, see below), and puts the rest into the existing notification outbox with
 a dedupe key per appointment and change. Each patient is queued in its own savepoint, so one failure rolls back only itself: it is
 counted (`attempts`), retried on the next pass, and after 5 tries left visible to the doctor ("Waiting to be asked") who can ask
 manually. The outbox dispatcher then sends; no database transaction is ever open while mail or text goes out. A second server
@@ -188,6 +188,56 @@ running the same job cannot double-send (SKIP LOCKED, then the dedupe key).
 When nothing is open. The patient sees "No other time is open with Dr X right now. Your appointment is still booked", can check
 later, contact the clinic or cancel (the existing cancel and refund rules). The doctor sees the same appointment with no times and
 an **Add a one-time session** shortcut, which opens the one-time form on that date. Recurring schedules are never changed by it.
+
+#### Extending hours: releasing the appointments that were waiting
+
+Extending adds slots, as above, and also settles the bookkeeping a reduction left behind. Whether an appointment "needs a new time" is
+always worked out from the hours as they stand now, so the patient's and the doctor's screens correct themselves the moment the
+hours widen. What needs following up is the record (`schedule_change_appointments`) and any "choose a new time" message that has
+not been sent yet. `reconcileCoverage` (`scheduling/schedule-reconciler.ts`) does that:
+
+- It looks only at one doctor's upcoming, still-active appointments that have an open record or a queued message. For each one
+  that is **inside the hours again** it closes every open record as `COVERED` and cancels the queued message with the reason
+  "Not sent: the appointment is within the doctor's hours again." Nothing else is written: appointments, payments and refunds are
+  never read or changed, and a record that already ended (`RESCHEDULED`, `CANCELLED`, `CLOSED`, `COVERED`) is never touched, so a
+  completed reschedule or cancellation is never reverted.
+- **When it runs.** Inside the transaction that applies an extension (or the extending side of a mixed change), under the doctor
+  row lock, so nobody sees the new hours with the old bookkeeping. It also runs when hours widen any other way: adding a one-time
+  session (the usual fix for a patient with nowhere to go), saving wider weekly hours, replacing a date with different hours, or
+  removing a date exception. A background sweep (each notifier pass) repeats it for every doctor with something waiting, so a
+  request too large to finish, or hours changed outside the application, are still caught within about 30 seconds.
+- **Partial extension.** Only appointments the new hours really reach are released; the rest stay recorded, stay queued or asked,
+  and keep waiting. "Reach" means inside one working session of that date and clear of any blocked time, the same rule that
+  stranded them. A recurring extension from a later date releases only appointments from that date on.
+- **Preview.** An extension that would release anyone lists them ("N booked appointments are back inside your hours") before the
+  doctor saves; the result of a save, and the history list, report how many were released.
+- **Notices.** Besides withdrawing queued messages, the sender re-checks a "choose a new time" message just before sending: if the
+  appointment has since been moved, cancelled, has started, or is inside the hours again, the message is cancelled instead of sent.
+  A message withdrawn unsent does not count as having asked the patient, so a later reduction asks them as normal; one that was
+  sent still prevents a repeat within 24 hours.
+
+Patients who were told are told again, once: if a patient had actually received the "choose a new time" email, the release also queues a "No action needed, your appointment is valid again" message for them (dedupe key per request that was sent, so it is never repeated; it is checked again just before sending and cancelled if the appointment has since been moved, cancelled or is outside the hours again). A patient who was never told gets nothing. Email goes out through Brevo or Resend (see the README, "Email with Brevo").
+
+Edge cases:
+
+| Case | Result |
+| --- | --- |
+| Patient already asked (email sent), then hours widen | Record becomes `COVERED`; the email already sent stays sent and the appointment is unchanged. The patient's page says nothing is needed. |
+| Hours widen before the patient was asked | Record `COVERED`; nobody is asked. |
+| Reduction, then an extension that reaches only some of them | Those are released; the rest keep waiting and are asked as usual. |
+| Patient already rescheduled, or the appointment was cancelled | Record keeps `RESCHEDULED` / `CANCELLED`; the new appointment and any payment are untouched. |
+| Date exception: a day off, or a blocked time that covers the appointment | Not released: the exception rules that date whatever the weekly hours say. |
+| Date exception removed, or replacement hours that cover it | Released. |
+| Extension from a later date, or a one-time session | Only appointments on dates the new hours apply to. |
+| Unpaid hold that has lapsed, or an appointment that has already started | Not considered (nothing is waiting on them). |
+| Same change sent twice, or sent while bookings arrive | The doctor row lock serialises them: one applies, the other is refused as "changed since you previewed"; each booking lands before or after. |
+| Extension racing the background notifier | The extension waits for the batch the notifier holds (the notifier never waits on it), then closes the record and withdraws the message the notifier just queued. |
+| Message being sent at the very instant of the extension | Cannot be recalled; the record is still `COVERED`. The only case in which a released patient can receive the email. |
+| Extension, then a reduction again | New records are created; the earlier `COVERED` ones stay as history. |
+
+History is never rewritten: `schedule_changes` and `schedule_change_appointments` rows are only inserted or closed, never deleted.
+No schema change was needed: `EXPAND` and `COVERED` were already allowed by migration 011. The number released by a given extension
+is read from the records closed in the same transaction (`resolved_at` equals the change's `created_at`).
 
 #### Algorithms (inputs, outputs, cost, why)
 
@@ -200,6 +250,7 @@ D = distinct dates, B = batch size.
 | Outside-hours list for the doctor | Keyset scan in date order, 500 rows per step, stop when the page is full | O(page + log N) per page | O(500) | No offset, no repeats or gaps, memory does not grow with N |
 | Alternatives for a patient | Walk days forward from the appointment's date, cut slots with the booking engine, stop at 8 (patient) or 5 (doctor list); booked windows are read 7 days at a time and cached | O(days visited x S), early exit | O(limit + days cached) | Lazy and bounded; the database still decides at confirm, so a stale list can only lose a race, never overbook |
 | Notifying | Batch of 200 with SKIP LOCKED, set-based updates (`unnest`) | O(B log N) per pass | O(B) | Predictable load, restart-safe, parallel-safe |
+| Releasing after an extension | Per doctor: keyset scan of upcoming active appointments that have an open record or queued message, 500 per step (4 steps in a request, 10 in the sweep); exact hours check; one `UPDATE` to close records and one to cancel queued messages | O(W log N + W x S), W = waiting appointments | O(500) | Starts from the two small partial indexes, never the whole table; the hours check is the one used everywhere else; anything beyond a request's cap is finished by the sweep |
 | Matching patients to slots | None, on purpose | n/a | n/a | Patients choose and confirm; the unique seat index and the doctor lock enforce capacity, so no assignment algorithm is needed |
 
 #### Manual testing
@@ -268,7 +319,7 @@ database; old code ignores it). Rollback: `DROP TABLE schedule_change_appointmen
 
 - `schedule_changes`: the audit row of each applied change of an availability row's hours.
 - `schedule_change_appointments`: one row per appointment a reduction left outside the hours, primary key
-  `(change_id, appointment_id)`, with `notified_at`, `attempts`, the doctor's suggested time, and `resolved_at` + `resolution`
+  `(change_id, appointment_id)`, with `notified_at`, `attempts` (the old `proposed_*` columns are unused and always empty), and `resolved_at` + `resolution`
   (a CHECK keeps the two in step). A partial index holds only the rows still waiting to be asked, and another finds the open rows of
   one appointment. Changes made before this migration have no rows; their appointments are still found and shown, because the
   doctor's list is worked out from the current hours.
@@ -310,9 +361,13 @@ Run from `backend/`: `npm test` (unit) and `npm run test:e2e` (real PostgreSQL t
   - concurrency: 8 patients booking one WAVE slot of 3 (exactly 3 succeed, 5 get 409, seats 1-3), 8 patients on one STREAM
     slot (exactly 1), and two WAVE slots raced at once.
 
+- **Extending after a reduction** (`test/expand-resolve.e2e-spec.ts`, `findRestored` in `elastic.spec.ts`): releasing notified and un-notified patients, partial extension, never reverting a reschedule or cancellation, payments untouched, history kept, date exceptions, recurring and one-time sessions, repeated reductions and the 24-hour rule, the sender's last-moment check, two identical extensions at once, an extension racing the notifier (held mid-batch), and the background sweep. `scripts/load-elastic.mjs` also runs a 400-patient reduction followed by partial and full extensions with bookings racing them and a held outbox.
+
 Checked by mutation: breaking seat assignment, the capacity count, precedence order, the partial-day block, the STREAM
 capacity rule or effective dates makes tests fail. Removing the doctor lock from booking (both places) makes the WAVE race
 tests fail on every run; the STREAM race still passes then, because the database's unique index alone stops a double booking.
+
+The same walk-through for extending hours, with the database checks, is in `docs/manual-test-expansion.md`.
 
 ## 8. Known limitations
 
@@ -320,7 +375,10 @@ tests fail on every run; the STREAM race still passes then, because the database
 - A patient is not emailed or texted when a doctor cancels. They see it on their dashboard and in their history.
 - A patient reschedules with the **same doctor** only. Another doctor is a new booking.
 - No cancellation deadline (for example "at least 2 hours before"). Anything that has not started can be changed.
-- Changing availability never moves or cancels existing appointments. When hours are reduced they stay booked until each patient chooses a new time (see above).
+- Changing availability never moves or cancels existing appointments. When hours are reduced they stay booked until each patient chooses a new time (see above). When hours are extended again, patients who were waiting and are covered are released without any action.
+- A message already being sent when the hours are extended cannot be recalled, so that one patient may still receive a "choose a new time" email for an appointment that no longer needs it.
+- An appointment that straddles two adjacent sessions counts as outside the hours, even though the working time is continuous.
+- Records for appointments the patient moved or the doctor cancelled are closed by the next background pass (up to about 30 seconds), not instantly.
 - A date exception that replaces the day cannot choose its own mode or slot length; it inherits them (see section 2).
 - Lowering `capacity_per_slot` below the patients already booked keeps those bookings; the slot simply shows no free seats.
 - There is no arrival or queue rule inside a WAVE slot: patients share the slot, and the order within it is up to the clinic.

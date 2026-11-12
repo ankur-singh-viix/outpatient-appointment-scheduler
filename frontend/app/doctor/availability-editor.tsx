@@ -7,9 +7,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
-import { api, errorMessage } from '@/lib/api';
+import { ApiError, api, errorMessage } from '@/lib/api';
 import { formatDate, formatTime, formatTimeRange } from '@/lib/format';
 import { useClinicToday } from '@/lib/hooks';
+import { restoredNote } from './restored-note';
 import type { DoctorAvailability, Session } from '@/lib/types';
 
 interface EditorProps {
@@ -18,7 +19,7 @@ interface EditorProps {
   onSaved: () => void;
 }
 
-type Feedback = { tone: 'success' | 'error'; message: string } | null;
+type Feedback = { tone: 'success' | 'error'; message: string; /** Present when the doctor can agree to what the server described and send the same request again. */ confirm?: () => void } | null;
 
 const selectClass =
   'h-9 w-full rounded-lg border border-input bg-card px-2.5 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50';
@@ -148,15 +149,17 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
 
-  const run = async (work: () => Promise<unknown>, success: string) => {
+  const run = async (work: (acknowledge: boolean) => Promise<{ restoredAppointments?: number }>, success: string, acknowledge = false) => {
     setBusy(true);
     setFeedback(null);
     try {
-      await work();
-      setFeedback({ tone: 'success', message: success });
+      const done = await work(acknowledge);
+      setFeedback({ tone: 'success', message: `${success}${restoredNote(done.restoredAppointments)}` });
       onSaved();
     } catch (error) {
-      setFeedback({ tone: 'error', message: errorMessage(error) });
+      // Booked appointments would fall outside the hours: nothing was changed, and the doctor may agree and send it again.
+      const needsAgreement = error instanceof ApiError && error.code === 'ACKNOWLEDGE_REQUIRED';
+      setFeedback({ tone: 'error', message: errorMessage(error), ...(needsAgreement ? { confirm: () => void run(work, success, true) } : {}) });
     } finally {
       setBusy(false);
     }
@@ -171,14 +174,14 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
           ? { date, isAvailable: false, startTime, endTime, reason: reason || undefined }
           : { date, isAvailable: true, startTime, endTime, capacity, reason: reason || undefined };
     void run(
-      () => api('/doctor-portal/availability/overrides', { method: 'PUT', token: session.accessToken, body }),
+      (acknowledge) => api<{ restoredAppointments?: number }>('/doctor-portal/availability/overrides', { method: 'PUT', token: session.accessToken, body: acknowledge ? { ...body, acknowledge: true } : body }),
       `Saved the exception for ${formatDate(date)}.`,
     );
   };
 
   const remove = (overrideDate: string) =>
     run(
-      () => api(`/doctor-portal/availability/overrides/${overrideDate}`, { method: 'DELETE', token: session.accessToken }),
+      (acknowledge) => api<{ restoredAppointments?: number }>(`/doctor-portal/availability/overrides/${overrideDate}${acknowledge ? '?acknowledge=true' : ''}`, { method: 'DELETE', token: session.accessToken }),
       `Removed the exception for ${formatDate(overrideDate)}. Regular weekly hours apply again.`,
     );
 
@@ -194,7 +197,20 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {feedback && <Alert tone={feedback.tone}>{feedback.message}</Alert>}
+        {feedback && (
+          <Alert
+            tone={feedback.tone}
+            action={
+              feedback.confirm && (
+                <Button size="sm" variant="outline" disabled={busy} onClick={feedback.confirm}>
+                  Confirm and continue
+                </Button>
+              )
+            }
+          >
+            {feedback.message}
+          </Alert>
+        )}
 
         <form onSubmit={submit} className="grid gap-4 rounded-lg bg-muted p-4 sm:grid-cols-2">
           <div className="space-y-2">

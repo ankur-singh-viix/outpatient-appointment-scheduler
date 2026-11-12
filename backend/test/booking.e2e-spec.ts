@@ -331,6 +331,8 @@ describe('Appointment booking (e2e)', () => {
     });
 
     it('replaces the weekly schedule and rejects overlapping sessions', async () => {
+      // Sessions with upcoming bookings are changed with Adjust hours, not replaced here, so start from no upcoming appointments.
+      await db.query("UPDATE appointments SET status = 'CANCELLED', cancel_reason = 'test cleanup', cancelled_at = now(), cancelled_by_user_id = booked_by_user_id WHERE status IN ('PENDING','CONFIRMED')");
       await http()
         .put('/api/doctor-portal/availability/weekly')
         .set('Authorization', `Bearer ${doctorToken}`)
@@ -669,6 +671,8 @@ describe('Appointment booking (e2e)', () => {
           expect(full.body.message).toMatch(/capacity/);
           await book(otherPatientToken, date, '14:00').expect(201); // the afternoon session is separate
         } finally {
+          // The schedule is restored below; a session with bookings cannot be replaced, so the test's own bookings are cleared first.
+          await db.query("UPDATE appointments SET status = 'CANCELLED', cancel_reason = 'test cleanup', cancelled_at = now(), cancelled_by_user_id = booked_by_user_id WHERE status IN ('PENDING','CONFIRMED')");
           await put(original).expect(200);
         }
       });

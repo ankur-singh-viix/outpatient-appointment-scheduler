@@ -12,7 +12,7 @@ import { api } from '@/lib/api';
 import { clinicClock, formatDate, formatTimeRange, relativeDay, timeAgo } from '@/lib/format';
 import { useAutoRefresh, useClinicToday, useNow, useQuery } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
-import type { DoctorAppointment, Session } from '@/lib/types';
+import type { AttentionSummary, DoctorAppointment, Session } from '@/lib/types';
 
 const NEW_BOOKING_MS = 24 * 60 * 60 * 1000;
 const isActive = (a: DoctorAppointment) => a.status === 'CONFIRMED' || a.status === 'PENDING';
@@ -37,7 +37,12 @@ function Overview({ session }: { session: Session }) {
   const appointments = useQuery(`doctor-overview:${session.user.id}`, () =>
     api<DoctorAppointment[]>('/doctor-portal/appointments?scope=upcoming', { token: session.accessToken }),
   );
-  useAutoRefresh(appointments.reload);
+  const attention = useQuery(`doctor-attention:${session.user.id}`, () => api<AttentionSummary>('/doctor-portal/attention', { token: session.accessToken }));
+  useAutoRefresh(() => {
+    appointments.reload();
+    attention.reload();
+  });
+  const needs = attention.data ?? attention.previous;
 
   const list = appointments.data ?? appointments.previous;
   const active = (list ?? []).filter(isActive);
@@ -69,6 +74,24 @@ function Overview({ session }: { session: Session }) {
         <Stat label="Upcoming" value={list ? upcoming.length : '–'} />
         <Stat label="New (24 h)" value={list ? newlyBooked.length : '–'} highlight={newlyBooked.length > 0} />
       </div>
+
+      {needs && needs.needsNewTime > 0 && (
+        <section aria-labelledby="attention-heading" className="space-y-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-950">
+          <h2 id="attention-heading" className="text-lg font-semibold">
+            Needs your attention
+          </h2>
+          <ul className="space-y-1 text-sm">
+            <li>
+              {needs.needsNewTime} {needs.needsNewTime === 1 ? 'patient still needs' : 'patients still need'} to choose a new time. They stay booked until they do.
+            </li>
+            {needs.noResponse > 0 && <li>{needs.noResponse} did not respond to either reminder: consider contacting them yourself.</li>}
+            {needs.noAlternatives > 0 && <li>{needs.noAlternatives} {needs.noAlternatives === 1 ? 'has' : 'have'} no other time open: adding a session helps them.</li>}
+          </ul>
+          <Link href="/doctor/availability" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+            Review these appointments
+          </Link>
+        </section>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr]">
         <section aria-labelledby="today-heading" className="space-y-3">
