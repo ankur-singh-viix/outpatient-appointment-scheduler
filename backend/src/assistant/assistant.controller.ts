@@ -5,6 +5,7 @@ import { AuthGuard } from '../auth/auth.guard.js';
 import type { AuthUser } from '../auth/auth.types.js';
 import { ZodValidationPipe } from '../common/zod-validation.pipe.js';
 import { AssistantActionsService } from './actions/assistant-actions.service.js';
+import { ScheduleChangeActionsService } from './actions/schedule-change-actions.service.js';
 import { AssistantService } from './assistant.service.js';
 
 /** The recent conversation. Strict: the client can send nothing but turns of text (no ids, no roles to act as, no tool results). */
@@ -28,6 +29,8 @@ const chatSchema = z
 const refParam = z.strictObject({ id: z.uuid() });
 // The confirm and dismiss calls carry NO body: what runs is what was stored when the card was made, never what the browser sends.
 const noBody = z.strictObject({}).optional();
+// A doctor's schedule-change card is confirmed with its signed token (the token is the whole request; nothing else is accepted).
+const scheduleTokenSchema = z.strictObject({ token: z.string().min(20).max(2000) });
 
 /** The text assistant for doctors and patients. Who is asking, and in which role, comes only from the verified sign-in. */
 @Controller('assistant')
@@ -37,6 +40,7 @@ export class AssistantController {
   constructor(
     private readonly assistant: AssistantService,
     private readonly actions: AssistantActionsService,
+    private readonly scheduleChanges: ScheduleChangeActionsService,
   ) {}
 
   @Post('chat')
@@ -64,6 +68,18 @@ export class AssistantController {
   @Roles('PATIENT')
   confirm(@CurrentUser() user: AuthUser, @Param(new ZodValidationPipe(refParam)) params: z.infer<typeof refParam>, @Body(new ZodValidationPipe(noBody)) _body: z.infer<typeof noBody>) {
     return this.actions.confirm(user, params.id);
+  }
+
+  /**
+   * The doctor pressed Confirm on a schedule-change card. Doctors only. The body is the card's signed token and nothing else: it works
+   * only for the doctor it was made for, before it expires, and only while the schedule is still as it was previewed. The change then
+   * runs through the existing availability-change service, which re-checks everything, records the audit row and queues the patient notices.
+   */
+  @Post('schedule-changes/confirm')
+  @HttpCode(200)
+  @Roles('DOCTOR')
+  confirmScheduleChange(@CurrentUser() user: AuthUser, @Body(new ZodValidationPipe(scheduleTokenSchema)) body: z.infer<typeof scheduleTokenSchema>) {
+    return this.scheduleChanges.confirm(user, body.token);
   }
 
   /** The patient pressed Cancel on the card: it can no longer be confirmed. */

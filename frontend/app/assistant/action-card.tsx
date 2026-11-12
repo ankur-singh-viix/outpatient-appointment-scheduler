@@ -44,6 +44,8 @@ export function ActionCardView({ card, session, onOutcome }: { card: ActionCard;
   const open = stage.name === 'ready';
   const secondsLeft = useSecondsUntil(card.expiresAt, open);
   const lapsed = open && secondsLeft === 0;
+  /** A doctor's schedule change: confirmed with its signed token, and safe to ask again (the server answers a repeat; it never re-runs it). */
+  const isSchedule = card.kind === 'SCHEDULE_CHANGE';
 
   const finish = (next: Stage, say?: string) => {
     setStage(next);
@@ -55,10 +57,26 @@ export function ActionCardView({ card, session, onOutcome }: { card: ActionCard;
     busy.current = true;
     setStage({ name: 'working', what: 'confirm' });
     try {
+      if (isSchedule) {
+        const done = await api<{ message: string }>('/assistant/schedule-changes/confirm', { method: 'POST', token: session.accessToken, body: { token: card.ref } });
+        finish({ name: 'done', message: done.message }, done.message);
+        return;
+      }
       const result = await api<ActionResult>(`/assistant/actions/${card.ref}/confirm`, { method: 'POST', token: session.accessToken, body: {} });
       if (result.outcome === 'PAYMENT_REQUIRED' && result.checkout) setStage({ name: 'payment', result });
       else finish({ name: 'done', message: result.message }, result.message);
     } catch (error) {
+      if (isSchedule) {
+        // The request may or may not have reached the server. Asking again is safe: a change that already went through is reported, never repeated.
+        if (error instanceof ApiError && (error.status === 0 || error.status >= 500)) {
+          setStage({ name: 'unsure', message: 'The connection was interrupted, so I cannot tell whether the change went through. Nothing is repeated if you try again.', checking: false });
+          return;
+        }
+        const text = errorMessage(error);
+        const expired = error instanceof ApiError && error.status === 410;
+        finish({ name: 'ended', tone: 'error', message: text }, expired ? 'That confirmation expired, so nothing was changed.' : `It was not done: ${text}`);
+        return;
+      }
       // The request may have reached the server and even finished: a lost connection, a server error, or an action the server says is
       // still running or uncertain. Never guess and never press again: ask the server what the records show.
       if (error instanceof ApiError && (error.status === 0 || error.status >= 500 || error.code === 'ACTION_UNCERTAIN' || error.code === 'ACTION_IN_PROGRESS' || error.code === 'ACTION_ALREADY_DONE')) {
@@ -94,6 +112,11 @@ export function ActionCardView({ card, session, onOutcome }: { card: ActionCard;
 
   const dismiss = async () => {
     if (busy.current || stage.name !== 'ready') return;
+    if (isSchedule) {
+      // Nothing is stored for a schedule change until it is confirmed, so there is nothing to cancel on the server; the card just closes.
+      finish({ name: 'ended', tone: 'info', message: 'Cancelled. Nothing was changed.' }, 'Okay, I have not changed anything.');
+      return;
+    }
     busy.current = true;
     setStage({ name: 'working', what: 'dismiss' });
     try {
@@ -178,12 +201,14 @@ export function ActionCardView({ card, session, onOutcome }: { card: ActionCard;
           </p>
           {!stage.checking && (
             <div className="flex flex-wrap gap-2">
-              <Button size="lg" variant="outline" className="h-9" onClick={() => void checkStatus()}>
-                Check again
+              <Button size="lg" variant="outline" className="h-9" onClick={() => (isSchedule ? setStage({ name: 'ready' }) : void checkStatus())}>
+                {isSchedule ? 'Try again' : 'Check again'}
               </Button>
-              <Link href="/appointments" className={buttonVariants({ variant: 'outline', size: 'lg', className: 'h-9' })}>
-                Open My Appointments
-              </Link>
+              {!isSchedule && (
+                <Link href="/appointments" className={buttonVariants({ variant: 'outline', size: 'lg', className: 'h-9' })}>
+                  Open My Appointments
+                </Link>
+              )}
             </div>
           )}
         </div>

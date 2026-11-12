@@ -7,7 +7,8 @@ import type { AssistantActionKind } from '../../database/entities/assistant-acti
 export interface ActionCard {
   /** The confirmation reference. Honoured only for the patient it was made for, once, before it expires. */
   ref: string;
-  kind: AssistantActionKind;
+  /** A patient's BOOK / RESCHEDULE / CANCEL, or a doctor's SCHEDULE_CHANGE (whose `ref` is a signed token, not a stored row). */
+  kind: AssistantActionKind | 'SCHEDULE_CHANGE';
   title: string;
   lines: { label: string; value: string }[];
   /** One short extra sentence, such as what happens to a payment. */

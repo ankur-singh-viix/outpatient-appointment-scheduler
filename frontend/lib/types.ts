@@ -535,7 +535,8 @@ export interface AssistantReply {
 export interface ActionCard {
   /** Sent back, alone, to confirm or dismiss it. It works only for this patient, once, before it expires. */
   ref: string;
-  kind: 'BOOK' | 'RESCHEDULE' | 'CANCEL';
+  /** SCHEDULE_CHANGE is a doctor's shortened or extended session; its `ref` is a signed token confirmed at /assistant/schedule-changes/confirm. */
+  kind: 'BOOK' | 'RESCHEDULE' | 'CANCEL' | 'SCHEDULE_CHANGE';
   title: string;
   lines: { label: string; value: string }[];
   note?: string;
