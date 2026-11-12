@@ -60,11 +60,12 @@ export class DoctorPortalService {
     private readonly changes: AvailabilityChangeService,
   ) {}
 
-  /** Appointments booked with the signed-in doctor. `upcoming` = today onwards. */
-  async appointments(user: AuthUser, scope: 'upcoming' | 'all') {
+  /** Appointments booked with the signed-in doctor. `upcoming` = today onwards. `date` limits it to one day (and wins over `scope`). */
+  async appointments(user: AuthUser, scope: 'upcoming' | 'all', date?: string) {
     const doctor = await this.profileFor(user);
     const where: FindOptionsWhere<Appointment> = { doctorId: doctor.id };
-    if (scope === 'upcoming') where.appointmentDate = MoreThanOrEqual(clinicNow(this.config.clinicTimezone).date);
+    if (date) where.appointmentDate = date;
+    else if (scope === 'upcoming') where.appointmentDate = MoreThanOrEqual(clinicNow(this.config.clinicTimezone).date);
 
     const rows = await this.appointmentsRepo.find({
       where,
@@ -72,6 +73,29 @@ export class DoctorPortalService {
       order: { appointmentDate: 'ASC', startTime: 'ASC' },
     });
     return rows.map(toDoctorAppointment);
+  }
+
+  /**
+   * How many of the signed-in doctor's appointments there are from `from` to `to` (inclusive), by status, plus the busiest day.
+   * Counts only: read-only, for the doctor's own appointments.
+   */
+  async appointmentStatistics(user: AuthUser, from: string, to: string) {
+    const doctor = await this.profileFor(user);
+    const byStatusRows: { status: string; n: number }[] = await this.dataSource.query(
+      'SELECT status, count(*)::int AS n FROM appointments WHERE doctor_id = $1 AND appointment_date BETWEEN $2::date AND $3::date GROUP BY status',
+      [doctor.id, from, to],
+    );
+    const days: { date: string; active: number }[] = await this.dataSource.query(
+      `SELECT appointment_date::text AS date, count(*) FILTER (WHERE status IN ('PENDING', 'CONFIRMED'))::int AS active
+         FROM appointments WHERE doctor_id = $1 AND appointment_date BETWEEN $2::date AND $3::date
+        GROUP BY appointment_date ORDER BY active DESC, appointment_date LIMIT 1`,
+      [doctor.id, from, to],
+    );
+    const byStatus: Record<string, number> = {};
+    for (const row of byStatusRows) byStatus[row.status] = row.n;
+    const total = byStatusRows.reduce((sum, row) => sum + row.n, 0);
+    const busiest = days[0] && days[0].active > 0 ? days[0] : null;
+    return { from, to, total, byStatus, active: (byStatus.PENDING ?? 0) + (byStatus.CONFIRMED ?? 0), busiestDay: busiest };
   }
 
   /**
