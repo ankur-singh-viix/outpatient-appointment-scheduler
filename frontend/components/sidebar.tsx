@@ -4,7 +4,10 @@ import { LogOutIcon } from 'lucide-react';
 import Link from 'next/link';
 import { useNavItems } from '@/components/nav';
 import { signOutEverywhere, useSession } from '@/lib/session';
+import type { Role } from '@/lib/types';
 import { cn } from '@/lib/utils';
+
+const WORKSPACE: Partial<Record<Role, string>> = { DOCTOR: 'Doctor', RECEPTIONIST: 'Reception', ADMIN: 'Admin', PATIENT: 'Patient' };
 
 /** The persistent left workspace sidebar. Large screens only; phones get the strip under the top bar instead. */
 export function Sidebar() {
@@ -14,11 +17,11 @@ export function Sidebar() {
 
   return (
     <aside
-      aria-label={`${session.user.role === 'DOCTOR' ? 'Doctor' : 'Patient'} workspace`}
+      aria-label={`${WORKSPACE[session.user.role] ?? 'Patient'} workspace`}
       className="sticky top-14 hidden h-[calc(100dvh-3.5rem)] w-60 shrink-0 self-start flex-col bg-sidebar p-3 text-sidebar-foreground lg:flex"
     >
       <p className="px-3 pt-3 pb-2 text-xs font-semibold tracking-widest text-sidebar-foreground/75 uppercase">
-        {session.user.role === 'DOCTOR' ? 'Doctor workspace' : 'Patient workspace'}
+        {WORKSPACE[session.user.role] ?? 'Patient'} workspace
       </p>
       <nav aria-label="Workspace">
         <ul className="space-y-1">

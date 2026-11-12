@@ -8,6 +8,7 @@ import { ClerkAuthController } from './clerk-auth.controller.js';
 import { ClerkIdentityGuard } from './clerk-identity.guard.js';
 import { EMAIL_SENDER, createEmailSender } from './email-sender.js';
 import { IdentityModule } from './identity.module.js';
+import { InvitationService } from './invitation.service.js';
 import { SignupService } from './signup.service.js';
 
 @Module({
@@ -25,7 +26,9 @@ import { SignupService } from './signup.service.js';
     SignupService,
     ClerkAccountService,
     ClerkIdentityGuard,
+    InvitationService,
     { provide: EMAIL_SENDER, useFactory: () => createEmailSender(loadConfig()) },
   ],
+  exports: [InvitationService],
 })
 export class AuthModule {}

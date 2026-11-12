@@ -485,13 +485,25 @@ describe('Wave and stream scheduling (e2e)', () => {
       expect((await activeAppointments(date))[0].availability_id).toBe(availabilityId);
     });
 
-    it('never deletes an appointment when its availability row is replaced', async () => {
+    it('refuses to replace a session that has bookings by changing its hours, keeps the booking and its row, and points to Adjust hours', async () => {
       const date = nextDay();
       await putWeekly([weeklyOn(date)]).expect(200);
+      const availabilityId = (await rows<{ id: string }>('SELECT id FROM availability'))[0].id;
       await book(0, date, '09:00').expect(201);
+      const refused = await putWeekly([weeklyOn(date, { startTime: '08:00', endTime: '13:00' })]).expect(409);
+      expect(refused.body).toMatchObject({ code: 'USE_ADJUST_HOURS' });
+      expect(refused.body.message).toMatch(/Adjust hours/);
+      // Nothing changed: the same row, the same hours, the booking still tied to it.
+      expect(await rows('SELECT id, start_time::text, end_time::text FROM availability')).toEqual([{ id: availabilityId, start_time: '09:00:00', end_time: '12:00:00' }]);
+      expect((await activeAppointments(date))[0]).toMatchObject({ start_time: '09:00:00', availability_id: availabilityId });
+      expect(await rows('SELECT 1 FROM schedule_changes')).toEqual([]);
+    });
+
+    it('a session with no bookings can still be replaced freely', async () => {
+      const date = nextDay();
+      await putWeekly([weeklyOn(date)]).expect(200);
       await putWeekly([weeklyOn(date, { startTime: '08:00', endTime: '13:00' })]).expect(200);
-      const [appointment] = await activeAppointments(date);
-      expect(appointment).toMatchObject({ start_time: '09:00:00', availability_id: null });
+      expect(await rows('SELECT start_time::text AS s, end_time::text AS e FROM availability')).toEqual([{ s: '08:00:00', e: '13:00:00' }]);
     });
 
     it('changing the slot length rewrites the rows that follow it, and refuses while appointments exist', async () => {
@@ -503,6 +515,102 @@ describe('Wave and stream scheduling (e2e)', () => {
       await book(0, date, '09:00').expect(201);
       await http().put('/api/doctor-portal/settings').set(as(doctorToken)).send({ consultationMinutes: 30 }).expect(409);
       await db.query('UPDATE doctors SET consultation_minutes = 30');
+    });
+  });
+  describe('upcoming schedule and cancelling a time', () => {
+    interface ScheduleDay {
+      date: string;
+      exception: { isAvailable: boolean; startTime: string | null; endTime: string | null; reason: string | null } | null;
+      sessions: { source: string; mode: string; slotMinutes: number; capacityPerSlot: number; booked: number; remaining: number; slots: SlotView[] }[];
+    }
+    const schedule = async (days = 10) => ((await http().get('/api/doctor-portal/schedule').query({ days }).set(as(doctorToken)).expect(200)).body as { days: ScheduleDay[] }).days;
+    const cancelTime = (body: Record<string, unknown>) => http().post('/api/doctor-portal/schedule/cancel').set(as(doctorToken)).send(body);
+
+    it('lists the sessions of each date with every slot, its status and its places left', async () => {
+      const date = nextDay();
+      await putWeekly([weeklyOn(date, { startTime: '09:00', endTime: '10:00' })]).expect(200); // STREAM, 30 minutes
+      await postOneTime({ date: addDays(date, 1), startTime: '14:00', endTime: '15:00', schedulingMode: 'WAVE', capacityPerSlot: 3 }).expect(201);
+      await book(0, addDays(date, 1), '14:00').expect(201);
+      const days = await schedule(21);
+      const stream = days.find((day) => day.date === date)!;
+      expect(stream.sessions).toMatchObject([{ source: 'WEEKLY', mode: 'STREAM', slotMinutes: 30, capacityPerSlot: 1, slots: [{ startTime: '09:00', status: 'AVAILABLE' }, { startTime: '09:30', status: 'AVAILABLE' }] }]);
+      const wave = days.find((day) => day.date === addDays(date, 1))!;
+      expect(wave.sessions).toMatchObject([
+        { source: 'ONE_TIME', mode: 'WAVE', capacityPerSlot: 3, slots: [{ startTime: '14:00', status: 'AVAILABLE', booked: 1, remaining: 2 }, { startTime: '14:30', remaining: 3 }] },
+      ]);
+    });
+
+    it('shows a day off or a blocked time as an exception, and needs a doctor', async () => {
+      const date = nextDay();
+      await putWeekly([weeklyOn(date)]).expect(200);
+      await putOverride({ date, isAvailable: false, startTime: '10:00', endTime: '11:00', reason: 'Surgery' }).expect(200);
+      const day = (await schedule(21)).find((entry) => entry.date === date)!;
+      expect(day.exception).toMatchObject({ isAvailable: false, startTime: '10:00', endTime: '11:00', reason: 'Surgery' });
+      expect(day.sessions[0].slots.map((slot) => slot.startTime)).not.toContain('10:00');
+      await http().get('/api/doctor-portal/schedule').set(as(patientTokens[0])).expect(403);
+      await http().get('/api/doctor-portal/schedule').query({ days: 0 }).set(as(doctorToken)).expect(400);
+    });
+
+    it('cancels one slot by blocking it, leaving the rest of the day bookable', async () => {
+      const date = nextDay();
+      await putWeekly([weeklyOn(date)]).expect(200);
+      await cancelTime({ date, startTime: '10:00', endTime: '10:30' }).expect(200);
+      expect(await starts(date)).toEqual(['09:00', '09:30', '10:30', '11:00', '11:30']);
+      await book(0, date, '10:00').expect(400);
+      expect((await rows('SELECT reason FROM schedule_overrides WHERE override_date = $1', [date]))[0]).toEqual({ reason: 'Cancelled by doctor' });
+    });
+
+    it('refuses to cancel a time patients have booked, and tells the doctor what to do first', async () => {
+      const date = nextDay();
+      await postOneTime({ date, startTime: '09:00', endTime: '10:00', schedulingMode: 'WAVE', capacityPerSlot: 2 }).expect(201);
+      await book(0, date, '09:00').expect(201);
+      await book(1, date, '09:00').expect(201);
+      const refused = await cancelTime({ date, startTime: '09:00', endTime: '09:30' }).expect(409);
+      expect(refused.body.message).toMatch(/2 patients have an appointment.*Cancel those appointments/i);
+      expect(await rows('SELECT 1 FROM schedule_overrides')).toEqual([]);
+      // The other slot has nobody booked, so it can be cancelled.
+      await cancelTime({ date, startTime: '09:30', endTime: '10:00' }).expect(200);
+    });
+
+    it('deleting a one-time session that has bookings needs the doctor to agree, keeps the booking, and asks the patient to choose a new time', async () => {
+      const date = nextDay();
+      await postOneTime({ date, startTime: '09:00', endTime: '10:00' }).expect(201);
+      const id = (await rows<{ id: string }>('SELECT id FROM availability'))[0].id;
+      const booked = (await book(0, date, '09:00').expect(201)).body;
+      const asked = await http().delete(`/api/doctor-portal/availability/one-time/${id}`).set(as(doctorToken)).expect(409);
+      expect(asked.body).toMatchObject({ code: 'ACKNOWLEDGE_REQUIRED', affectedCount: 1 });
+      expect(asked.body.message).toMatch(/1 booked appointment would fall outside.*stays booked.*nothing is moved or cancelled/i);
+      expect(await rows('SELECT 1 FROM availability')).toHaveLength(1); // the refusal wrote nothing
+      expect(await rows('SELECT 1 FROM schedule_changes')).toEqual([]);
+
+      const done = (await http().delete(`/api/doctor-portal/availability/one-time/${id}?acknowledge=true`).set(as(doctorToken)).expect(200)).body;
+      expect(done).toMatchObject({ affectedAppointments: 1, patientsAsked: 1 });
+      expect(await rows('SELECT 1 FROM availability')).toEqual([]);
+      // Never cancelled: still booked, with a tracking row waiting for the patient to choose a new time.
+      expect(await rows('SELECT status FROM appointments WHERE id = $1', [booked.id])).toEqual([{ status: 'CONFIRMED' }]);
+      expect(await rows('SELECT s.resolution FROM schedule_change_appointments s WHERE s.appointment_id = $1', [booked.id])).toEqual([{ resolution: null }]);
+    });
+
+    it('deleting a one-time session nobody booked needs no agreement', async () => {
+      const date = nextDay();
+      await postOneTime({ date, startTime: '09:00', endTime: '10:00' }).expect(201);
+      const id = (await rows<{ id: string }>('SELECT id FROM availability'))[0].id;
+      await http().delete(`/api/doctor-portal/availability/one-time/${id}`).set(as(doctorToken)).expect(200);
+      expect(await rows('SELECT 1 FROM availability')).toEqual([]);
+    });
+
+    it('does not replace an existing exception, and rejects bad input', async () => {
+      const date = nextDay();
+      await putWeekly([weeklyOn(date)]).expect(200);
+      await putOverride({ date, isAvailable: false, reason: 'Conference' }).expect(200);
+      const refused = await cancelTime({ date, startTime: '10:00', endTime: '10:30' }).expect(409);
+      expect(refused.body.message).toMatch(/already has an exception/i);
+      expect((await rows('SELECT reason FROM schedule_overrides'))[0]).toEqual({ reason: 'Conference' });
+      const other = nextDay();
+      await cancelTime({ date: other, startTime: '11:00', endTime: '10:00' }).expect(400);
+      await cancelTime({ date: addDays(today, -1), startTime: '10:00', endTime: '11:00' }).expect(400);
+      await cancelTime({ date: other, startTime: '10:00', endTime: '11:00', extra: true }).expect(400);
+      await http().post('/api/doctor-portal/schedule/cancel').set(as(patientTokens[0])).send({ date: other, startTime: '10:00', endTime: '11:00' }).expect(403);
     });
   });
 });

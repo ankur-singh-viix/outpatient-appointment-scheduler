@@ -10,6 +10,8 @@ export interface AppointmentFacts {
   startTime: string;
   /** Clinic-local end time, HH:MM. Optional so older callers keep working; the message shows a range when it is known. */
   endTime?: string;
+  /** The doctor's specialty, shown in the patient's confirmation when known. */
+  specialty?: string;
 }
 
 export interface MessageContent {
@@ -44,7 +46,7 @@ function when(facts: Pick<AppointmentFacts, 'date' | 'startTime' | 'endTime'>): 
 }
 
 const details = (facts: AppointmentFacts) =>
-  `Doctor: ${facts.doctorName}\nWhen: ${when(facts)}\nWhere: ${facts.clinicName}, ${facts.clinicAddress}`;
+  `Doctor: ${facts.doctorName}\n${facts.specialty ? `Specialty: ${facts.specialty}\n` : ''}When: ${when(facts)}\nWhere: ${facts.clinicName}, ${facts.clinicAddress}`;
 const patientDetails = (facts: AppointmentFacts) =>
   `Patient: ${facts.patientName}\nWhen: ${when(facts)}\nWhere: ${facts.clinicName}, ${facts.clinicAddress}`;
 
@@ -60,7 +62,7 @@ export function bookingConfirmed(facts: AppointmentFacts, audience: Audience = '
   return {
     kind: 'booking-confirmed',
     subject: `Appointment confirmed: ${facts.doctorName}, ${when(facts)}`,
-    body: `Hi ${facts.patientName},\n\nYour appointment is confirmed.\n\n${details(facts)}\n\nYou can cancel or reschedule from your CareSlot dashboard.`,
+    body: `Hi ${facts.patientName},\n\nYour appointment is confirmed. Your booking is complete and your place is reserved.\n\n${details(facts)}\n\nYou can cancel or reschedule from your CareSlot dashboard.`,
     sms: clip(`CareSlot: appointment confirmed with ${facts.doctorName}, ${when(facts)}.`),
   };
 }
@@ -101,8 +103,84 @@ export function bookingCancelled(
   return {
     kind: 'booking-cancelled',
     subject: `Appointment cancelled: ${facts.doctorName}, ${when(facts)}`,
-    body: `Hi ${facts.patientName},\n\nYour appointment was cancelled by ${who}.\nReason: ${input.reason}\n\n${details(facts)}${input.refundNote ? `\n\n${input.refundNote}` : ''}`,
+    body: `Hi ${facts.patientName},\n\nYour appointment was cancelled by ${who}.\nReason: ${input.reason}\n\n${details(facts)}${input.refundNote ? `\n\n${input.refundNote}` : ''}\n\nWhat you can do next: if you still need to be seen, book another time from your CareSlot dashboard. Your original appointment will not go ahead.`,
     sms: clip(`CareSlot: your appointment with ${facts.doctorName}, ${when(facts)}, was cancelled${input.cancelledBy === 'DOCTOR' ? ' by the doctor' : ''}.`),
+  };
+}
+
+/**
+ * The doctor's hours changed and this appointment no longer fits them. Nothing has been moved or cancelled: the booking stands until
+ * the patient chooses a new time. `link` opens the existing reschedule page, where the patient sees every open time, nearest first, and
+ * confirms the move themselves. The doctor never chooses a time for them.
+ */
+export function needsNewTime(facts: AppointmentFacts, input: { link: string }): MessageContent {
+  return {
+    kind: 'needs-new-time',
+    subject: `Please choose a new time: ${facts.doctorName}, ${when(facts)}`,
+    body:
+      `Hi ${facts.patientName},
+
+${facts.doctorName} has changed their hours, and your appointment is no longer within them. ` +
+      `Nothing has been cancelled or moved: your booking stays as it is until you choose a new time.
+
+${details(facts)}
+
+` +
+      `Choose a new time here (you will be asked to confirm the move): ${input.link}
+
+` +
+      'If none of the available times suit you, you can cancel from your appointments page or contact the clinic.',
+    sms: clip(`CareSlot: ${facts.doctorName} changed their hours; your ${when(facts)} appointment needs a new time. Choose one: ${input.link}`),
+  };
+}
+
+/** The most automatic reminders a patient who has not chosen a new time gets, after the first message. */
+export const MAX_NEW_TIME_REMINDERS = 2;
+
+/** A reminder that the appointment still needs a new time. Calm and clear: nothing happens to the booking if the patient does nothing. */
+export function needsNewTimeReminder(facts: AppointmentFacts, input: { link: string; number: number }): MessageContent {
+  return {
+    kind: 'needs-new-time-reminder',
+    subject: `Reminder ${input.number} of ${MAX_NEW_TIME_REMINDERS}: please choose a new time, ${facts.doctorName}, ${when(facts)}`,
+    body:
+      `Hi ${facts.patientName},\n\n` +
+      `This is a reminder that ${facts.doctorName} changed their hours and your appointment is no longer within them. Your booking is still in place and nothing has been cancelled or moved, but it needs a new time.\n\n` +
+      `${details(facts)}\n\n` +
+      `Choose a new time here (you will be asked to confirm the move): ${input.link}\n\n` +
+      'If no available time suits you, you can contact the clinic or cancel from your appointments page.',
+    sms: clip(`CareSlot: reminder ${input.number} of ${MAX_NEW_TIME_REMINDERS}. Your ${when(facts)} appointment with ${facts.doctorName} still needs a new time. Choose one: ${input.link}`),
+  };
+}
+
+/** Sent once to a patient who had no other time to choose from, when suitable availability appears. */
+export function newTimesAvailable(facts: AppointmentFacts, input: { link: string }): MessageContent {
+  return {
+    kind: 'new-times-available',
+    subject: `New times are open for your appointment with ${facts.doctorName}`,
+    body:
+      `Hi ${facts.patientName},\n\n` +
+      `Good news: ${facts.doctorName} now has times you can move your appointment to. Your current appointment is still booked, exactly as it was, and nothing has been reserved or changed for you.\n\n` +
+      `${details(facts)}\n\n` +
+      `See the open times and choose one (you will be asked to confirm): ${input.link}\n\n` +
+      'Places are given to whoever confirms first, so choose soon if one of these suits you.',
+    sms: clip(`CareSlot: new times are open with ${facts.doctorName} for your ${when(facts)} appointment. Choose one: ${input.link}`),
+  };
+}
+
+/**
+ * The patient was asked to choose a new time because the doctor's hours changed (see needsNewTime), and then the hours changed
+ * back so the original appointment fits again. Only sent to a patient who actually received that request.
+ */
+export function appointmentRestored(facts: AppointmentFacts): MessageContent {
+  return {
+    kind: 'appointment-restored',
+    subject: `No action needed: your appointment is valid again, ${facts.doctorName}, ${when(facts)}`,
+    body:
+      `Hi ${facts.patientName},\n\n` +
+      `Earlier we asked you to choose a new time because ${facts.doctorName} changed their hours. Their hours have changed again, and your original appointment is valid again.\n\n` +
+      `${details(facts)}\n\n` +
+      'You do not need to do anything or reschedule: your appointment stays booked exactly as it was. If the time no longer suits you, you can still reschedule or cancel from your CareSlot dashboard.',
+    sms: clip(`CareSlot: no action needed. Your ${when(facts)} appointment with ${facts.doctorName} is valid again.`),
   };
 }
 

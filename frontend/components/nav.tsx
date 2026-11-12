@@ -1,6 +1,6 @@
 'use client';
 
-import { BellIcon, CalendarCheckIcon, CalendarClockIcon, LayoutDashboardIcon, ReceiptIcon, SearchIcon, UserRoundIcon, type LucideIcon } from 'lucide-react';
+import { BellIcon, CalendarCheckIcon, CalendarClockIcon, CalendarPlusIcon, LayoutDashboardIcon, UsersIcon, ReceiptIcon, SearchIcon, UserRoundIcon, type LucideIcon } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import { useHydrated, useSession } from '@/lib/session';
 import type { Role } from '@/lib/types';
@@ -35,6 +35,8 @@ const NAV: Partial<Record<Role, NavDefinition[]>> = {
     { href: '/doctor/availability', label: 'Availability', icon: CalendarClockIcon, match: (p) => p.startsWith('/doctor/availability') },
     { href: '/doctor/profile', label: 'Profile', icon: UserRoundIcon, match: (p) => p.startsWith('/doctor/profile') },
   ],
+  ADMIN: [{ href: '/admin/receptionists', label: 'Receptionists', icon: UsersIcon, match: (p) => p.startsWith('/admin') }],
+  RECEPTIONIST: [{ href: '/reception', label: 'Front desk', icon: CalendarPlusIcon, match: (p) => p.startsWith('/reception') }],
 };
 
 /** The workspace navigation for the signed-in user's role. Empty when signed out (or for roles without a workspace yet). */

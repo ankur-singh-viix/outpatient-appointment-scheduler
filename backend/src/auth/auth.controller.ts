@@ -6,6 +6,7 @@ import { CurrentUser, Roles } from './auth.decorators.js';
 import { AuthGuard } from './auth.guard.js';
 import { AuthService } from './auth.service.js';
 import type { AuthUser } from './auth.types.js';
+import { InvitationService } from './invitation.service.js';
 import { SignupService, type ProfileInput } from './signup.service.js';
 
 const loginSchema = z.strictObject({
@@ -24,6 +25,11 @@ const verifySchema = z.strictObject({
   code: z.string().regex(/^\d{6}$/, 'must be the 6-digit code from your email'),
 });
 const resendSchema = z.strictObject({ email: emailSchema });
+const inviteTokenSchema = z.strictObject({ token: z.string().min(20).max(2000) });
+const acceptInviteSchema = z.strictObject({
+  token: z.string().min(20).max(2000),
+  password: z.string().min(8, 'must be at least 8 characters').max(128, 'must be at most 128 characters'),
+});
 
 
 @Controller('auth')
@@ -31,6 +37,7 @@ export class AuthController {
   constructor(
     private readonly auth: AuthService,
     private readonly signup: SignupService,
+    private readonly invitations: InvitationService,
   ) {}
 
   @Post('login')
@@ -66,6 +73,20 @@ export class AuthController {
     @Body(new ZodValidationPipe(profileSchema)) body: z.infer<typeof profileSchema>,
   ) {
     return this.signup.completeProfile(authorization, body as ProfileInput);
+  }
+
+  /** Whose account an invitation link is for (so the page can greet them), or why the link is no good. */
+  @Post('invitations/inspect')
+  @HttpCode(200)
+  inspectInvitation(@Body(new ZodValidationPipe(inviteTokenSchema)) body: z.infer<typeof inviteTokenSchema>) {
+    return this.invitations.inspect(body.token);
+  }
+
+  /** Sets the password for an invited receptionist (once) and signs them in. */
+  @Post('invitations/accept')
+  @HttpCode(200)
+  acceptInvitation(@Body(new ZodValidationPipe(acceptInviteSchema)) body: z.infer<typeof acceptInviteSchema>) {
+    return this.invitations.accept(body.token, body.password);
   }
 
   @Get('me')

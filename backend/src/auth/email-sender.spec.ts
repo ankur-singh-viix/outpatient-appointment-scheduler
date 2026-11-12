@@ -1,5 +1,6 @@
-import { DeliveryError } from '../notifications/delivery-error.js';
-import { createEmailSender, DisabledEmailSender, LogEmailSender, ResendEmailSender } from './email-sender.js';
+import { Logger } from '@nestjs/common';
+import { DeliveryError, isRetryable } from '../notifications/delivery-error.js';
+import { announceEmailMode, createEmailSender, DisabledEmailSender, LogEmailSender, ResendEmailSender } from './email-sender.js';
 
 const message = { to: 'a@b.com', subject: 'Your code', text: 'Code 123456' };
 
@@ -92,5 +93,48 @@ describe('createEmailSender', () => {
 
   it('a disabled sender refuses to send', async () => {
     await expect(new DisabledEmailSender().send()).rejects.toThrow(/not configured/);
+  });
+
+  it('a disabled sender fails for good, with the reason, so the outbox does not keep retrying', async () => {
+    const sender = createEmailSender({ ...base, emailDelivery: 'disabled', emailProblem: 'RESEND_API_KEY is not set.' });
+    const error = await sender.send(message).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(DeliveryError);
+    expect(error).toMatchObject({ retryable: false, code: 'email_not_configured', message: 'Email is not configured: RESEND_API_KEY is not set.' });
+    expect(isRetryable(error)).toBe(false);
+  });
+});
+
+describe('LogEmailSender (development only)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('prints the message marked [DEV ONLY] and says plainly that nothing was sent', async () => {
+    const log = vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    const result = await new LogEmailSender().send({ to: 'a@b.com', subject: 'Invitation', text: 'Open https://site.example/invite?token=abc' });
+    expect(result).toEqual({ mode: 'dev-log' }); // so callers can tell it from a real send
+    expect(String(log.mock.calls[0][0])).toMatch(/^\[DEV ONLY\] NOT sent by email\./);
+    expect(String(log.mock.calls[0][0])).toContain('https://site.example/invite?token=abc'); // the link is the point, in development
+  });
+});
+
+describe('announceEmailMode', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('says which mode is active, marks development, and never prints a key or an address', () => {
+    const log = vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+    announceEmailMode({ emailDelivery: 'log', emailFrom: 'CareSlot <a@clinic.example>', emailProblem: null });
+    expect(String(warn.mock.calls[0][0])).toMatch(/^\[DEV ONLY\].*NOT sent/);
+
+    announceEmailMode({ emailDelivery: 'resend', emailFrom: 'CareSlot <onboarding@resend.dev>', emailProblem: null });
+    expect(String(log.mock.calls[0][0])).toMatch(/testing sender/);
+    announceEmailMode({ emailDelivery: 'resend', emailFrom: 'CareSlot <a@clinic.example>', emailProblem: null });
+    expect(String(log.mock.calls[1][0])).toBe('Email delivery: Resend.');
+
+    announceEmailMode({ emailDelivery: 'disabled', emailFrom: 'x', emailProblem: 'RESEND_API_KEY is not set.' });
+    expect(String(error.mock.calls[0][0])).toMatch(/Email delivery is OFF: RESEND_API_KEY is not set\./);
+    const everything = [...log.mock.calls, ...warn.mock.calls, ...error.mock.calls].flat().join('\n');
+    expect(everything).not.toMatch(/a@clinic\.example|re_/);
   });
 });

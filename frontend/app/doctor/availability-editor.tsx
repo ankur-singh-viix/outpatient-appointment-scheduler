@@ -7,11 +7,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
-import { api, errorMessage } from '@/lib/api';
-import { DAY_LONG, WEEK_ORDER, formatDate, formatTime, formatTimeRange } from '@/lib/format';
+import { ApiError, api, errorMessage } from '@/lib/api';
+import { formatDate, formatTime, formatTimeRange } from '@/lib/format';
 import { useClinicToday } from '@/lib/hooks';
-import type { DoctorAvailability, Session, WeeklyHours } from '@/lib/types';
-import { SessionFields, plainSettings, selectClass, sessionBody } from './availability-sessions';
+import { restoredNote } from './restored-note';
+import type { DoctorAvailability, Session } from '@/lib/types';
 
 interface EditorProps {
   session: Session;
@@ -19,7 +19,10 @@ interface EditorProps {
   onSaved: () => void;
 }
 
-type Feedback = { tone: 'success' | 'error'; message: string } | null;
+type Feedback = { tone: 'success' | 'error'; message: string; /** Present when the doctor can agree to what the server described and send the same request again. */ confirm?: () => void } | null;
+
+const selectClass =
+  'h-9 w-full rounded-lg border border-input bg-card px-2.5 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50';
 
 const SLOT_LENGTHS = [10, 15, 20, 30, 45, 60];
 const SLOT_INTERVALS = [5, 10, 15, 20, 30, 45, 60];
@@ -82,7 +85,7 @@ export function SlotLengthEditor({ session, availability, onSaved }: EditorProps
     <Card className="[--card-spacing:--spacing(5)]">
       <CardHeader>
         <CardTitle as="h2" className="text-lg font-semibold">
-          Appointment length and slot interval
+          Default appointment length and slot interval
         </CardTitle>
         <CardDescription>
           Each appointment has a start and an end time. The interval is how often a new slot starts: when it is shorter than the
@@ -134,113 +137,6 @@ export function SlotLengthEditor({ session, availability, onSaved }: EditorProps
   );
 }
 
-/** Edits the recurring weekly schedule (the `availability` table). */
-export function WeeklyHoursEditor({ session, availability, onSaved }: EditorProps) {
-  const [rows, setRows] = useState<WeeklyHours[]>(availability.weekly);
-  const [saving, setSaving] = useState(false);
-  const [feedback, setFeedback] = useState<Feedback>(null);
-
-  const update = (index: number, patch: Partial<WeeklyHours>) =>
-    setRows((current) => current.map((row, i) => (i === index ? { ...row, ...patch } : row)));
-  const remove = (index: number) => setRows((current) => current.filter((_, i) => i !== index));
-  const add = (dayOfWeek: number) =>
-    setRows((current) => [
-      ...current,
-      { dayOfWeek, startTime: '09:00', endTime: '13:00', effectiveFrom: null, effectiveTo: null, ...plainSettings(availability.consultationMinutes) },
-    ]);
-
-  const save = async () => {
-    setSaving(true);
-    setFeedback(null);
-    try {
-      const saved = await api<DoctorAvailability>('/doctor-portal/availability/weekly', {
-        method: 'PUT',
-        token: session.accessToken,
-        // Every field spelled out: a row read from the server also carries an id and empty dates the server does not take back.
-        body: { hours: rows.map((row) => ({ dayOfWeek: row.dayOfWeek, ...sessionBody(row, availability.consultationMinutes) })) },
-      });
-      setRows(saved.weekly); // the server's tidied-up order, without remounting the editor (which would wipe the message below)
-      setFeedback({ tone: 'success', message: 'Weekly hours saved. Patients now see the updated slots.' });
-      onSaved();
-    } catch (error) {
-      setFeedback({ tone: 'error', message: errorMessage(error) });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Card className="[--card-spacing:--spacing(5)]">
-      <CardHeader>
-        <CardTitle as="h2" className="text-lg font-semibold">
-          Weekly working hours
-        </CardTitle>
-        <CardDescription>
-          Each session is cut into slots. <strong className="font-semibold text-foreground">Stream</strong> gives every slot exactly one patient (an
-          optional cap limits the whole session). <strong className="font-semibold text-foreground">Wave</strong> lets several patients share a slot, up to the
-          number you set, and each slot is counted on its own. Stream sessions of the default {availability.consultationMinutes}-minute length also follow
-          the slot interval above ({availability.slotIntervalMinutes} min); every other session uses back-to-back slots.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {feedback && <Alert tone={feedback.tone}>{feedback.message}</Alert>}
-
-        <div className="divide-y">
-          {WEEK_ORDER.map((day) => {
-            const sessions = rows.map((row, index) => ({ row, index })).filter(({ row }) => row.dayOfWeek === day);
-            return (
-              <div key={day} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-start">
-                <p className="w-28 shrink-0 pt-2 text-sm font-semibold text-foreground">{DAY_LONG[day]}</p>
-                <div className="flex-1 space-y-2">
-                  {sessions.length === 0 && <p className="pt-2 text-sm text-muted-foreground">Not working</p>}
-                  {sessions.map(({ row, index }) => (
-                    <div key={index} className="space-y-2 rounded-lg border bg-card p-3">
-                      <div className="flex flex-wrap items-center gap-2">
-                      <Input
-                        type="time"
-                        aria-label={`${DAY_LONG[day]} start time`}
-                        value={row.startTime}
-                        onChange={(e) => update(index, { startTime: e.target.value })}
-                        className="h-9 w-32"
-                      />
-                      <span className="text-muted-foreground">to</span>
-                      <Input
-                        type="time"
-                        aria-label={`${DAY_LONG[day]} end time`}
-                        value={row.endTime}
-                        onChange={(e) => update(index, { endTime: e.target.value })}
-                        className="h-9 w-32"
-                      />
-                      <Button type="button" variant="destructive" size="sm" onClick={() => remove(index)}>
-                        Remove
-                      </Button>
-                      </div>
-                      <SessionFields
-                        label={`${DAY_LONG[day]} session ${sessions.findIndex((entry) => entry.index === index) + 1}`}
-                        value={row}
-                        onChange={(patch) => update(index, patch)}
-                        fallbackMinutes={availability.consultationMinutes}
-                        defaultCapacity={availability.defaultCapacity}
-                      />
-                    </div>
-                  ))}
-                </div>
-                <Button type="button" variant="link" onClick={() => add(day)} className="justify-start sm:mt-0.5">
-                  + Add session
-                </Button>
-              </div>
-            );
-          })}
-        </div>
-
-        <Button size="lg" onClick={save} disabled={saving}>
-          {saving ? 'Saving…' : 'Save weekly hours'}
-        </Button>
-      </CardContent>
-    </Card>
-  );
-}
-
 /** Adds one-off exceptions for specific dates (the `schedule_overrides` table). */
 export function DateOverridesEditor({ session, availability, onSaved }: EditorProps) {
   const today = useClinicToday();
@@ -253,15 +149,17 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
 
-  const run = async (work: () => Promise<unknown>, success: string) => {
+  const run = async (work: (acknowledge: boolean) => Promise<{ restoredAppointments?: number }>, success: string, acknowledge = false) => {
     setBusy(true);
     setFeedback(null);
     try {
-      await work();
-      setFeedback({ tone: 'success', message: success });
+      const done = await work(acknowledge);
+      setFeedback({ tone: 'success', message: `${success}${restoredNote(done.restoredAppointments)}` });
       onSaved();
     } catch (error) {
-      setFeedback({ tone: 'error', message: errorMessage(error) });
+      // Booked appointments would fall outside the hours: nothing was changed, and the doctor may agree and send it again.
+      const needsAgreement = error instanceof ApiError && error.code === 'ACKNOWLEDGE_REQUIRED';
+      setFeedback({ tone: 'error', message: errorMessage(error), ...(needsAgreement ? { confirm: () => void run(work, success, true) } : {}) });
     } finally {
       setBusy(false);
     }
@@ -276,14 +174,14 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
           ? { date, isAvailable: false, startTime, endTime, reason: reason || undefined }
           : { date, isAvailable: true, startTime, endTime, capacity, reason: reason || undefined };
     void run(
-      () => api('/doctor-portal/availability/overrides', { method: 'PUT', token: session.accessToken, body }),
+      (acknowledge) => api<{ restoredAppointments?: number }>('/doctor-portal/availability/overrides', { method: 'PUT', token: session.accessToken, body: acknowledge ? { ...body, acknowledge: true } : body }),
       `Saved the exception for ${formatDate(date)}.`,
     );
   };
 
   const remove = (overrideDate: string) =>
     run(
-      () => api(`/doctor-portal/availability/overrides/${overrideDate}`, { method: 'DELETE', token: session.accessToken }),
+      (acknowledge) => api<{ restoredAppointments?: number }>(`/doctor-portal/availability/overrides/${overrideDate}${acknowledge ? '?acknowledge=true' : ''}`, { method: 'DELETE', token: session.accessToken }),
       `Removed the exception for ${formatDate(overrideDate)}. Regular weekly hours apply again.`,
     );
 
@@ -299,7 +197,20 @@ export function DateOverridesEditor({ session, availability, onSaved }: EditorPr
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {feedback && <Alert tone={feedback.tone}>{feedback.message}</Alert>}
+        {feedback && (
+          <Alert
+            tone={feedback.tone}
+            action={
+              feedback.confirm && (
+                <Button size="sm" variant="outline" disabled={busy} onClick={feedback.confirm}>
+                  Confirm and continue
+                </Button>
+              )
+            }
+          >
+            {feedback.message}
+          </Alert>
+        )}
 
         <form onSubmit={submit} className="grid gap-4 rounded-lg bg-muted p-4 sm:grid-cols-2">
           <div className="space-y-2">

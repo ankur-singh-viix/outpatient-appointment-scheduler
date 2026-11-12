@@ -18,6 +18,8 @@
     "db:seed": "nest build && node dist/database/seed.js",
     "db:migrate:prod": "node dist/database/migrate.js",
     "db:seed:prod": "node dist/database/seed.js",
+    "admin:create": "nest build && node dist/database/create-admin.js",
+    "admin:create:prod": "node dist/database/create-admin.js",
     "lint": "oxlint --type-aware src/ test/",
     "test": "vitest run",
     "test:watch": "vitest",

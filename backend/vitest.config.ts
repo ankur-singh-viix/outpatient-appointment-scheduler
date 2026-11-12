@@ -8,5 +8,7 @@ export default defineConfig({
     globals: true,
     root: './',
     include: ['**/*.spec.ts'],
+    // Automated tests must never reach a real email provider, whatever is in the developer's backend/.env.
+    env: { BREVO_API_KEY: '', RESEND_API_KEY: '', EMAIL_PROVIDER: '' },
   },
 });

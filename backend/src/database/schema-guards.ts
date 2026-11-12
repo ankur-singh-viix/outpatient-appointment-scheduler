@@ -1,0 +1,26 @@
+/** Anything that can run a query: the application's DataSource, or a stand-in in a test. */
+export interface Queryable {
+  query: (sql: string) => Promise<unknown>;
+}
+
+export interface MissingGuard {
+  name: string;
+  /** What can go wrong without it, in plain words. */
+  consequence: string;
+}
+
+/** The database-level protections for appointments. The booking code enforces the same rules under the doctor lock; these make them hold even if something else writes. */
+const GUARDS: { name: string; kind: 'constraint' | 'index'; consequence: string }[] = [
+  { name: 'uq_active_slot_seat', kind: 'index', consequence: 'two active appointments could share one seat of a slot' },
+  { name: 'ck_appointment_seat', kind: 'constraint', consequence: 'an appointment could hold a seat number beyond its slot capacity' },
+  { name: 'ck_appointment_cancelled_by', kind: 'constraint', consequence: 'a cancellation could be recorded without who cancelled it' },
+  // Migration 007 adds this one only where the database allows it (it needs the btree_gist extension and no overlapping old data).
+  { name: 'ex_appointments_no_overlap', kind: 'constraint', consequence: 'overlapping appointments for one seat are prevented by the booking code only, not by the database' },
+];
+
+/** The guards that are missing from this database (an empty list when all are present). */
+export async function missingSchemaGuards(dataSource: Queryable): Promise<MissingGuard[]> {
+  const constraints = new Set<string>(((await dataSource.query("SELECT conname FROM pg_constraint WHERE conrelid = 'appointments'::regclass")) as { conname: string }[]).map((row) => row.conname));
+  const indexes = new Set<string>(((await dataSource.query("SELECT indexname FROM pg_indexes WHERE tablename = 'appointments'")) as { indexname: string }[]).map((row) => row.indexname));
+  return GUARDS.filter((guard) => !(guard.kind === 'constraint' ? constraints : indexes).has(guard.name)).map(({ name, consequence }) => ({ name, consequence }));
+}

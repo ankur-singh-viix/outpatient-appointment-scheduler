@@ -6,6 +6,7 @@ import { useEffect } from 'react';
 import { Alert, Spinner } from '@/components/common';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { useClerkState } from '@/lib/clerk-state';
+import { homeFor } from '@/lib/home';
 import { signOutEverywhere, useAuthState, useSession } from '@/lib/session';
 
 /** Sends a freshly signed-in person to the right place: their home, the setup steps, or back to sign in. */
@@ -16,7 +17,7 @@ export function ContinueRedirect() {
   const clerk = useClerkState();
 
   useEffect(() => {
-    if (state === 'signed-in' && session) router.replace(session.user.role === 'DOCTOR' ? '/doctor' : '/dashboard');
+    if (state === 'signed-in' && session) router.replace(homeFor(session.user.role));
     else if (state === 'needs-profile' || state === 'needs-link') router.replace('/onboarding');
     else if (state === 'signed-out') router.replace('/login');
   }, [state, session, router]);

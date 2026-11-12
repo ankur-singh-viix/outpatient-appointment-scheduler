@@ -132,6 +132,8 @@ export interface PatientAppointment {
   createdAt: string;
   /** While the booking waits for payment: when the held slot is released. Null otherwise. */
   holdExpiresAt: string | null;
+  /** The doctor changed their hours and this booking no longer falls inside them. It is still booked until the patient moves it. */
+  needsNewTime?: boolean;
   /** Payment, receipt and refunds, or null when the visit was free. */
   payment: PaymentSummary | null;
   doctor: { id: string; name: string; specialty: string; consultationFee: number };
@@ -284,6 +286,9 @@ export interface AvailabilityRow {
   capacityPerSlot: number;
   effectiveFrom: string | null;
   effectiveTo: string | null;
+  /** Wave rows, from the server: the most patients in any upcoming slot, and the slots holding more than the capacity allows (null when none). */
+  maxBooked?: number;
+  overCapacity?: { slots: number; maxBooked: number } | null;
 }
 
 export interface WeeklyHours extends AvailabilityRow {
@@ -304,6 +309,206 @@ export interface DateOverride {
   reason: string | null;
 }
 
+/** A receptionist account, as an administrator sees it. */
+export interface AdminReceptionist {
+  id: string;
+  name: string;
+  email: string;
+  clinic: { id: string; name: string } | null;
+  /** True until the receptionist has chosen their password from the emailed link. */
+  invitePending: boolean;
+}
+
+/** What happened to an invitation email: a provider accepted it, it was only printed (development), or it was not sent. */
+export interface InviteDelivery {
+  status: 'sent' | 'logged' | 'failed';
+  /** Why it failed, safe to show. */
+  reason?: string;
+}
+
+/** How the server delivers email right now. `problem` says what is missing when it is off. */
+export interface EmailStatus {
+  mode: 'provider' | 'dev-log' | 'disabled';
+  /** Resend's shared testing sender: it reaches only the Resend account owner's own address. */
+  testingSender: boolean;
+  problem: string | null;
+}
+
+/** A doctor at one of the receptionist's clinics. */
+export interface ReceptionDoctor {
+  id: string;
+  name: string;
+  specialty: string;
+  clinic: { name: string; address: string };
+  consultationFee: number;
+  consultationMinutes: number;
+}
+
+/** A registered patient, as found by a receptionist's search. */
+export interface ReceptionPatient {
+  id: string;
+  name: string;
+  email: string;
+  phone: string | null;
+}
+
+/** An active appointment at the receptionist's clinics. slotNumber is the place held in a shared (Wave) slot. */
+export interface ReceptionAppointment {
+  id: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  status: AppointmentStatus;
+  slotNumber: number;
+  slotCapacity: number;
+  patient: { id: string; name: string; phone: string | null };
+  doctor: { id: string; name: string };
+}
+
+/** What changing the hours of an existing session would do, as the server works it out from the same slot rules booking uses. */
+export interface HoursChangePreview {
+  row: { id: string; recurrence: 'WEEKLY' | 'ONE_TIME'; dayOfWeek: number | null; date: string | null; mode: SchedulingMode; slotMinutes: number | null; capacityPerSlot: number };
+  current: { startTime: string; endTime: string };
+  proposed: { startTime: string; endTime: string };
+  /** Recurring sessions: the first date the new hours apply to. Earlier dates keep theirs. */
+  applyFrom: string;
+  splitsAtDate: boolean;
+  kind: 'EXPAND' | 'SHRINK' | 'MIXED' | 'NONE';
+  /** Why the change cannot be made, in plain language. Empty when it can. */
+  problems: string[];
+  /** Start times that keep the existing slot grid, offered when the wanted one does not. */
+  suggestedStarts: string[];
+  addedSlots: number;
+  removedSlots: number;
+  /** Dates (from today to the end of the booking window) where the slots change. `days` lists the first few. */
+  affectedDates: number;
+  days: { date: string; added: { startTime: string; endTime: string }[]; removed: { startTime: string; endTime: string }[] }[];
+  /** Booked appointments the new hours would leave outside them. They stay booked; each patient is asked to choose a new time. */
+  affectedAppointments: AffectedAppointment[];
+  affectedCount: number;
+  /** Extending: booked appointments that were outside the hours and would be inside them again (the first few). They need nothing more. */
+  restoredAppointments: Omit<AffectedAppointment, 'alternatives'>[];
+  /** How many in all. */
+  restoredCount: number;
+  /** How many of them have no other open time to move to. */
+  withoutAlternatives: number;
+  canApply: boolean;
+}
+
+/** A time that is still open for booking, with the places left in it. */
+export interface OpenTime {
+  date: string;
+  startTime: string;
+  endTime: string;
+  remaining: number;
+}
+
+/** A booked appointment that is outside the doctor's hours, with the open times it could move to. */
+export interface AffectedAppointment {
+  id: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  status: AppointmentStatus;
+  slotNumber: number;
+  patient: { name: string; phone: string | null };
+  alternatives: OpenTime[];
+}
+
+/** An appointment outside the doctor's current hours, and whether the patient has been asked to choose a new time. */
+export interface OutsideHoursAppointment extends AffectedAppointment {
+  asked: { at: string; status: string } | null;
+  /** The change is recorded but the background job has not asked this patient yet. */
+  noticePending: boolean;
+  followUp: FollowUp;
+}
+
+/** Where an unresolved patient stands, so the doctor knows who needs a personal follow-up. */
+export interface FollowUp {
+  state: 'NOT_ASKED' | 'WAITING' | 'NO_RESPONSE' | 'NO_ALTERNATIVES';
+  /** Automatic reminders sent after the first message (at most two). */
+  reminders: number;
+  lastContactAt: string | null;
+}
+
+/** What needs the doctor's attention (dashboard). */
+export interface AttentionSummary {
+  needsNewTime: number;
+  noResponse: number;
+  noAlternatives: number;
+}
+
+/** One page of appointments outside the doctor's hours; `nextCursor` asks for the following page. */
+export interface OutsideHoursPage {
+  appointments: OutsideHoursAppointment[];
+  nextCursor: string | null;
+}
+
+/** A recent change of the doctor's hours and how its affected (or released) appointments stand. */
+export interface ScheduleChangeSummary {
+  id: string;
+  kind: 'EXPAND' | 'SHRINK' | 'MIXED';
+  applyFrom: string;
+  oldStart: string;
+  oldEnd: string;
+  newStart: string;
+  newEnd: string;
+  affected: number;
+  unresolved: number;
+  rescheduled: number;
+  cancelled: number;
+  /** Appointments waiting for a new time that this change brought back inside the hours. */
+  restored: number;
+  createdAt: string;
+}
+
+/** Other open times a patient can move their own appointment to. */
+export interface AppointmentAlternatives {
+  appointmentId: string;
+  doctorId: string;
+  needsNewTime: boolean;
+  alternatives: OpenTime[];
+  /** Pass back as `cursor` for the next page of later times; null when there is no more. */
+  nextCursor: string | null;
+  searchedUntil: string;
+}
+
+/** A date that has sessions, with how much room is left on it (the calendar). A date with no sessions is not listed. */
+export interface OpenDay {
+  date: string;
+  open: number;
+  places: number;
+}
+
+/** One working session on a date, with every slot cut from it. */
+export interface UpcomingSession {
+  availabilityId: string | null;
+  source: 'OVERRIDE' | 'ONE_TIME' | 'WEEKLY';
+  mode: SchedulingMode;
+  startTime: string;
+  endTime: string;
+  slotMinutes: number;
+  capacityPerSlot: number;
+  /** STREAM: the session cap; WAVE: every place the session offers. */
+  capacity: number;
+  booked: number;
+  remaining: number;
+  slots: Slot[];
+}
+
+/** One date of the doctor's upcoming schedule. */
+export interface UpcomingDay {
+  date: string;
+  unavailableReason: string | null;
+  /** The date exception, if any: a day off, a blocked time, or replacement hours. */
+  exception: { isAvailable: boolean; startTime: string | null; endTime: string | null; reason: string | null } | null;
+  sessions: UpcomingSession[];
+}
+
+export interface UpcomingSchedule {
+  days: UpcomingDay[];
+}
+
 export interface DoctorAvailability {
   consultationMinutes: number;
   /** Minutes between the starts of slots (equals consultationMinutes unless the doctor chose a shorter interval). */
@@ -311,6 +516,8 @@ export interface DoctorAvailability {
   /** True when the doctor chose their own interval; false while it simply follows the visit length. */
   slotIntervalCustom: boolean;
   defaultCapacity: number;
+  /** What a new Wave session starts with: what the doctor already uses most, else the clinic default. */
+  suggestedCapacityPerSlot: number;
   weekly: WeeklyHours[];
   oneTime: OneTimeSession[];
   overrides: DateOverride[];

@@ -2,10 +2,14 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Between, DataSource, In, Repository } from 'typeorm';
 import { loadConfig } from '../config.js';
-import { ACTIVE_STATUSES, Appointment, Clinic, Doctor, ScheduleOverride, Specialty, slotIntervalOf } from '../database/entities/index.js';
+import { ACTIVE_STATUSES, Appointment, Availability, Clinic, Doctor, ScheduleOverride, Specialty, slotIntervalOf } from '../database/entities/index.js';
 import { addDays, clinicNow } from '../scheduling/calendar.js';
+import { isCurrent } from '../scheduling/availability-rules.js';
 import { loadDaySchedule, toRule } from '../scheduling/day-schedule.js';
+import { daySummary } from '../scheduling/elastic.js';
 import { findNextAvailable, type NextSlot } from '../scheduling/next-available.js';
+import { bookedLoader } from '../scheduling/open-times.js';
+import { toOverride } from '../scheduling/outside-hours.js';
 import { hhmm, type DateOverride } from '../scheduling/slots.js';
 
 /** How far ahead a card looks for the "next available" time. */
@@ -49,7 +53,8 @@ export class DoctorsService {
     if (specialtyId) query.andWhere('specialty.id = :specialtyId', { specialtyId });
     const rows = await query.getMany();
     const next = await this.nextSlots(rows);
-    return rows.map((row) => ({ ...toDoctor(row), nextAvailable: next.get(row.id) ?? null }));
+    const today = clinicNow(this.config.clinicTimezone).date;
+    return rows.map((row) => ({ ...toDoctor(row, today), nextAvailable: next.get(row.id) ?? null }));
   }
 
   /**
@@ -112,7 +117,7 @@ export class DoctorsService {
       .getOne();
     if (!doctor) throw new NotFoundException('Doctor not found.');
     const next = await this.nextSlots([doctor]);
-    return { ...toDoctor(doctor), nextAvailable: next.get(doctor.id) ?? null };
+    return { ...toDoctor(doctor, clinicNow(this.config.clinicTimezone).date), nextAvailable: next.get(doctor.id) ?? null };
   }
 
   /** The day's slots with their status. `availableOnly` keeps just the slots that can be booked right now (a free seat, not past, not full). */
@@ -124,13 +129,36 @@ export class DoctorsService {
     return availableOnly ? { ...schedule, slots: schedule.slots.filter((slot) => slot.status === 'AVAILABLE') } : schedule;
   }
 
+  /**
+   * Which dates in the next `days` days have sessions, and how much room each has left, worked out with the same slot rules booking
+   * uses (so a date shown as open can really be booked). Dates with no sessions, such as a day off, are left out. Public, like slots.
+   */
+  async openDays(id: string, days: number) {
+    const manager = this.dataSource.manager;
+    const doctor = await manager.findOneBy(Doctor, { id });
+    if (!doctor) throw new NotFoundException('Doctor not found.');
+    const clock = clinicNow(this.config.clinicTimezone);
+    const span = Math.min(days, this.config.bookingWindowDays + 1);
+    const lastDate = addDays(clock.date, span - 1);
+    const rules = (await manager.findBy(Availability, { doctorId: id })).map(toRule);
+    const overrides = new Map((await manager.find(ScheduleOverride, { where: { doctorId: id, overrideDate: Between(clock.date, lastDate) } })).map((row) => [row.overrideDate, toOverride(row)]));
+    const elastic = { consultationMinutes: doctor.consultationMinutes, defaultCapacity: doctor.defaultDailyCapacity, slotIntervalMinutes: slotIntervalOf(doctor) };
+    const bookedOn = bookedLoader(manager, id, lastDate);
+    const result: { date: string; open: number; places: number }[] = [];
+    for (let date = clock.date; date <= lastDate; date = addDays(date, 1)) {
+      const summary = daySummary(date, rules, overrides.get(date) ?? null, elastic, await bookedOn(date), date === clock.date ? clock.time : null);
+      if (summary.total > 0) result.push({ date, open: summary.open, places: summary.places });
+    }
+    return { days: result };
+  }
+
   async specialties() {
     const rows = await this.specialtiesRepo.find({ select: { id: true, name: true }, order: { name: 'ASC' } });
     return rows.map(({ id, name }) => ({ id, name }));
   }
 }
 
-function toDoctor(doctor: Doctor) {
+function toDoctor(doctor: Doctor, today: string) {
   return {
     id: doctor.id,
     name: doctor.user.name,
@@ -142,7 +170,7 @@ function toDoctor(doctor: Doctor) {
     clinic: { name: doctor.clinic.name, address: doctor.clinic.address },
     // Repeating weekly hours only: a one-time session is for one date and has no weekday.
     weeklyHours: doctor.availability
-      .filter((a) => a.recurrenceType === 'WEEKLY')
+      .filter((a) => a.recurrenceType === 'WEEKLY' && isCurrent(a, today))
       .map((a) => ({
       dayOfWeek: a.dayOfWeek,
       startTime: hhmm(a.startTime),

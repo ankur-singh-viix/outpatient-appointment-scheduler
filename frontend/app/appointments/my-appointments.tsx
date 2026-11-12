@@ -12,6 +12,7 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api, errorMessage } from '@/lib/api';
+import { ChooseNewTime } from './choose-new-time';
 import { formatDate, formatFee, formatTimeRange, relativeDay } from '@/lib/format';
 import { useClinicToday, useQuery } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
@@ -96,6 +97,10 @@ function AppointmentList({ session }: { session: Session }) {
               setNotice('Payment received. Your appointment is confirmed.');
               appointments.reload();
             }}
+            onMoved={() => {
+              setNotice('Your appointment has been moved to the new time. Your booking and any payment came with it.');
+              appointments.reload();
+            }}
             empty={
               <EmptyState title="No upcoming appointments" icon={CalendarCheckIcon}>
                 <Link href="/" className={buttonVariants({ size: 'lg', className: 'h-10' })}>
@@ -125,6 +130,7 @@ function AppointmentGroup({
   policy = null,
   onCancelled,
   onPaid,
+  onMoved,
   empty,
 }: {
   items: PatientAppointment[];
@@ -133,6 +139,7 @@ function AppointmentGroup({
   policy?: PaymentsConfig | null;
   onCancelled?: () => void;
   onPaid?: () => void;
+  onMoved?: () => void;
   empty: React.ReactNode;
 }) {
   if (items.length === 0) return <>{empty}</>;
@@ -144,7 +151,7 @@ function AppointmentGroup({
           className="animate-in fade-in-0 slide-in-from-bottom-1 duration-300 fill-mode-backwards"
           style={{ animationDelay: `${Math.min(index, 5) * 40}ms` }}
         >
-          <AppointmentCard appointment={a} today={today} session={session} policy={policy} onCancelled={onCancelled} onPaid={onPaid} />
+          <AppointmentCard appointment={a} today={today} session={session} policy={policy} onCancelled={onCancelled} onPaid={onPaid} onMoved={onMoved} />
         </li>
       ))}
     </ul>
@@ -158,6 +165,7 @@ function AppointmentCard({
   policy,
   onCancelled,
   onPaid,
+  onMoved,
 }: {
   appointment: PatientAppointment;
   today: string | null;
@@ -165,9 +173,11 @@ function AppointmentCard({
   policy: PaymentsConfig | null;
   onCancelled?: () => void;
   onPaid?: () => void;
+  onMoved?: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [choosing, setChoosing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const when = isActive(a) ? relativeDay(a.date, today) : null;
   const cancelled = a.status === 'CANCELLED';
@@ -249,15 +259,49 @@ function AppointmentCard({
           </div>
         )}
 
+        {changeable && a.needsNewTime && !confirming && (
+          <div className="space-y-1 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="note">
+            <p className="font-semibold">{a.doctor.name} changed their hours</p>
+            <p>
+              This time is no longer within them. Your appointment is still booked. Choose a new time to move it; you will be asked to confirm, and nothing changes unless you do.
+            </p>
+          </div>
+        )}
+
+        {changeable && a.needsNewTime && choosing && !confirming && (
+          <ChooseNewTime
+            appointment={a}
+            session={session}
+            onClose={() => setChoosing(false)}
+            onMoved={() => {
+              setChoosing(false);
+              onMoved?.();
+            }}
+          />
+        )}
+
         {changeable && !confirming && (
           <div className="flex flex-wrap gap-2 border-t pt-4">
-            <Link
-              href={`/doctors/${a.doctor.id}?reschedule=${a.id}`}
-              aria-label={`Reschedule appointment with ${a.doctor.name} on ${formatDate(a.date, { weekday: 'long' })}`}
-              className={buttonVariants({ variant: 'outline', size: 'lg', className: 'h-9' })}
-            >
-              Reschedule
-            </Link>
+            {a.needsNewTime ? (
+              <Button
+                variant="default"
+                size="lg"
+                className="h-9"
+                aria-expanded={choosing}
+                aria-label={`Choose a new time for the appointment with ${a.doctor.name} on ${formatDate(a.date, { weekday: 'long' })}`}
+                onClick={() => setChoosing((current) => !current)}
+              >
+                Choose a new time
+              </Button>
+            ) : (
+              <Link
+                href={`/doctors/${a.doctor.id}?reschedule=${a.id}`}
+                aria-label={`Reschedule appointment with ${a.doctor.name} on ${formatDate(a.date, { weekday: 'long' })}`}
+                className={buttonVariants({ variant: 'outline', size: 'lg', className: 'h-9' })}
+              >
+                Reschedule
+              </Link>
+            )}
             <Button
               variant="destructive"
               size="lg"
