@@ -522,3 +522,47 @@ export interface DoctorAvailability {
   oneTime: OneTimeSession[];
   overrides: DateOverride[];
 }
+
+/** The assistant's answer to one message: the text, and which lookups it used to produce it. */
+export interface AssistantReply {
+  reply: string;
+  toolsUsed: string[];
+  /** A confirmation card for the patient to press, when the assistant prepared a booking, move or cancellation. Written by the server. */
+  actions?: ActionCard[];
+}
+
+/** A booking, move or cancellation waiting for the patient's Confirm. Nothing has happened yet. */
+export interface ActionCard {
+  /** Sent back, alone, to confirm or dismiss it. It works only for this patient, once, before it expires. */
+  ref: string;
+  /** SCHEDULE_CHANGE is a doctor's shortened or extended session; its `ref` is a signed token confirmed at /assistant/schedule-changes/confirm. */
+  kind: 'BOOK' | 'RESCHEDULE' | 'CANCEL' | 'SCHEDULE_CHANGE';
+  title: string;
+  lines: { label: string; value: string }[];
+  note?: string;
+  confirmLabel: string;
+  dismissLabel: string;
+  expiresAt: string;
+}
+
+/**
+ * Where a prepared action really stands, from the appointment data. UNCERTAIN means the records cannot settle it: nothing was repeated,
+ * and My Appointments shows the truth. NOT_APPLIED means the records show it did not happen.
+ */
+export interface ActionStatus {
+  ref: string;
+  kind: ActionCard['kind'];
+  state: 'PREPARED' | 'IN_PROGRESS' | 'DONE' | 'NOT_APPLIED' | 'FAILED' | 'DISMISSED' | 'EXPIRED' | 'UNCERTAIN';
+  message: string;
+  appointment?: PatientAppointment;
+  reconcileWith?: string;
+}
+
+/** What the server did when a card was confirmed, in its own words. A held booking carries the checkout for the existing secure payment. */
+export interface ActionResult {
+  kind: ActionCard['kind'];
+  outcome: 'DONE' | 'PAYMENT_REQUIRED';
+  message: string;
+  appointment: PatientAppointment;
+  checkout?: CheckoutDetails;
+}
