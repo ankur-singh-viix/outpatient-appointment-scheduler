@@ -5,6 +5,7 @@ import { AuthGuard } from '../auth/auth.guard.js';
 import type { AuthUser } from '../auth/auth.types.js';
 import { ZodValidationPipe } from '../common/zod-validation.pipe.js';
 import { AssistantActionsService } from './actions/assistant-actions.service.js';
+import { DoctorActionsService } from './actions/doctor-actions.service.js';
 import { ScheduleChangeActionsService } from './actions/schedule-change-actions.service.js';
 import { AssistantService } from './assistant.service.js';
 
@@ -41,6 +42,7 @@ export class AssistantController {
     private readonly assistant: AssistantService,
     private readonly actions: AssistantActionsService,
     private readonly scheduleChanges: ScheduleChangeActionsService,
+    private readonly doctorActions: DoctorActionsService,
   ) {}
 
   @Post('chat')
@@ -80,6 +82,18 @@ export class AssistantController {
   @Roles('DOCTOR')
   confirmScheduleChange(@CurrentUser() user: AuthUser, @Body(new ZodValidationPipe(scheduleTokenSchema)) body: z.infer<typeof scheduleTokenSchema>) {
     return this.scheduleChanges.confirm(user, body.token);
+  }
+
+  /**
+   * The doctor pressed Confirm on a card for cancelling or moving an appointment, adding working hours or blocking a day. Doctors only.
+   * The body is the card's signed token and nothing else; it works only for that doctor, before it expires, and only while what was
+   * previewed is still true. The action then runs through the same service the app already uses for it, which checks everything again.
+   */
+  @Post('doctor-actions/confirm')
+  @HttpCode(200)
+  @Roles('DOCTOR')
+  confirmDoctorAction(@CurrentUser() user: AuthUser, @Body(new ZodValidationPipe(scheduleTokenSchema)) body: z.infer<typeof scheduleTokenSchema>) {
+    return this.doctorActions.confirm(user, body.token);
   }
 
   /** The patient pressed Cancel on the card: it can no longer be confirmed. */

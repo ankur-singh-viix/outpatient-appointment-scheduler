@@ -535,8 +535,11 @@ export interface AssistantReply {
 export interface ActionCard {
   /** Sent back, alone, to confirm or dismiss it. It works only for this patient, once, before it expires. */
   ref: string;
-  /** SCHEDULE_CHANGE is a doctor's shortened or extended session; its `ref` is a signed token confirmed at /assistant/schedule-changes/confirm. */
-  kind: 'BOOK' | 'RESCHEDULE' | 'CANCEL' | 'SCHEDULE_CHANGE';
+  /**
+   * The doctor's kinds (SCHEDULE_CHANGE, DOCTOR_CANCEL, DOCTOR_RESCHEDULE, ADD_HOURS, BLOCK_DAY) carry a signed token as `ref`, confirmed
+   * at /assistant/schedule-changes/confirm or /assistant/doctor-actions/confirm; the patient's three are stored rows.
+   */
+  kind: 'BOOK' | 'RESCHEDULE' | 'CANCEL' | 'SCHEDULE_CHANGE' | 'DOCTOR_CANCEL' | 'DOCTOR_RESCHEDULE' | 'ADD_HOURS' | 'BLOCK_DAY';
   title: string;
   lines: { label: string; value: string }[];
   note?: string;

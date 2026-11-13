@@ -5,8 +5,9 @@ import { AvailabilityChangeService } from '../../doctor-portal/availability-chan
 import { DoctorPortalService } from '../../doctor-portal/doctor-portal.service.js';
 import { DoctorsService } from '../../doctors/doctors.service.js';
 import { addDays, dayOfWeek } from '../../scheduling/calendar.js';
+import { DoctorActionsService, type DoctorPrepareOutcome } from '../actions/doctor-actions.service.js';
 import { ScheduleChangeActionsService } from '../actions/schedule-change-actions.service.js';
-import { DATE_PROPERTY, ToolInputError, calendarDate, clockTime, defineTool, objectSchema, type AssistantTool } from './tool-types.js';
+import { DATE_PROPERTY, ToolInputError, calendarDate, clockTime, defineTool, objectSchema, type AssistantTool, type ToolContext } from './tool-types.js';
 import { DAY_NAMES, clip, doctorAppointmentView, isActiveStatus } from './format.js';
 
 const MAX_STATS_DAYS = 366;
@@ -17,7 +18,41 @@ export interface DoctorToolDeps {
   doctors: DoctorsService;
   dataSource: DataSource;
   scheduleChanges: ScheduleChangeActionsService;
+  doctorActions: DoctorActionsService;
 }
+
+const PREPARED_NOTE =
+  "A confirmation card is now on the doctor's screen showing exactly what will happen. Nothing has been done and nobody has been contacted. Never say it was done: only the doctor pressing Confirm on the card can do that, and a 'yes' in chat or by voice is not a confirmation.";
+
+/**
+ * The shared shape of the four doctor "prepare" tools: one card per answer (the check and the claim have no await between them, so two
+ * calls in one round cannot both get through), and every outcome turned into a short note for the model. The card itself goes to the
+ * doctor's screen with the reply and never passes through the model.
+ */
+async function prepareOne(context: ToolContext, make: () => Promise<DoctorPrepareOutcome>) {
+  if (context.cards.length > 0 || context.preparing) return { error: 'A confirmation card is already waiting for the doctor. Ask them to confirm or cancel it before preparing another.' };
+  context.preparing = true;
+  try {
+    const outcome = await make();
+    if ('needsDecision' in outcome) {
+      return {
+        prepared: false,
+        needsDecision: true,
+        bookedAppointments: outcome.appointments,
+        options: outcome.options,
+        instruction: 'Tell the doctor how many appointments are booked that day, explain both options in a sentence each, and ask which they want. Do NOT choose for them. Then call this tool again with handlingOfBookedAppointments.',
+      };
+    }
+    if (!outcome.prepared) return { prepared: false, cannotBePrepared: outcome.problems };
+    context.cards.push(outcome.card);
+    return { prepared: true, preview: outcome.summary, note: PREPARED_NOTE };
+  } finally {
+    context.preparing = false;
+  }
+}
+
+const TIME_OF_DAY = { type: 'string', description: 'A time as HH:MM, 24-hour.' };
+const PATIENT_NAME = { type: 'string', description: "Part of the patient's name, to tell two appointments at the same time apart." };
 
 /**
  * The doctor assistant's tools. All about the signed-in doctor: the doctor is found from the verified user inside the existing
@@ -241,6 +276,85 @@ export function doctorTools(deps: DoctorToolDeps): AssistantTool[] {
         } finally {
           context.preparing = false;
         }
+      },
+    }),
+
+    defineTool({
+      name: 'prepare_cancel_appointment',
+      description:
+        "PREPARES (does not do) the cancellation of ONE of the signed-in doctor's own upcoming appointments, found by its date and time and/or the patient's name. It shows the doctor a confirmation card; nothing is cancelled and nobody is contacted until the doctor presses Confirm. The doctor must give a reason (the patient is told it): if they have not, ask for it first. If more than one appointment matches, ask which.",
+      parameters: objectSchema(
+        { date: { ...DATE_PROPERTY, description: "The appointment's date, YYYY-MM-DD." }, startTime: { ...TIME_OF_DAY, description: "The appointment's start time as HH:MM." }, patientName: PATIENT_NAME, reason: { type: 'string', description: 'Why it is being cancelled, in the doctor\'s own words (3 to 200 characters). The patient reads it.' } },
+        ['date'],
+      ),
+      input: z.object({ date: calendarDate, startTime: clockTime.optional(), patientName: z.string().trim().min(1).max(100).optional(), reason: z.string().trim().max(200).optional() }),
+      run: async (context, input) => {
+        if (!input.reason || input.reason.length < 3) return { prepared: false, missing: ['reason'], instruction: 'Ask the doctor for the reason (at least 3 characters). The patient will be told it.' };
+        const reason = input.reason;
+        return prepareOne(context, () => deps.doctorActions.prepareCancel(context.user, { date: input.date, startTime: input.startTime, patientName: input.patientName, reason }));
+      },
+    }),
+
+    defineTool({
+      name: 'prepare_reschedule_appointment',
+      description:
+        "PREPARES (does not do) moving ONE of the signed-in doctor's own confirmed upcoming appointments to another open slot in their own schedule. The new slot is checked against the real availability. It shows the doctor a confirmation card; nothing moves and the patient is not contacted until the doctor presses Confirm. Find the appointment by date and time and/or the patient's name; if the doctor has not said the new date and time, ask. If the new slot is not open the answer says which times are.",
+      parameters: objectSchema(
+        {
+          date: { ...DATE_PROPERTY, description: "The appointment's current date, YYYY-MM-DD." },
+          startTime: { ...TIME_OF_DAY, description: "The appointment's current start time as HH:MM." },
+          patientName: PATIENT_NAME,
+          newDate: { ...DATE_PROPERTY, description: 'The new date, YYYY-MM-DD.' },
+          newStartTime: { ...TIME_OF_DAY, description: 'The new start time as HH:MM.' },
+        },
+        ['date', 'newDate', 'newStartTime'],
+      ),
+      input: z.object({ date: calendarDate, startTime: clockTime.optional(), patientName: z.string().trim().min(1).max(100).optional(), newDate: calendarDate, newStartTime: clockTime }),
+      run: async (context, input) => prepareOne(context, () => deps.doctorActions.prepareReschedule(context.user, input)),
+    }),
+
+    defineTool({
+      name: 'prepare_add_working_hours',
+      description:
+        "PREPARES (does not do) adding a NEW working session for the signed-in doctor on one date (for example an extra evening session). It shows the doctor a confirmation card; nothing is added until the doctor presses Confirm. To make an EXISTING session longer or shorter use prepare_schedule_change instead. Ask for the date and the start and end time if the doctor has not given them.",
+      parameters: objectSchema(
+        {
+          date: { ...DATE_PROPERTY, description: 'The date, YYYY-MM-DD.' },
+          startTime: { ...TIME_OF_DAY, description: 'Start of the new session, HH:MM.' },
+          endTime: { ...TIME_OF_DAY, description: 'End of the new session, HH:MM.' },
+          patientsPerSlot: { type: 'integer', description: 'How many patients each slot takes. Leave out for one.' },
+        },
+        ['date', 'startTime', 'endTime'],
+      ),
+      input: z.object({ date: calendarDate, startTime: clockTime, endTime: clockTime, patientsPerSlot: z.number().int().min(1).max(100).optional() }),
+      run: async (context, input) => prepareOne(context, () => deps.doctorActions.prepareAddHours(context.user, input)),
+    }),
+
+    defineTool({
+      name: 'prepare_block_day',
+      description:
+        "PREPARES (does not do) marking one whole date as unavailable for the signed-in doctor, so patients cannot book it. It shows the doctor a confirmation card; nothing is blocked until the doctor presses Confirm. If appointments are already booked that day it does NOT go ahead: it returns the choices and you must ask the doctor how to handle them, then call again with handlingOfBookedAppointments: KEEP_AND_ASK_PATIENTS (they stay booked and each patient is emailed to choose a new time) or CANCEL_AND_REFUND (every appointment is cancelled with a reason, patients are emailed and refunded). Never pick one yourself.",
+      parameters: objectSchema(
+        {
+          date: { ...DATE_PROPERTY, description: 'The date to block, YYYY-MM-DD.' },
+          handlingOfBookedAppointments: { type: 'string', enum: ['KEEP_AND_ASK_PATIENTS', 'CANCEL_AND_REFUND'], description: 'Only after the doctor has chosen.' },
+          cancelReason: { type: 'string', description: 'With CANCEL_AND_REFUND: why, as the patients are told (3 to 200 characters). Ask the doctor if they have not said.' },
+          reason: { type: 'string', description: 'An optional note for the block itself.' },
+        },
+        ['date'],
+      ),
+      input: z.object({
+        date: calendarDate,
+        handlingOfBookedAppointments: z.enum(['KEEP_AND_ASK_PATIENTS', 'CANCEL_AND_REFUND']).optional(),
+        cancelReason: z.string().trim().max(200).optional(),
+        reason: z.string().trim().max(200).optional(),
+      }),
+      run: async (context, input) => {
+        if (input.handlingOfBookedAppointments === 'CANCEL_AND_REFUND' && !input.cancelReason) {
+          return { prepared: false, missing: ['cancelReason'], instruction: 'Ask the doctor why the appointments are being cancelled (at least 3 characters). The patients are told it.' };
+        }
+        const handling = input.handlingOfBookedAppointments === 'CANCEL_AND_REFUND' ? ('CANCEL' as const) : input.handlingOfBookedAppointments === 'KEEP_AND_ASK_PATIENTS' ? ('KEEP' as const) : undefined;
+        return prepareOne(context, () => deps.doctorActions.prepareBlockDay(context.user, { date: input.date, handling, cancelReason: input.cancelReason, reason: input.reason }));
       },
     }),
 
