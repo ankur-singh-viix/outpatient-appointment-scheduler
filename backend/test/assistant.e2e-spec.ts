@@ -155,7 +155,7 @@ describe('AI assistant, phase 1: read-only chat (e2e)', () => {
       await insertAppointment(1, doctorA, today, '09:00', '09:30', 'CANCELLED');
       const { res, output, shown } = await ask(tokenA, 'get_appointments_on_date');
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ reply: 'Here you go.', toolsUsed: ['get_appointments_on_date'] });
+      expect(res.body).toEqual({ reply: 'Here you go.', toolsUsed: ['get_appointments_on_date'], conversationId: expect.any(String) }); // chat history (migration 013) adds the saved conversation's id
       expect(output).toMatchObject({ date: today, isToday: true, total: 2, active: 1, byStatus: { CONFIRMED: 1, CANCELLED: 1 } });
       expect(output.appointments.items.map((a: { patientName: string; status: string }) => [a.patientName, a.status])).toEqual([
         ['Patient 1', 'CONFIRMED'],
