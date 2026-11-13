@@ -529,6 +529,26 @@ export interface AssistantReply {
   toolsUsed: string[];
   /** A confirmation card for the patient to press, when the assistant prepared a booking, move or cancellation. Written by the server. */
   actions?: ActionCard[];
+  /** The saved conversation this exchange was added to. Missing when history could not be saved (the reply is still good). */
+  conversationId?: string;
+}
+
+/** One saved conversation in the history list. */
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One saved message. It holds text only: a reply that had a confirmation card has `hadCard`, and the card itself is gone. */
+export interface StoredMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  toolNames: string[];
+  hadCard: boolean;
+  createdAt: string;
 }
 
 /** A booking, move or cancellation waiting for the patient's Confirm. Nothing has happened yet. */

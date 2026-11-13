@@ -32,6 +32,11 @@ const REQUIRED_TABLES = [
     migration: '012_assistant_actions.sql',
     consequence: 'the assistant cannot prepare bookings, moves or cancellations (they fail as "temporarily unavailable")',
   },
+  {
+    name: 'assistant_conversations',
+    migration: '013_assistant_history.sql',
+    consequence: 'the assistant still answers, but chat history is not saved and the history list is unavailable',
+  },
 ];
 
 export interface MissingTable {
@@ -46,6 +51,33 @@ export async function missingTables(dataSource: Queryable): Promise<MissingTable
   for (const table of REQUIRED_TABLES) {
     const rows = (await dataSource.query(`SELECT to_regclass('public.${table.name}') AS found`)) as { found: string | null }[];
     if (!rows[0]?.found) missing.push(table);
+  }
+  return missing;
+}
+
+/** Columns later migrations add to existing tables, and what stops working without them. */
+const REQUIRED_COLUMNS = [
+  {
+    table: 'appointments',
+    column: 'hidden_by_patient_at',
+    migration: '014_hide_appointments_from_history.sql',
+    consequence: 'patients cannot remove past bookings from their history (everything else keeps working)',
+  },
+];
+
+export interface MissingColumn {
+  table: string;
+  column: string;
+  migration: string;
+  consequence: string;
+}
+
+/** The required columns this database does not have (an empty list when migrations are up to date). */
+export async function missingColumns(dataSource: Queryable): Promise<MissingColumn[]> {
+  const missing: MissingColumn[] = [];
+  for (const entry of REQUIRED_COLUMNS) {
+    const rows = (await dataSource.query(`SELECT 1 AS found FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '${entry.table}' AND column_name = '${entry.column}'`)) as unknown[];
+    if (rows.length === 0) missing.push(entry);
   }
   return missing;
 }
