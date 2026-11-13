@@ -97,6 +97,14 @@ export class Appointment {
   @Column({ name: 'hold_expires_at', type: 'timestamptz', nullable: true })
   holdExpiresAt: Date | null;
 
+  /**
+   * When the patient removed this (past) booking from their own list; null while it is shown. See migration 014. Mapped for
+   * documentation only: it is neither selected, inserted nor updated by the entity (it is read and written by AppointmentHistoryService
+   * and by the patient's list), so a database that has not been migrated to 014 yet still serves every other appointment query.
+   */
+  @Column({ name: 'hidden_by_patient_at', type: 'timestamptz', nullable: true, select: false, insert: false, update: false })
+  hiddenByPatientAt?: Date | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
 

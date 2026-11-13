@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Between, DataSource, EntityManager, Repository } from 'typeorm';
+import { Between, DataSource, EntityManager, In, Not, Repository } from 'typeorm';
 import type { AuthUser } from '../auth/auth.types.js';
 import { loadConfig } from '../config.js';
 import { ACTIVE_STATUSES, Appointment, Availability, Doctor, Patient, ScheduleOverride, slotIntervalOf } from '../database/entities/index.js';
@@ -20,6 +20,7 @@ import { bookedLoader, openTimes } from '../scheduling/open-times.js';
 import { loadDaySchedule, toRule } from '../scheduling/day-schedule.js';
 import { appointmentsOutsideHours, toOverride } from '../scheduling/outside-hours.js';
 import { hhmm, nextFreeSeat, type Slot } from '../scheduling/slots.js';
+import { isMissingColumn } from './appointment-history.service.js';
 import { assertTransition } from './appointment-lifecycle.js';
 
 export interface BookAppointmentInput {
@@ -332,8 +333,10 @@ export class AppointmentsService {
 
   async listForPatient(user: AuthUser) {
     const patientId = await this.patientIdFor(user.id);
+    // Past bookings the patient removed from their own list are left out here, and only here (see hiddenIds).
+    const hidden = await this.hiddenIds(patientId);
     const rows = await this.appointments.find({
-      where: { patientId },
+      where: { patientId, ...(hidden.length > 0 ? { id: Not(In(hidden)) } : {}) },
       relations: WITH_DOCTOR,
       order: { appointmentDate: 'DESC', startTime: 'DESC' },
     });
@@ -341,6 +344,20 @@ export class AppointmentsService {
     const outside = await this.outsideHours(rows);
     // `needsNewTime`: the doctor changed their hours and this booking no longer falls inside them. It is still booked.
     return rows.map((row) => ({ ...toAppointment(row, payments.get(row.id)), needsNewTime: outside.has(row.id) }));
+  }
+
+  /**
+   * The patient's appointments they have removed from their own history (migration 014). A database that has not been migrated yet has
+   * none, rather than failing the whole list.
+   */
+  private async hiddenIds(patientId: string): Promise<string[]> {
+    try {
+      const rows: { id: string }[] = await this.dataSource.query('SELECT id FROM appointments WHERE patient_id = $1 AND hidden_by_patient_at IS NOT NULL', [patientId]);
+      return rows.map((row) => row.id);
+    } catch (error) {
+      if (isMissingColumn(error)) return [];
+      throw error;
+    }
   }
 
   /** The ids of the patient's upcoming active appointments that are outside their doctor's current working hours. */
