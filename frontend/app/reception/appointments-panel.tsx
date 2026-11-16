@@ -1,6 +1,6 @@
 'use client';
 
-import { CalendarCheckIcon } from 'lucide-react';
+import { CalendarCheckIcon, LogInIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Alert, EmptyState, Spinner } from '@/components/common';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -11,8 +11,10 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { api, errorMessage } from '@/lib/api';
-import { formatDate, formatTime, formatTimeRange } from '@/lib/format';
+import { clinicToday, formatDate, formatTime, formatTimeRange } from '@/lib/format';
 import { useAutoRefresh, useQuery } from '@/lib/hooks';
+import { queueApi } from '@/lib/queue-client';
+import { actionNotice } from '@/lib/queue-view';
 import type { ReceptionAppointment, ReceptionDoctor, Session, Slot } from '@/lib/types';
 import { SlotPicker } from './slot-picker';
 
@@ -20,12 +22,25 @@ const selectClass =
   'h-10 rounded-lg border border-input bg-card px-3 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50';
 
 /**
- * The clinic's upcoming appointments (all, or for one date and doctor), with cancel and reschedule on behalf of the patient. Both go
- * through the patient's own cancel and reschedule code on the server, so the same rules, refunds and notices apply.
+ * Upcoming appointments for the doctors who assigned this receptionist, with check-in (today, confirmed), cancel and reschedule.
+ * Cancel/reschedule use the patient's own server paths; check-in uses the existing queue API.
  */
-export function AppointmentsPanel({ session, doctors, version, onChanged }: { session: Session; doctors: ReceptionDoctor[]; version: number; onChanged: (message: string) => void }) {
+export function AppointmentsPanel({
+  session,
+  doctors,
+  version,
+  onChanged,
+  onOpenQueue,
+}: {
+  session: Session;
+  doctors: ReceptionDoctor[];
+  version: number;
+  onChanged: (message: string, nextTab?: 'queue') => void;
+  onOpenQueue?: () => void;
+}) {
   const [doctorId, setDoctorId] = useState('');
   const [date, setDate] = useState('');
+  const today = clinicToday();
   const query = new URLSearchParams({ ...(date && { date }), ...(doctorId && { doctorId }) }).toString();
   const list = useQuery(`reception-appointments:${session.user.id}:${query}:${version}`, () =>
     api<ReceptionAppointment[]>(`/receptionist/appointments${query ? `?${query}` : ''}`, { token: session.accessToken }),
@@ -38,6 +53,9 @@ export function AppointmentsPanel({ session, doctors, version, onChanged }: { se
   const [newDate, setNewDate] = useState('');
   const [newSlot, setNewSlot] = useState<Slot | null>(null);
   const [busy, setBusy] = useState(false);
+  const [checkingIn, setCheckingIn] = useState<string | null>(null);
+  const [checkedInIds, setCheckedInIds] = useState<Set<string>>(() => new Set());
+  const [checkInError, setCheckInError] = useState<string | null>(null);
   const [dialogError, setDialogError] = useState<string | null>(null);
 
   const items = list.data ?? list.previous;
@@ -90,7 +108,17 @@ export function AppointmentsPanel({ session, doctors, version, onChanged }: { se
         <CardTitle as="h2" className="text-lg font-semibold">
           Appointments
         </CardTitle>
-        <CardDescription>Upcoming appointments at your clinic. Cancel or move one for a patient who phones or walks up.</CardDescription>
+        <CardDescription>
+          Upcoming appointments for your assigned doctors. Today&apos;s confirmed visits can be checked in here or on the Queue &amp; check-in tab.
+          {onOpenQueue && (
+            <>
+              {' '}
+              <button type="button" className="font-medium text-foreground underline-offset-2 hover:underline" onClick={onOpenQueue}>
+                Open live queue
+              </button>
+            </>
+          )}
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
         <div className="flex flex-wrap items-end gap-3">
@@ -127,6 +155,7 @@ export function AppointmentsPanel({ session, doctors, version, onChanged }: { se
             Could not load appointments. {list.error}
           </Alert>
         )}
+        {checkInError && <Alert tone="error">{checkInError}</Alert>}
         {list.loading && !items && <Spinner label="Loading appointments…" />}
         {items && items.length === 0 && (
           <EmptyState title={date ? 'No appointments on this date' : 'No upcoming appointments'} icon={CalendarCheckIcon}>
@@ -161,7 +190,38 @@ export function AppointmentsPanel({ session, doctors, version, onChanged }: { se
                       {appointment.patient.phone ? ` · ${appointment.patient.phone}` : ''}
                     </p>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
+                    {appointment.status === 'CONFIRMED' && appointment.date === today && !checkedInIds.has(appointment.id) && (
+                      <Button
+                        size="sm"
+                        disabled={checkingIn !== null || busy}
+                        aria-label={`Check in ${appointment.patient.name}`}
+                        onClick={() => {
+                          void (async () => {
+                            if (checkingIn) return;
+                            setCheckingIn(appointment.id);
+                            setCheckInError(null);
+                            try {
+                              const result = await queueApi.checkIn(session, appointment.id);
+                              setCheckedInIds((current) => new Set(current).add(appointment.id));
+                              onChanged(actionNotice('checkIn', result), 'queue');
+                              list.reload();
+                            } catch (error) {
+                              setCheckInError(errorMessage(error));
+                            } finally {
+                              setCheckingIn(null);
+                            }
+                          })();
+                        }}
+                      >
+                        <LogInIcon aria-hidden /> {checkingIn === appointment.id ? 'Checking in…' : 'Check in'}
+                      </Button>
+                    )}
+                    {appointment.status === 'CONFIRMED' && appointment.date === today && checkedInIds.has(appointment.id) && (
+                      <Badge variant="secondary" className="font-semibold">
+                        Checked in
+                      </Badge>
+                    )}
                     {appointment.status === 'CONFIRMED' && (
                       <Button variant="outline" size="sm" onClick={() => { setMoving(appointment); setNewDate(appointment.date); }} aria-label={`Reschedule ${appointment.patient.name}'s appointment`}>
                         Reschedule

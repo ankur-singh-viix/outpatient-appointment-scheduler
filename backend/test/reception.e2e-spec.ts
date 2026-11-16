@@ -84,6 +84,7 @@ describe('Receptionist workspace (e2e)', () => {
     doctorB = await makeDoctor('Dr. Beta', 'beta@test.local', clinicB);
     receptionistId = await user('Reena Reception', 'reception@test.local', 'RECEPTIONIST');
     await db.query('INSERT INTO receptionist_assignments (receptionist_user_id, clinic_id) VALUES ($1, $2)', [receptionistId, clinicA]);
+    await db.query('INSERT INTO doctor_receptionist_assignments (doctor_id, receptionist_user_id) VALUES ($1, $2)', [doctorA, receptionistId]);
     await user('Una Unassigned', 'unassigned@test.local', 'RECEPTIONIST');
     for (let n = 1; n <= PATIENTS; n++) {
       const id = await user(n === 1 ? 'Priya Patel' : `Patient ${n}`, `p${n}@test.local`, 'PATIENT');
@@ -118,7 +119,7 @@ describe('Receptionist workspace (e2e)', () => {
       await http().post('/api/receptionist/appointments').set(as(patientTokens[0])).send({ patientId: patientIds[0], doctorId: doctorA, date: nextDay(), startTime: '09:00' }).expect(403);
     });
 
-    it('shows only the doctors of the receptionist\'s own clinics', async () => {
+    it('shows only the doctors who assigned the receptionist', async () => {
       const mine = (await http().get('/api/receptionist/doctors').set(as(receptionistToken)).expect(200)).body as { id: string; name: string; clinic: { name: string } }[];
       expect(mine.map((doctor) => doctor.name)).toEqual(['Dr. Alpha']);
       expect(mine[0].clinic.name).toBe('Clinic A');
