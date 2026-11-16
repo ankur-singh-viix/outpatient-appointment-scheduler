@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Post, Put, Query, Res, UseGuards } from '@nestjs/common';
+import type { Response } from 'express';
 import { z } from 'zod';
 import { CurrentUser, Roles } from '../auth/auth.decorators.js';
 import { AuthGuard } from '../auth/auth.guard.js';
@@ -98,6 +99,7 @@ const dateOverrideSchema = z.discriminatedUnion('isAvailable', [
 const dateParam = z.strictObject({ date: dateSchema });
 // DELETE requests carry the doctor's agreement in the query string: ?acknowledge=true
 const acknowledgeQuery = z.object({ acknowledge: z.enum(['true', 'false']).optional() });
+const receptionistAssignSchema = z.strictObject({ receptionistUserId: z.uuid() });
 
 const scheduleQuery = z.object({ days: z.coerce.number().int().min(1).max(60).optional() });
 const cancelTimeSchema = z.strictObject({ date: dateSchema, startTime: timeSchema, endTime: timeSchema, reason: z.string().trim().max(200).optional() });
@@ -275,5 +277,37 @@ export class DoctorPortalController {
     @Query(new ZodValidationPipe(acknowledgeQuery)) query: z.infer<typeof acknowledgeQuery>,
   ) {
     return this.portal.deleteOverride(user, params.date, query.acknowledge === 'true');
+  }
+
+  /** Receptionists at the doctor's clinic who can be assigned. Declared before GET receptionist so the path is not swallowed. */
+  @Get('receptionist/candidates')
+  receptionistCandidates(@CurrentUser() user: AuthUser) {
+    return this.portal.receptionistCandidates(user);
+  }
+
+  /**
+   * The receptionist currently assigned to this doctor, or JSON null. Nest would otherwise turn a bare `null` return into `{}`,
+   * which the profile page would treat as an assigned person.
+   */
+  @Get('receptionist')
+  async receptionist(@CurrentUser() user: AuthUser, @Res() res: Response) {
+    const assigned = await this.portal.receptionist(user);
+    return res.status(200).type('application/json').send(JSON.stringify(assigned));
+  }
+
+  /** Assigns or replaces the doctor's receptionist. */
+  @Put('receptionist')
+  assignReceptionist(
+    @CurrentUser() user: AuthUser,
+    @Body(new ZodValidationPipe(receptionistAssignSchema)) body: z.infer<typeof receptionistAssignSchema>,
+  ) {
+    return this.portal.assignReceptionist(user, body.receptionistUserId);
+  }
+
+  /** Removes the doctor's receptionist assignment. */
+  @Delete('receptionist')
+  @HttpCode(200)
+  removeReceptionist(@CurrentUser() user: AuthUser) {
+    return this.portal.removeReceptionist(user);
   }
 }

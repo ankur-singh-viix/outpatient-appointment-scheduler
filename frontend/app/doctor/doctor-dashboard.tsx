@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowRightIcon, CalendarCheckIcon, CalendarClockIcon, CalendarPlusIcon, UserRoundIcon } from 'lucide-react';
+import { ArrowRightIcon, CalendarCheckIcon, CalendarClockIcon, CalendarPlusIcon, ClipboardPlusIcon, UserRoundIcon } from 'lucide-react';
 import Link from 'next/link';
 import { Alert, EmptyState, PageHeader, StatusBadge } from '@/components/common';
 import { RequireRole } from '@/components/require-role';
@@ -13,6 +13,7 @@ import { clinicClock, formatDate, formatTimeRange, relativeDay, timeAgo } from '
 import { useAutoRefresh, useClinicToday, useNow, useQuery } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 import type { AttentionSummary, DoctorAppointment, Session } from '@/lib/types';
+import { DoctorQueuePanel } from './queue-panel';
 
 const NEW_BOOKING_MS = 24 * 60 * 60 * 1000;
 const isActive = (a: DoctorAppointment) => a.status === 'CONFIRMED' || a.status === 'PENDING';
@@ -28,7 +29,8 @@ export function DoctorDashboard() {
 const SHORTCUTS = [
   { href: '/doctor/appointments', title: 'Appointments', text: 'Your schedule by day, with cancellations.', icon: CalendarCheckIcon },
   { href: '/doctor/availability', title: 'Availability', text: 'Weekly sessions, capacity and slot length.', icon: CalendarClockIcon },
-  { href: '/doctor/profile', title: 'Profile', text: 'Your public details and consultation fee.', icon: UserRoundIcon },
+  { href: '/doctor/prescriptions', title: 'Prescriptions', text: 'Draft and finalize prescriptions.', icon: ClipboardPlusIcon },
+  { href: '/doctor/profile', title: 'Profile', text: 'Public details, fee and receptionist.', icon: UserRoundIcon },
 ];
 
 function Overview({ session }: { session: Session }) {
@@ -92,6 +94,8 @@ function Overview({ session }: { session: Session }) {
           </Link>
         </section>
       )}
+
+      <DoctorQueuePanel session={session} />
 
       <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr]">
         <section aria-labelledby="today-heading" className="space-y-3">

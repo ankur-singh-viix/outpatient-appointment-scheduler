@@ -160,6 +160,27 @@ export class NotificationsService {
   }
 
   /**
+   * A patient checked in at the front desk and was given a place in the doctor's queue: their token number and how many are ahead. One
+   * message per queue entry (the dedupe key), so repeating the request or polling the queue can never send it twice. Written in the
+   * caller's transaction like every other event: if it cannot be queued, the check-in stands.
+   */
+  async queueCheckedIn(manager: EntityManager, appointmentId: string, input: { entryId: string; token: number; ahead: number }): Promise<void> {
+    await this.safely(manager, `queue check-in notice for ${appointmentId}`, async (inner) => {
+      const loaded = await this.load(inner, appointmentId);
+      await this.enqueue(inner, this.toPatient(loaded, templates.queueCheckedIn(loaded.facts, input), `queue-checked-in:${input.entryId}`));
+    });
+  }
+
+  /** The doctor called the patient. A text only (an email would arrive after they had already walked in), once per queue entry. */
+  async queueCalled(manager: EntityManager, appointmentId: string, input: { entryId: string; token: number }): Promise<void> {
+    await this.safely(manager, `"your turn" notice for ${appointmentId}`, async (inner) => {
+      const loaded = await this.load(inner, appointmentId);
+      const texts = this.toPatient(loaded, templates.queueCalled(loaded.facts, input), `queue-called:${input.entryId}`).filter((message) => message.channel === 'sms');
+      await this.enqueue(inner, texts);
+    });
+  }
+
+  /**
    * Same request as appointmentNeedsNewTime, for the background notifier: it queues the message in the caller's transaction and
    * lets a failure reach the caller (which retries and counts it) instead of swallowing it. Nothing is sent here; the outbox
    * dispatcher sends it, so no transaction is ever open while an email or text goes out.
