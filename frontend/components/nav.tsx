@@ -1,6 +1,6 @@
 'use client';
 
-import { BellIcon, CalendarCheckIcon, CalendarClockIcon, CalendarPlusIcon, LayoutDashboardIcon, UsersIcon, ReceiptIcon, SearchIcon, UserRoundIcon, type LucideIcon } from 'lucide-react';
+import { BellIcon, CalendarCheckIcon, CalendarClockIcon, CalendarPlusIcon, ClipboardPlusIcon, LayoutDashboardIcon, ListOrderedIcon, UsersIcon, ReceiptIcon, SearchIcon, UserRoundIcon, type LucideIcon } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import { useHydrated, useSession } from '@/lib/session';
 import type { Role } from '@/lib/types';
@@ -33,9 +33,13 @@ const NAV: Partial<Record<Role, NavDefinition[]>> = {
     { href: '/doctor', label: 'Dashboard', icon: LayoutDashboardIcon, match: (p) => p === '/doctor' },
     { href: '/doctor/appointments', label: 'Appointments', icon: CalendarCheckIcon, match: (p) => p.startsWith('/doctor/appointments') },
     { href: '/doctor/availability', label: 'Availability', icon: CalendarClockIcon, match: (p) => p.startsWith('/doctor/availability') },
+    { href: '/doctor/prescriptions', label: 'Prescriptions', icon: ClipboardPlusIcon, match: (p) => p.startsWith('/doctor/prescriptions') },
     { href: '/doctor/profile', label: 'Profile', icon: UserRoundIcon, match: (p) => p.startsWith('/doctor/profile') },
   ],
-  ADMIN: [{ href: '/admin/receptionists', label: 'Receptionists', icon: UsersIcon, match: (p) => p.startsWith('/admin') }],
+  ADMIN: [
+    { href: '/admin/receptionists', label: 'Receptionists', icon: UsersIcon, match: (p) => p.startsWith('/admin/receptionists') },
+    { href: '/admin/queues', label: 'Queues', icon: ListOrderedIcon, match: (p) => p.startsWith('/admin/queues') },
+  ],
   RECEPTIONIST: [{ href: '/reception', label: 'Front desk', icon: CalendarPlusIcon, match: (p) => p.startsWith('/reception') }],
 };
 

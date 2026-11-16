@@ -589,3 +589,136 @@ export interface ActionResult {
   appointment: PatientAppointment;
   checkout?: CheckoutDetails;
 }
+
+// ---- Queue management (the backend's /queue routes) ----
+
+export type QueueStatus = 'WAITING' | 'SERVING' | 'COMPLETED' | 'CHECKED_OUT' | 'SKIPPED' | 'CANCELLED';
+
+/** One patient in a doctor's queue, as the doctor and the front desk see them: a token, a name and a time. No phone, no medical details. */
+export interface QueueEntryView {
+  id: string;
+  appointmentId: string;
+  token: number;
+  status: QueueStatus;
+  appointment: { startTime: string; endTime: string };
+  patient: { name: string };
+  checkedInAt: string;
+  calledAt: string | null;
+  completedAt: string | null;
+  checkedOutAt: string | null;
+  /** Waiting patients only: 1 is the next to be called. */
+  position?: number;
+}
+
+export interface QueueCounts {
+  waiting: number;
+  serving: number;
+  completed: number;
+  checkedOut: number;
+  skipped: number;
+  cancelled: number;
+}
+
+/** One doctor's day, worked out by the server from the live entries. */
+export interface QueueDay {
+  date: string;
+  currentlyServingToken: number | null;
+  serving: QueueEntryView | null;
+  /** In token order: the order they will be called in. */
+  waiting: QueueEntryView[];
+  completed: QueueEntryView[];
+  checkedOut: QueueEntryView[];
+  skipped: QueueEntryView[];
+  cancelled: QueueEntryView[];
+  counts: QueueCounts;
+  updatedAt: string;
+}
+
+export interface DoctorQueue extends QueueDay {
+  doctor: { id: string; name: string };
+}
+
+export interface ReceptionBoard {
+  date: string;
+  doctors: (QueueDay & { doctor: { id: string; name: string; clinic: string } })[];
+}
+
+/** What a check-in, call, completion, skip, return or checkout answers with: the entry and its place in the line. */
+export interface QueueEntryResult extends QueueEntryView {
+  queueDate: string;
+  doctor: { id: string; name: string };
+  currentlyServingToken: number | null;
+  ahead: number | null;
+  behind: number | null;
+}
+
+/** The signed-in patient's own entry. Everyone else in the queue appears only as the counts ahead and behind. */
+export interface MyQueueEntry {
+  id: string;
+  appointmentId: string;
+  queueDate: string;
+  token: number;
+  status: QueueStatus;
+  doctor: { id: string; name: string };
+  appointment: { startTime: string; endTime: string };
+  currentlyServingToken: number | null;
+  ahead: number | null;
+  behind: number | null;
+  checkedInAt: string;
+  calledAt: string | null;
+  completedAt: string | null;
+  checkedOutAt: string | null;
+  updatedAt: string;
+}
+
+/** The administrator's read-only overview: counts and tokens, never patient names. */
+export interface AdminQueueBoard {
+  date: string;
+  doctors: {
+    doctor: { id: string; name: string };
+    clinic: string;
+    currentlyServingToken: number | null;
+    lastTokenIssued: number;
+    counts: QueueCounts;
+    status: 'SERVING' | 'WAITING' | 'IDLE';
+  }[];
+}
+
+/** A receptionist the signed-in doctor has assigned (or a clinic candidate). */
+export interface DoctorReceptionist {
+  id: string;
+  name: string;
+  email: string;
+}
+
+export type PrescriptionStatus = 'DRAFT' | 'FINALIZED';
+
+export interface PrescriptionMedication {
+  name: string;
+  dosage?: string;
+  frequency?: string;
+  duration?: string;
+  instructions?: string;
+}
+
+export interface PrescriptionSummary {
+  id: string;
+  appointmentId: string;
+  status: PrescriptionStatus;
+  diagnosis: string | null;
+  notes: string | null;
+  medications: PrescriptionMedication[];
+  patient: { name: string };
+  appointment: { date: string; startTime: string; endTime: string; status: string };
+  finalizedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PrescriptionDetail extends PrescriptionSummary {
+  doctor: {
+    name: string;
+    specialty: string;
+    clinic: { name: string; address: string };
+  };
+}

@@ -39,12 +39,16 @@ describe('workspace navigation', () => {
       { href: '/doctor', label: 'Dashboard' },
       { href: '/doctor/appointments', label: 'Appointments' },
       { href: '/doctor/availability', label: 'Availability' },
+      { href: '/doctor/prescriptions', label: 'Prescriptions' },
       { href: '/doctor/profile', label: 'Profile' },
     ]);
   });
 
-  it('does not touch the admin and receptionist navigation', () => {
-    expect(itemsOf('ADMIN')).toEqual([{ href: '/admin/receptionists', label: 'Receptionists' }]);
+  it('adds only the read-only Queues overview for admins, and leaves the receptionist navigation alone', () => {
+    expect(itemsOf('ADMIN')).toEqual([
+      { href: '/admin/receptionists', label: 'Receptionists' },
+      { href: '/admin/queues', label: 'Queues' }, // the read-only queue overview
+    ]);
     expect(itemsOf('RECEPTIONIST')).toEqual([{ href: '/reception', label: 'Front desk' }]);
   });
 });
