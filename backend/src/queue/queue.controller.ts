@@ -18,7 +18,7 @@ const noBody = z.strictObject({}).optional();
 
 /**
  * Doctor-wise queue management. Every route names the roles that may use it, and each service method checks the rest: a receptionist
- * only reaches doctors at the clinics they are assigned to, a doctor only their own queue, and a patient only their own entry.
+ * only reaches doctors who assigned them, a doctor only their own queue, and a patient only their own entry.
  * Someone else's appointment or queue entry looks like a missing one (404).
  */
 @Controller('queue')
@@ -28,7 +28,7 @@ export class QueueController {
 
   // ---- Receptionist ----
 
-  /** The queue of each doctor at the receptionist's clinics (or one doctor), for a day (today by default). */
+  /** The queue of each doctor who assigned this receptionist (or one doctor), for a day (today by default). */
   @Get('reception')
   @Roles('RECEPTIONIST')
   board(@CurrentUser() user: AuthUser, @Query(new ZodValidationPipe(receptionQuery)) query: z.infer<typeof receptionQuery>) {

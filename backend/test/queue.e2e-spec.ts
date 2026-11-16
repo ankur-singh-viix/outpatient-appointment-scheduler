@@ -1,6 +1,6 @@
 // Doctor-wise queue management (backend foundation).
 //  - tokens: the next number in ONE doctor's queue for ONE clinic day, safe under concurrent check-ins, never reused, restarting each day;
-//  - the receptionist checks patients in and out (only their own clinics); the doctor calls the next patient and completes the consultation;
+//  - the receptionist checks patients in and out (only doctors who assigned them); the doctor calls the next patient and completes the consultation;
 //  - the lifecycle is enforced (no double check-in, no checkout before completion, never two patients served at once);
 //  - positions (serving token, ahead, behind) come from the live entries; a cancelled appointment leaves the queue without the
 //    existing cancel flows knowing about it; the auto-complete job leaves a waiting or served patient's appointment alone;
@@ -126,6 +126,10 @@ describe('Queue management (e2e)', () => {
     receptionistUser1 = await user('Rita Reception', 'qrec1@test.local', 'RECEPTIONIST');
     const receptionistUser2 = await user('Rob Reception', 'qrec2@test.local', 'RECEPTIONIST');
     await db.query('INSERT INTO receptionist_assignments (receptionist_user_id, clinic_id) VALUES ($1, $2), ($3, $4)', [receptionistUser1, clinic1, receptionistUser2, clinic2]);
+    await db.query(
+      'INSERT INTO doctor_receptionist_assignments (doctor_id, receptionist_user_id) VALUES ($1, $2), ($3, $2), ($4, $5)',
+      [doctorA, receptionistUser1, doctorB, doctorC, receptionistUser2],
+    );
     await user('Ada Admin', 'qadmin@test.local', 'ADMIN');
     for (let n = 1; n <= PATIENTS; n++) {
       const userId = await user(`Patient ${n}`, `qp${n}@test.local`, 'PATIENT');
