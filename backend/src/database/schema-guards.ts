@@ -42,6 +42,16 @@ const REQUIRED_TABLES = [
     migration: '015_queue_management.sql',
     consequence: 'queue management is unavailable (check-in, tokens, calling patients); appointments, booking and everything else keep working',
   },
+  {
+    name: 'doctor_receptionist_assignments',
+    migration: '016_doctor_receptionist_and_prescriptions.sql',
+    consequence: 'doctors cannot assign a receptionist, and receptionists cannot be scoped to a doctor',
+  },
+  {
+    name: 'prescriptions',
+    migration: '016_doctor_receptionist_and_prescriptions.sql',
+    consequence: 'prescriptions cannot be created, finalized or printed',
+  },
 ];
 
 export interface MissingTable {
