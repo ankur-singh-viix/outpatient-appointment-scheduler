@@ -14,6 +14,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatFee, formatTimeRange, relativeDay } from '@/lib/format';
 import { useClinicToday, useQuery } from '@/lib/hooks';
 import type { PatientAppointment, Session } from '@/lib/types';
+import { PatientQueueCard } from './patient-queue-card';
 
 export function PatientDashboard() {
   return (
@@ -50,6 +51,8 @@ function Dashboard({ session }: { session: Session }) {
         title={`Welcome back, ${firstName}`}
         description="Your upcoming care and quick ways to book the next visit."
       />
+
+      <PatientQueueCard session={session} />
 
       <Card className="bg-gradient-to-br from-teal-700 to-teal-900 text-white [--card-spacing:--spacing(6)]">
         <CardContent className="flex flex-wrap items-center justify-between gap-4">
