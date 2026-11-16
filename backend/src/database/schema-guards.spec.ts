@@ -28,14 +28,21 @@ describe('missingTables', () => {
     expect(missing).toEqual([
       expect.objectContaining({ name: 'assistant_actions', migration: '012_assistant_actions.sql' }),
       expect.objectContaining({ name: 'assistant_conversations', migration: '013_assistant_history.sql' }),
+      expect.objectContaining({ name: 'queue_entries', migration: '015_queue_management.sql' }),
     ]);
     expect(missing[0].consequence).toMatch(/cannot prepare bookings/);
   });
   it('reports the history table when migration 013 has not been applied, and says the assistant still answers', async () => {
-    const onlyActions = { query: async (sql: string) => [{ found: sql.includes('assistant_actions') ? 'assistant_actions' : null }] };
+    const onlyActions = { query: async (sql: string) => [{ found: sql.includes('assistant_actions') || sql.includes('queue_entries') ? 'present' : null }] };
     const missing = await missingTables(onlyActions);
     expect(missing).toEqual([expect.objectContaining({ name: 'assistant_conversations', migration: '013_assistant_history.sql' })]);
     expect(missing[0].consequence).toMatch(/still answers/);
+  });
+  it('reports the queue table when migration 015 has not been applied, and says everything else keeps working', async () => {
+    const withoutQueue = { query: async (sql: string) => [{ found: sql.includes('queue_entries') ? null : 'present' }] };
+    const missing = await missingTables(withoutQueue);
+    expect(missing).toEqual([expect.objectContaining({ name: 'queue_entries', migration: '015_queue_management.sql' })]);
+    expect(missing[0].consequence).toMatch(/keep working/);
   });
   it('reports nothing when the tables are there', async () => {
     expect(await missingTables(answering('assistant_actions'))).toEqual([]);

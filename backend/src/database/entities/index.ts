@@ -11,6 +11,7 @@ import { Notification } from './notification.entity.js';
 import { Patient } from './patient.entity.js';
 import { PaymentEvent } from './payment-event.entity.js';
 import { Payment } from './payment.entity.js';
+import { QueueEntry, QueueEvent, QUEUE_STATUSES, type QueueStatus } from './queue-entry.entity.js';
 import { Refund } from './refund.entity.js';
 import { ReceptionistAssignment } from './receptionist-assignment.entity.js';
 import { ScheduleChange, ScheduleChangeAppointment, SCHEDULE_RESOLUTIONS, type ScheduleResolution } from './schedule-change.entity.js';
@@ -34,6 +35,10 @@ export {
   Patient,
   Payment,
   PaymentEvent,
+  QUEUE_STATUSES,
+  QueueEntry,
+  QueueEvent,
+  type QueueStatus,
   ReceptionistAssignment,
   Refund,
   slotIntervalOf,
@@ -69,4 +74,6 @@ export const ENTITIES = [
   AssistantAction,
   AssistantConversation,
   AssistantMessage,
+  QueueEntry,
+  QueueEvent,
 ];
