@@ -170,3 +170,30 @@ describe('messages for the Brevo notification set', () => {
     expect(message.sms).toContain('no action needed');
   });
 });
+
+describe('queue messages', () => {
+  it('the check-in notice gives the token, who, when and where, and how many are ahead, in a text of at most 160 characters', () => {
+    const message = templates.queueCheckedIn(facts, { token: 7, ahead: 3 });
+    expect(message.kind).toBe('queue-checked-in');
+    expect(message.subject).toBe('You are checked in: token 7, Dr. Rohan Das');
+    expect(message.body).toContain('Your token number is 7.');
+    expect(message.body).toContain('3 patients are ahead of you.');
+    expect(message.body).toContain('City Clinic, 12 MG Road');
+    expect(message.sms).toContain('Your token is 7.');
+    expect(message.sms.length).toBeLessThanOrEqual(160);
+  });
+
+  it('says "you are next" for nobody ahead, and the singular for one', () => {
+    expect(templates.queueCheckedIn(facts, { token: 1, ahead: 0 }).body).toContain('You are next.');
+    expect(templates.queueCheckedIn(facts, { token: 2, ahead: 1 }).body).toContain('1 patient is ahead of you.');
+    expect(templates.queueCheckedIn(facts, { token: 2, ahead: 1 }).sms).toContain('1 patient is ahead of you.');
+  });
+
+  it('the "your turn" notice names the token and the doctor, and carries no medical information', () => {
+    const message = templates.queueCalled(facts, { token: 7 });
+    expect(message.kind).toBe('queue-called');
+    expect(message.sms).toBe("CareSlot: token 7, it is your turn. Please go to Dr. Rohan Das's consultation room.");
+    expect(`${message.subject} ${message.body} ${message.sms}`).not.toMatch(/diagnos|treatment|prescri|medical/i);
+  });
+});
+
