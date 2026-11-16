@@ -249,3 +249,42 @@ export function reminder(facts: AppointmentFacts, hoursBefore: number): MessageC
     sms: clip(`CareSlot reminder: appointment with ${facts.doctorName}, ${when(facts)}.`),
   };
 }
+
+const patientsAhead = (ahead: number) => (ahead === 0 ? 'You are next.' : `${ahead} patient${ahead === 1 ? ' is' : 's are'} ahead of you.`);
+
+/**
+ * The patient has arrived and has a place in the doctor's queue: their token, who, when and where, and how many are ahead right now.
+ * The number ahead is only the picture at check-in, so the message says where to see the live queue.
+ */
+export function queueCheckedIn(facts: AppointmentFacts, input: { token: number; ahead: number }): MessageContent {
+  return {
+    kind: 'queue-checked-in',
+    subject: `You are checked in: token ${input.token}, ${facts.doctorName}`,
+    body:
+      `Hi ${facts.patientName},
+
+` +
+      `You are checked in. Your token number is ${input.token}.
+
+` +
+      `${patientsAhead(input.ahead)} Please wait in the waiting area: you will be called when it is your turn. The queue can change, and your CareSlot dashboard always shows where you are in it.
+
+` +
+      details(facts),
+    sms: clip(`CareSlot: checked in with ${facts.doctorName}. Your token is ${input.token}. ${patientsAhead(input.ahead)} Track your place on your CareSlot dashboard.`),
+  };
+}
+
+/** The doctor has called the patient. Sent by text only: the patient is at the clinic, and an email would arrive after they had walked in. */
+export function queueCalled(facts: AppointmentFacts, input: { token: number }): MessageContent {
+  return {
+    kind: 'queue-called',
+    subject: `It is your turn: token ${input.token}, ${facts.doctorName}`,
+    body: `Hi ${facts.patientName},
+
+It is your turn. Token ${input.token}: please go to ${facts.doctorName}'s consultation room.
+
+${details(facts)}`,
+    sms: clip(`CareSlot: token ${input.token}, it is your turn. Please go to ${facts.doctorName}'s consultation room.`),
+  };
+}
