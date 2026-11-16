@@ -5,7 +5,19 @@ import type { AuthUser } from '../auth/auth.types.js';
 import { loadConfig } from '../config.js';
 import { withDoctorTitle } from '../common/names.js';
 import { changeBlockedReason } from '../scheduling/appointment-rules.js';
-import { ACTIVE_STATUSES, Appointment, Availability, Clinic, Doctor, ScheduleOverride, Specialty, User, slotIntervalOf } from '../database/entities/index.js';
+import {
+  ACTIVE_STATUSES,
+  Appointment,
+  Availability,
+  Clinic,
+  Doctor,
+  DoctorReceptionistAssignment,
+  ReceptionistAssignment,
+  ScheduleOverride,
+  Specialty,
+  User,
+  slotIntervalOf,
+} from '../database/entities/index.js';
 import { effectiveRangesIntersect, inheritedSettings, isCurrent, ruleProblem } from '../scheduling/availability-rules.js';
 import { addDays, clinicNow, isValidDate } from '../scheduling/calendar.js';
 import { loadDaySchedule, toRule } from '../scheduling/day-schedule.js';
@@ -533,6 +545,59 @@ export class DoctorPortalService {
     // Lifting an exception gives the date its normal hours back, which can bring waiting appointments back inside them.
     const summary = await this.changes.removeOverride(user, date, acknowledge);
     return { ...(await this.availability(user)), ...summary };
+  }
+
+  /** The receptionist currently assigned to this doctor, or null. */
+  async receptionist(user: AuthUser) {
+    const doctor = await this.profileFor(user);
+    const link = await this.dataSource.getRepository(DoctorReceptionistAssignment).findOne({
+      where: { doctorId: doctor.id },
+      relations: { receptionist: true },
+    });
+    if (!link) return null;
+    return { id: link.receptionist.id, name: link.receptionist.name, email: link.receptionist.email };
+  }
+
+  /**
+   * Receptionists an administrator has placed at this doctor's clinic. The doctor may assign one of them; someone from another
+   * clinic is never listed.
+   */
+  async receptionistCandidates(user: AuthUser) {
+    const doctor = await this.profileFor(user);
+    const rows: { id: string; name: string; email: string }[] = await this.dataSource.query(
+      `SELECT u.id, u.name, u.email
+         FROM receptionist_assignments ra
+         JOIN users u ON u.id = ra.receptionist_user_id
+        WHERE ra.clinic_id = $1 AND u.role = 'RECEPTIONIST'
+        ORDER BY u.name`,
+      [doctor.clinicId],
+    );
+    return rows;
+  }
+
+  /** Assigns or replaces the doctor's receptionist. The person must already be a receptionist at the doctor's clinic. */
+  async assignReceptionist(user: AuthUser, receptionistUserId: string) {
+    const doctor = await this.profileFor(user);
+    const candidate = await this.dataSource.getRepository(User).findOneBy({ id: receptionistUserId, role: 'RECEPTIONIST' });
+    if (!candidate) throw new NotFoundException('Receptionist not found.');
+    const atClinic = await this.dataSource.getRepository(ReceptionistAssignment).existsBy({
+      receptionistUserId: candidate.id,
+      clinicId: doctor.clinicId,
+    });
+    if (!atClinic) throw new BadRequestException('Choose a receptionist assigned to your clinic.');
+    await this.dataSource.transaction(async (manager) => {
+      await manager.delete(DoctorReceptionistAssignment, { doctorId: doctor.id });
+      await manager.save(manager.create(DoctorReceptionistAssignment, { doctorId: doctor.id, receptionistUserId: candidate.id }));
+    });
+    return { id: candidate.id, name: candidate.name, email: candidate.email };
+  }
+
+  /** Removes the doctor's receptionist assignment. The clinic assignment (admin) is left alone. */
+  async removeReceptionist(user: AuthUser) {
+    const doctor = await this.profileFor(user);
+    const result = await this.dataSource.getRepository(DoctorReceptionistAssignment).delete({ doctorId: doctor.id });
+    if (!result.affected) throw new NotFoundException('No receptionist is assigned.');
+    return { removed: true as const };
   }
 
   private async profileFor(user: AuthUser): Promise<Doctor> {

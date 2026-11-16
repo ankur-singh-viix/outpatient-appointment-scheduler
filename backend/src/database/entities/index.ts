@@ -4,6 +4,7 @@ import { ACTIVE_STATUSES, Appointment } from './appointment.entity.js';
 import { Availability } from './availability.entity.js';
 import { Clinic } from './clinic.entity.js';
 import { Doctor, slotIntervalOf } from './doctor.entity.js';
+import { DoctorReceptionistAssignment } from './doctor-receptionist-assignment.entity.js';
 import { EmailVerification } from './email-verification.entity.js';
 import { ExternalIdentity } from './external-identity.entity.js';
 import { NotificationPreference } from './notification-preference.entity.js';
@@ -11,6 +12,7 @@ import { Notification } from './notification.entity.js';
 import { Patient } from './patient.entity.js';
 import { PaymentEvent } from './payment-event.entity.js';
 import { Payment } from './payment.entity.js';
+import { Prescription, PRESCRIPTION_STATUSES, type PrescriptionMedication, type PrescriptionStatus } from './prescription.entity.js';
 import { QueueEntry, QueueEvent, QUEUE_STATUSES, type QueueStatus } from './queue-entry.entity.js';
 import { Refund } from './refund.entity.js';
 import { ReceptionistAssignment } from './receptionist-assignment.entity.js';
@@ -28,6 +30,7 @@ export {
   Availability,
   Clinic,
   Doctor,
+  DoctorReceptionistAssignment,
   EmailVerification,
   ExternalIdentity,
   Notification,
@@ -35,6 +38,10 @@ export {
   Patient,
   Payment,
   PaymentEvent,
+  PRESCRIPTION_STATUSES,
+  Prescription,
+  type PrescriptionMedication,
+  type PrescriptionStatus,
   QUEUE_STATUSES,
   QueueEntry,
   QueueEvent,
@@ -59,6 +66,7 @@ export const ENTITIES = [
   Clinic,
   Specialty,
   ReceptionistAssignment,
+  DoctorReceptionistAssignment,
   Availability,
   ScheduleOverride,
   Appointment,
@@ -76,4 +84,5 @@ export const ENTITIES = [
   AssistantMessage,
   QueueEntry,
   QueueEvent,
+  Prescription,
 ];

@@ -20,7 +20,7 @@ const idParam = z.strictObject({ id: z.uuid() });
 const cancelSchema = z.strictObject({ reason: z.string().trim().max(200).optional() }).optional();
 const rescheduleSchema = z.strictObject({ date: dateSchema, startTime: timeSchema });
 
-/** Receptionists act on the clinics they are assigned to (the service checks that on every request). */
+/** Receptionists act on the doctors who assigned them (the service checks that on every request). */
 @Controller('receptionist')
 @UseGuards(AuthGuard)
 @Roles('RECEPTIONIST')
