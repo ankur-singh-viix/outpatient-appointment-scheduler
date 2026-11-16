@@ -3,7 +3,8 @@ import { DataSource, EntityManager } from 'typeorm';
 import { assertTransition } from '../appointments/appointment-lifecycle.js';
 import type { AuthUser } from '../auth/auth.types.js';
 import { loadConfig } from '../config.js';
-import { Appointment, Doctor, Patient, QueueEntry, QueueEvent, ReceptionistAssignment, type QueueStatus } from '../database/entities/index.js';
+import { Appointment, Doctor, DoctorReceptionistAssignment, Patient, QueueEntry, QueueEvent, type QueueStatus } from '../database/entities/index.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 import { clinicNow } from '../scheduling/calendar.js';
 import { hhmm } from '../scheduling/slots.js';
 import { assertQueueTransition, eventFor } from './queue-lifecycle.js';
@@ -49,18 +50,21 @@ const conflict = (code: string, message: string, extra: Record<string, unknown> 
 export class QueueService {
   private readonly config = loadConfig();
 
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   // ---- Receptionist ----
 
   /** Checks a patient in for a CONFIRMED appointment on its day, giving them the next token in that doctor's queue. */
   async checkIn(user: AuthUser, appointmentId: string) {
     return this.guard(async () => {
-      const clinicIds = await this.clinicIds(user);
+      const doctorIds = await this.assignedDoctorIds(user);
       const today = this.today();
       const entryId = await this.dataSource.transaction(async (manager) => {
         const found = await manager.findOne(Appointment, { where: { id: appointmentId }, relations: { doctor: true } });
-        if (!found || !clinicIds.includes(found.doctor.clinicId)) throw new NotFoundException('Appointment not found.');
+        if (!found || !doctorIds.includes(found.doctorId)) throw new NotFoundException('Appointment not found.');
         // Doctor first, then the appointment: the order booking uses, so the two can never wait on each other.
         await this.lockDoctor(manager, found.doctorId);
         const appointment = await manager.findOneOrFail(Appointment, { where: { id: appointmentId }, lock: { mode: 'pessimistic_write' } });
@@ -78,8 +82,13 @@ export class QueueService {
           manager.create(QueueEntry, { appointmentId, doctorId: appointment.doctorId, patientId: appointment.patientId, queueDate: today, tokenNumber: Number(next), status: 'WAITING', checkedInByUserId: user.id }),
         );
         await this.record(manager, entry.id, null, 'WAITING', user);
+        // The patient is told their token (email, and a text if they have a phone and allow texts). Queued in this transaction through the
+        // outbox: it can never undo the check-in, and a second request cannot get this far (the check-in is refused above).
+        const position = positionOf(buildDay(await this.dayRows(manager, appointment.doctorId, today)), entry.id);
+        await this.notifications.queueCheckedIn(manager, appointmentId, { entryId: entry.id, token: entry.tokenNumber, ahead: position?.ahead ?? 0 });
         return entry.id;
       });
+      this.notifications.kick();
       return this.describe(entryId);
     });
   }
@@ -87,9 +96,9 @@ export class QueueService {
   /** Checks a patient out after their consultation was completed, and only then. */
   async checkOut(user: AuthUser, entryId: string) {
     return this.guard(async () => {
-      const clinicIds = await this.clinicIds(user);
+      const doctorIds = await this.assignedDoctorIds(user);
       await this.dataSource.transaction(async (manager) => {
-        const entry = await this.entryInClinics(manager, entryId, clinicIds);
+        const entry = await this.entryForAssignedDoctors(manager, entryId, doctorIds);
         await this.move(manager, entry, 'CHECKED_OUT', user, { checkedOutAt: new Date(), checkedOutByUserId: user.id });
       });
       return this.describe(entryId);
@@ -99,10 +108,10 @@ export class QueueService {
   /** Puts a skipped patient back in the queue with the token they had. Only for a patient whose appointment is still confirmed and today's. */
   async returnToQueue(user: AuthUser, entryId: string) {
     return this.guard(async () => {
-      const clinicIds = await this.clinicIds(user);
+      const doctorIds = await this.assignedDoctorIds(user);
       const today = this.today();
       await this.dataSource.transaction(async (manager) => {
-        const probe = await this.entryInClinics(manager, entryId, clinicIds, false);
+        const probe = await this.entryForAssignedDoctors(manager, entryId, doctorIds, false);
         await this.lockDoctor(manager, probe.doctorId);
         const entry = await this.lockEntry(manager, entryId);
         assertQueueTransition(entry.status, 'WAITING');
@@ -115,16 +124,16 @@ export class QueueService {
     });
   }
 
-  /** The doctor's queue for a day, as the front desk sees it: every doctor at the receptionist's clinics (or one of them). */
+  /** The doctor's queue for a day, as the front desk sees it: every doctor who assigned this receptionist (or one of them). */
   async receptionBoard(user: AuthUser, query: { doctorId?: string; date?: string }) {
     return this.guard(async () => {
-      const clinicIds = await this.clinicIds(user);
-      if (clinicIds.length === 0) return { date: query.date ?? this.today(), doctors: [] };
+      const doctorIds = await this.assignedDoctorIds(user);
+      if (doctorIds.length === 0) return { date: query.date ?? this.today(), doctors: [] };
       const date = query.date ?? this.today();
       const doctors: { id: string; name: string; clinic_name: string }[] = await this.dataSource.query(
         `SELECT d.id, u.name, c.name AS clinic_name FROM doctors d JOIN users u ON u.id = d.user_id JOIN clinics c ON c.id = d.clinic_id
-          WHERE d.clinic_id = ANY($1::uuid[]) ${query.doctorId ? 'AND d.id = $2' : ''} ORDER BY u.name`,
-        query.doctorId ? [clinicIds, query.doctorId] : [clinicIds],
+          WHERE d.id = ANY($1::uuid[]) ${query.doctorId ? 'AND d.id = $2' : ''} ORDER BY u.name`,
+        query.doctorId ? [doctorIds, query.doctorId] : [doctorIds],
       );
       if (query.doctorId && doctors.length === 0) throw new NotFoundException('Doctor not found.');
       const boards = [];
@@ -171,10 +180,12 @@ export class QueueService {
         if (!next) return { kind: 'empty' as const, cleared };
         const entry = await this.lockEntry(manager, next.id);
         await this.move(manager, entry, 'SERVING', user, { calledAt: new Date(), calledByUserId: user.id });
+        await this.notifications.queueCalled(manager, entry.appointmentId, { entryId: entry.id, token: entry.tokenNumber });
         return { kind: 'called' as const, id: entry.id };
       });
       if (outcome.kind === 'busy') throw conflict('CURRENT_NOT_COMPLETED', `Complete the consultation for token ${outcome.token} before calling the next patient.`, { token: outcome.token });
       if (outcome.kind === 'empty') throw conflict('QUEUE_EMPTY', 'No patients are waiting.');
+      this.notifications.kick();
       return this.describe(outcome.id);
     });
   }
@@ -210,7 +221,7 @@ export class QueueService {
   /** Skips a waiting patient, or one who was called but is not there. The appointment itself is left as it is. */
   async skip(user: AuthUser, entryId: string) {
     return this.guard(async () => {
-      const clinicIds = user.role === 'RECEPTIONIST' ? await this.clinicIds(user) : [];
+      const doctorIds = user.role === 'RECEPTIONIST' ? await this.assignedDoctorIds(user) : [];
       const doctor = user.role === 'DOCTOR' ? await this.doctorOf(user) : null;
       await this.dataSource.transaction(async (manager) => {
         const probe = await manager.findOneBy(QueueEntry, { id: entryId });
@@ -218,7 +229,7 @@ export class QueueService {
         if (doctor) {
           if (probe.doctorId !== doctor.id) throw new NotFoundException('Queue entry not found.');
         } else {
-          await this.entryInClinics(manager, entryId, clinicIds, false);
+          await this.entryForAssignedDoctors(manager, entryId, doctorIds, false);
         }
         await this.lockDoctor(manager, probe.doctorId);
         const entry = await this.lockEntry(manager, entryId);
@@ -322,9 +333,10 @@ export class QueueService {
     }
   }
 
-  private async clinicIds(user: AuthUser): Promise<string[]> {
-    const rows = await this.dataSource.getRepository(ReceptionistAssignment).find({ where: { receptionistUserId: user.id } });
-    return rows.map((row) => row.clinicId);
+  /** Doctors who have assigned this receptionist (empty when none have). */
+  private async assignedDoctorIds(user: AuthUser): Promise<string[]> {
+    const rows = await this.dataSource.getRepository(DoctorReceptionistAssignment).find({ where: { receptionistUserId: user.id } });
+    return rows.map((row) => row.doctorId);
   }
 
   private async doctorOf(user: AuthUser): Promise<{ id: string; name: string }> {
@@ -343,12 +355,10 @@ export class QueueService {
     return entry;
   }
 
-  /** The entry, if its doctor is at one of these clinics; someone else's looks like a missing one. */
-  private async entryInClinics(manager: EntityManager, id: string, clinicIds: string[], lock = true): Promise<QueueEntry> {
+  /** The entry, if its doctor assigned this receptionist; someone else's looks like a missing one. */
+  private async entryForAssignedDoctors(manager: EntityManager, id: string, doctorIds: string[], lock = true): Promise<QueueEntry> {
     const entry = lock ? await this.lockEntry(manager, id) : await manager.findOneBy(QueueEntry, { id });
-    if (!entry) throw new NotFoundException('Queue entry not found.');
-    const doctor = await manager.findOneBy(Doctor, { id: entry.doctorId });
-    if (!doctor || !clinicIds.includes(doctor.clinicId)) throw new NotFoundException('Queue entry not found.');
+    if (!entry || !doctorIds.includes(entry.doctorId)) throw new NotFoundException('Queue entry not found.');
     return entry;
   }
 
