@@ -129,7 +129,7 @@ describe('Booking, capacity and lifecycle invariants (e2e)', () => {
   });
 
   beforeEach(async () => {
-    await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
     await db.query('DELETE FROM schedule_overrides; DELETE FROM availability;');
   });
 
@@ -175,6 +175,21 @@ describe('Booking, capacity and lifecycle invariants (e2e)', () => {
       expect(results.filter((r) => r.status === 201)).toHaveLength(2);
       expect(results.filter((r) => r.status !== 201).every((r) => r.status === 409)).toBe(true);
       expect((await active(FAR, '09:00:00')).map((s) => s.slot_number)).toEqual([1, 2, 3, 4, 5]);
+    });
+
+    it('patients booking the same doctor and same slot each get a distinct queue token at booking time', async () => {
+      await addRow(FAR);
+      const results = await Promise.all([0, 1, 2, 3, 4].map((n) => book(n, FAR, '09:00')));
+      expect(results.every((r) => r.status === 201)).toBe(true);
+      const tokens = await rows<{ token_number: number; appointment_id: string }>(
+        `SELECT q.token_number, q.appointment_id FROM queue_entries q
+         JOIN appointments a ON a.id = q.appointment_id
+         WHERE a.doctor_id = $1 AND a.appointment_date = $2 AND a.start_time = '09:00' AND q.status = 'BOOKED'
+         ORDER BY q.token_number`,
+        [doctorId, FAR],
+      );
+      expect(tokens.map((row) => row.token_number)).toEqual([1, 2, 3, 4, 5]);
+      expect(new Set(tokens.map((row) => row.appointment_id)).size).toBe(5);
     });
 
     it('two patients rescheduling into the last place at once: one wins; the other keeps their original booking', async () => {
@@ -338,7 +353,7 @@ describe('Booking, capacity and lifecycle invariants (e2e)', () => {
 
     it('a booking racing a reduction: either it was refused, or it is affected and tracked like the others', async () => {
       for (let round = 0; round < 6; round++) {
-        await db.query('DELETE FROM notifications; DELETE FROM schedule_changes; DELETE FROM appointments; DELETE FROM availability;');
+        await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM schedule_changes; DELETE FROM appointments; DELETE FROM availability;');
         const row = await addRow(FAR);
         await book(0, FAR, '09:30').expect(201);
         const [shrink, racer] = await Promise.all([
@@ -356,7 +371,7 @@ describe('Booking, capacity and lifecycle invariants (e2e)', () => {
 
     it('a patient confirming a new time racing a day off: the booking or the refusal, never a silent loss', async () => {
       for (let round = 0; round < 6; round++) {
-        await db.query('DELETE FROM notifications; DELETE FROM schedule_overrides; DELETE FROM schedule_changes; DELETE FROM appointments; DELETE FROM availability;');
+        await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM schedule_overrides; DELETE FROM schedule_changes; DELETE FROM appointments; DELETE FROM availability;');
         await addRow(FAR);
         await addRow(FAR2);
         const original = (await book(0, FAR, '09:30').expect(201)).body;
