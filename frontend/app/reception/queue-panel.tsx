@@ -1,16 +1,18 @@
 'use client';
 
-import { LogInIcon, LogOutIcon, RotateCcwIcon, SkipForwardIcon } from 'lucide-react';
-import { useState } from 'react';
+import { CheckIcon, LogInIcon, LogOutIcon, RotateCcwIcon, SkipForwardIcon } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { Alert, EmptyState } from '@/components/common';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api, errorMessage } from '@/lib/api';
-import { formatTimeRange, timeAgo } from '@/lib/format';
+import { clinicToday, formatTimeRange, timeAgo } from '@/lib/format';
 import { useNow } from '@/lib/hooks';
 import { queueApi } from '@/lib/queue-client';
 import { actionNotice, buildDesk, entryActions, type ArrivalRow, type DeskDoctor, type QueueAction } from '@/lib/queue-view';
-import type { QueueEntryResult, QueueEntryView, ReceptionAppointment, ReceptionBoard, Session } from '@/lib/types';
+import type { QueueEntryResult, QueueEntryView, ReceptionAppointment, ReceptionBoard, ReceptionDoctor, Session } from '@/lib/types';
 import { useQueuePolling } from '../queue/use-queue-polling';
 import { Freshness, QueueStatusPill, TokenBadge } from '../queue/queue-ui';
 
@@ -19,19 +21,27 @@ interface Desk {
   appointments: ReceptionAppointment[];
 }
 
+const selectClass =
+  'h-10 rounded-lg border border-input bg-card px-3 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50';
+
 /**
  * The front desk's queue: for each doctor who assigned this receptionist, who is being seen, who is waiting, who has finished or been
- * skipped, and who is still to arrive today. Checking in, skipping, returning and checking out are buttons here; each one asks the
- * server, which applies the rules (confirmed appointments on their own day only, checkout only after completion, assigned doctors only)
- * and whose answer is shown, including a refusal. Keeps itself up to date by polling.
+ * skipped, and who is still to arrive. Checking in reuses the booking-time token. Completing and checking out are available here.
+ * Date, doctor and slot filters narrow what is shown; polling keeps the board current.
  */
-export function QueuePanel({ session, refreshKey = 0 }: { session: Session; refreshKey?: number }) {
+export function QueuePanel({ session, doctors = [], refreshKey = 0 }: { session: Session; doctors?: ReceptionDoctor[]; refreshKey?: number }) {
+  const [date, setDate] = useState('');
+  const [doctorId, setDoctorId] = useState('');
+  const [slotTime, setSlotTime] = useState('');
+  const boardDate = date || undefined;
   const desk = useQueuePolling<Desk>(
-    `queue-desk:${session.user.id}:${refreshKey}`,
+    `queue-desk:${session.user.id}:${refreshKey}:${boardDate ?? 'today'}:${doctorId || 'all'}`,
     async () => {
-      // Board date comes from the server's clinic calendar; load today's appointments for that same day so arrivals and check-in stay aligned.
-      const board = await queueApi.board(session);
-      const appointments = await api<ReceptionAppointment[]>(`/receptionist/appointments?date=${board.date}`, { token: session.accessToken });
+      const board = await queueApi.board(session, { date: boardDate, doctorId: doctorId || undefined });
+      const appointments = await api<ReceptionAppointment[]>(
+        `/receptionist/appointments?date=${board.date}${doctorId ? `&doctorId=${doctorId}` : ''}`,
+        { token: session.accessToken },
+      );
       return { board, appointments };
     },
     10_000,
@@ -53,7 +63,19 @@ export function QueuePanel({ session, refreshKey = 0 }: { session: Session; refr
     }
   };
 
-  if (desk.loading) {
+  const slotOptions = useMemo(() => {
+    if (!desk.data) return [] as string[];
+    const times = new Set<string>();
+    for (const day of desk.data.board.doctors) {
+      for (const entry of [...(day.booked ?? []), ...day.waiting, ...(day.serving ? [day.serving] : []), ...day.completed, ...day.checkedOut, ...day.skipped]) {
+        times.add(entry.appointment.startTime);
+      }
+    }
+    for (const appointment of desk.data.appointments) times.add(appointment.startTime);
+    return [...times].sort();
+  }, [desk.data]);
+
+  if (desk.loading && !desk.data) {
     return (
       <div aria-busy="true" className="space-y-3 rounded-xl border bg-card p-5">
         <Skeleton className="h-6 w-1/3" />
@@ -78,20 +100,90 @@ export function QueuePanel({ session, refreshKey = 0 }: { session: Session; refr
     );
   }
 
-  const doctors = buildDesk(desk.data.board, desk.data.appointments);
+  const matchesSlot = (startTime: string) => !slotTime || startTime === slotTime;
+  const filtered = buildDesk(desk.data.board, desk.data.appointments).map((entry) => {
+    if (!slotTime) return entry;
+    const serving = entry.day.serving && matchesSlot(entry.day.serving.appointment.startTime) ? entry.day.serving : null;
+    return {
+      ...entry,
+      arrivals: entry.arrivals.filter((row) => matchesSlot(row.startTime)),
+      awaitingPayment: entry.awaitingPayment.filter((row) => matchesSlot(row.startTime)),
+      day: {
+        ...entry.day,
+        serving,
+        currentlyServingToken: serving?.token ?? null,
+        booked: (entry.day.booked ?? []).filter((row) => matchesSlot(row.appointment.startTime)),
+        waiting: entry.day.waiting.filter((row) => matchesSlot(row.appointment.startTime)),
+        completed: entry.day.completed.filter((row) => matchesSlot(row.appointment.startTime)),
+        checkedOut: entry.day.checkedOut.filter((row) => matchesSlot(row.appointment.startTime)),
+        skipped: entry.day.skipped.filter((row) => matchesSlot(row.appointment.startTime)),
+        cancelled: entry.day.cancelled.filter((row) => matchesSlot(row.appointment.startTime)),
+      },
+    };
+  });
+
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Today&apos;s confirmed arrivals show a <span className="font-medium text-foreground">Check in</span> button. That issues the next token for that doctor, emails the patient, and adds them to the waiting list.
+        Tokens are issued when the appointment is booked. <span className="font-medium text-foreground">Check in</span> reuses that token.
+        After the consultation, mark the patient <span className="font-medium text-foreground">Completed</span>, then check them out.
       </p>
+      <div className="flex flex-wrap items-end gap-3 rounded-xl border bg-card p-4">
+        <div className="space-y-2">
+          <Label htmlFor="queue-date">Date</Label>
+          <Input
+            id="queue-date"
+            type="date"
+            value={date || clinicToday() || ''}
+            onChange={(event) => setDate(event.target.value === clinicToday() ? '' : event.target.value)}
+            className="h-10 w-44 bg-background"
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="queue-doctor">Doctor</Label>
+          <select id="queue-doctor" value={doctorId} onChange={(event) => setDoctorId(event.target.value)} className={selectClass}>
+            <option value="">All assigned doctors</option>
+            {doctors.map((doctor) => (
+              <option key={doctor.id} value={doctor.id}>
+                {doctor.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="queue-slot">Appointment slot</Label>
+          <select id="queue-slot" value={slotTime} onChange={(event) => setSlotTime(event.target.value)} className={selectClass}>
+            <option value="">All slots</option>
+            {slotOptions.map((time) => (
+              <option key={time} value={time}>
+                {formatTimeRange(time, time, true).split('–')[0]?.trim() || time}
+              </option>
+            ))}
+          </select>
+        </div>
+        {(date || doctorId || slotTime) && (
+          <Button
+            type="button"
+            variant="outline"
+            className="h-10"
+            onClick={() => {
+              setDate('');
+              setDoctorId('');
+              setSlotTime('');
+            }}
+          >
+            Clear filters
+          </Button>
+        )}
+      </div>
       {notice && <Alert tone={notice.tone}>{notice.text}</Alert>}
       <Freshness updatedAt={desk.updatedAt} stale={desk.stale} error={desk.error} onRetry={() => void desk.refresh()} />
-      {doctors.length === 0 && (
+      {filtered.length === 0 && (
         <EmptyState title="No assigned doctors">
           There is no queue to show until a doctor assigns you as their receptionist.
         </EmptyState>
       )}
-      {doctors.map((doctor) => (
+      {filtered.map((doctor) => (
         <DoctorDesk key={doctor.doctor.id} entry={doctor} busy={busy} act={act} session={session} />
       ))}
     </div>
@@ -102,6 +194,7 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
   const { doctor, day, arrivals, awaitingPayment } = entry;
   const now = useNow(15_000);
   const run = (action: QueueAction, id: string) => {
+    if (action === 'complete') return () => queueApi.completeAtDesk(session, id);
     if (action === 'skip') return () => queueApi.skipAtDesk(session, id);
     if (action === 'return') return () => queueApi.returnToQueue(session, id);
     return () => queueApi.checkOut(session, id);
@@ -112,12 +205,15 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
       <div className="min-w-0 flex-1">
         <p className="font-medium text-foreground">{item.patient.name}</p>
         <p className="text-xs text-muted-foreground">
-          {formatTimeRange(item.appointment.startTime, item.appointment.endTime, true)} · {detail ?? `checked in ${timeAgo(item.checkedInAt, now)}`}
+          {formatTimeRange(item.appointment.startTime, item.appointment.endTime, true)}
+          {item.patient.phone ? ` · ${item.patient.phone}` : ''}
+          {' · '}
+          {detail ?? (item.checkedInAt ? `checked in ${timeAgo(item.checkedInAt, now)}` : 'not checked in yet')}
         </p>
       </div>
       <QueueStatusPill status={item.status} />
       {entryActions('RECEPTIONIST', item.status).map((action) => (
-        <Button key={action} size="sm" variant={action === 'checkOut' ? 'default' : 'outline'} disabled={busy !== null} aria-label={`${ACTION_LABEL[action]}: token ${item.token}, ${item.patient.name}`} onClick={() => void act(item.id, action, run(action, item.id))}>
+        <Button key={action} size="sm" variant={action === 'checkOut' || action === 'complete' ? 'default' : 'outline'} disabled={busy !== null} aria-label={`${ACTION_LABEL[action]}: token ${item.token}, ${item.patient.name}`} onClick={() => void act(item.id, action, run(action, item.id))}>
           {ACTION_ICON[action]} {busy === item.id ? 'Working…' : ACTION_LABEL[action]}
         </Button>
       ))}
@@ -126,9 +222,14 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
 
   const arrival = (item: ArrivalRow, canCheckIn: boolean) => (
     <li key={item.appointmentId} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
+      {item.token != null ? <TokenBadge token={item.token} /> : <span className="w-10 text-center text-xs text-muted-foreground">–</span>}
       <div className="min-w-0 flex-1">
         <p className="font-medium text-foreground">{item.patientName}</p>
-        <p className="text-xs text-muted-foreground">Appointment {formatTimeRange(item.startTime, item.endTime, true)}</p>
+        <p className="text-xs text-muted-foreground">
+          Appointment {formatTimeRange(item.startTime, item.endTime, true)}
+          {item.phone ? ` · ${item.phone}` : ''}
+          {item.token != null ? ` · token ${item.token}` : ''}
+        </p>
       </div>
       {canCheckIn ? (
         <Button size="sm" disabled={busy !== null} aria-label={`Check in ${item.patientName}`} onClick={() => void act(item.appointmentId, 'checkIn', () => queueApi.checkIn(session, item.appointmentId))}>
@@ -147,11 +248,12 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
           <h3 className="font-semibold text-foreground">{doctor.name}</h3>
           <p className="text-xs text-muted-foreground">{doctor.clinic}</p>
         </div>
-        <div className="flex items-center gap-4 text-sm">
+        <div className="flex flex-wrap items-center gap-4 text-sm">
           <span className="flex items-center gap-2">
             Now serving {day.currentlyServingToken === null ? <span className="font-semibold text-muted-foreground">–</span> : <TokenBadge token={day.currentlyServingToken} className="bg-emerald-700" />}
           </span>
           <span className="text-muted-foreground">{day.counts.waiting} waiting</span>
+          <span className="text-muted-foreground">{day.counts.completed + day.counts.checkedOut} done</span>
         </div>
       </div>
 
@@ -159,16 +261,15 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
       <Group title={`Waiting (${day.waiting.length})`} empty="Nobody is waiting.">
         {day.waiting.map((item) => row(item))}
       </Group>
-      <Group title={`Arriving today (${arrivals.length})`} empty="Everyone with a confirmed appointment today has been checked in.">
+      <Group title={`Arriving today (${arrivals.length + awaitingPayment.length})`} empty="Everyone with a confirmed appointment today has been checked in.">
         {arrivals.map((item) => arrival(item, true))}
         {awaitingPayment.map((item) => arrival(item, false))}
       </Group>
-      {day.completed.length > 0 && <Group title={`Consultation finished: check out (${day.completed.length})`}>{day.completed.map((item) => row(item))}</Group>}
+      {day.completed.length > 0 && <Group title={`Completed — check out (${day.completed.length})`}>{day.completed.map((item) => row(item))}</Group>}
+      {day.checkedOut.length > 0 && <Group title={`Checked out (${day.checkedOut.length})`}>{day.checkedOut.map((item) => row(item))}</Group>}
       {day.skipped.length > 0 && <Group title={`Skipped (${day.skipped.length})`}>{day.skipped.map((item) => row(item))}</Group>}
-      {(day.checkedOut.length > 0 || day.cancelled.length > 0) && (
-        <p className="border-t px-4 py-2 text-xs text-muted-foreground">
-          {day.checkedOut.length} checked out{day.cancelled.length > 0 ? ` · ${day.cancelled.length} cancelled` : ''}
-        </p>
+      {day.cancelled.length > 0 && (
+        <p className="border-t px-4 py-2 text-xs text-muted-foreground">{day.cancelled.length} cancelled (token kept, not reused)</p>
       )}
     </section>
   );
@@ -176,6 +277,7 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
 
 const ACTION_LABEL: Record<QueueAction, string> = { checkIn: 'Check in', checkOut: 'Check out', skip: 'Skip', return: 'Return to queue', complete: 'Complete' };
 const ACTION_ICON: Partial<Record<QueueAction, React.ReactNode>> = {
+  complete: <CheckIcon aria-hidden />,
   checkOut: <LogOutIcon aria-hidden />,
   skip: <SkipForwardIcon aria-hidden />,
   return: <RotateCcwIcon aria-hidden />,

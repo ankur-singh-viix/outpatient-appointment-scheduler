@@ -80,7 +80,7 @@ function FrontDesk({ session }: { session: Session }) {
               </TabsTrigger>
             </TabsList>
             <TabsContent value="queue">
-              <QueuePanel session={session} refreshKey={version} />
+              <QueuePanel session={session} doctors={list} refreshKey={version} />
             </TabsContent>
             <TabsContent value="appointments">
               <AppointmentsPanel session={session} doctors={list} version={version} onChanged={changed} onOpenQueue={() => setTab('queue')} />

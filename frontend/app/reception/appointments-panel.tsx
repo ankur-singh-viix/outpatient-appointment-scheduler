@@ -40,6 +40,7 @@ export function AppointmentsPanel({
 }) {
   const [doctorId, setDoctorId] = useState('');
   const [date, setDate] = useState('');
+  const [slotTime, setSlotTime] = useState('');
   const today = clinicToday();
   const query = new URLSearchParams({ ...(date && { date }), ...(doctorId && { doctorId }) }).toString();
   const list = useQuery(`reception-appointments:${session.user.id}:${query}:${version}`, () =>
@@ -58,7 +59,8 @@ export function AppointmentsPanel({
   const [checkInError, setCheckInError] = useState<string | null>(null);
   const [dialogError, setDialogError] = useState<string | null>(null);
 
-  const items = list.data ?? list.previous;
+  const items = (list.data ?? list.previous)?.filter((item) => !slotTime || item.startTime === slotTime);
+  const slotOptions = [...new Set((list.data ?? list.previous ?? []).map((item) => item.startTime))].sort();
   const byDate = new Map<string, ReceptionAppointment[]>();
   for (const item of items ?? []) byDate.set(item.date, [...(byDate.get(item.date) ?? []), item]);
 
@@ -137,9 +139,28 @@ export function AppointmentsPanel({
             <Label htmlFor="appt-date">Date</Label>
             <Input id="appt-date" type="date" value={date} onChange={(event) => setDate(event.target.value)} className="h-10 w-44 bg-card" />
           </div>
-          {date && (
-            <Button type="button" variant="outline" className="h-10" onClick={() => setDate('')}>
-              All upcoming
+          <div className="space-y-2">
+            <Label htmlFor="appt-slot">Appointment slot</Label>
+            <select id="appt-slot" value={slotTime} onChange={(event) => setSlotTime(event.target.value)} className={selectClass}>
+              <option value="">All slots</option>
+              {slotOptions.map((time) => (
+                <option key={time} value={time}>
+                  {formatTime(time)}
+                </option>
+              ))}
+            </select>
+          </div>
+          {(date || slotTime) && (
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10"
+              onClick={() => {
+                setDate('');
+                setSlotTime('');
+              }}
+            >
+              Clear filters
             </Button>
           )}
         </div>
@@ -174,6 +195,11 @@ export function AppointmentsPanel({
                   <div className="min-w-0 space-y-1">
                     <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-foreground">
                       {formatTimeRange(appointment.startTime, appointment.endTime)} · {appointment.patient.name}
+                      {appointment.queueToken != null && (
+                        <Badge variant="secondary" className="font-semibold tabular-nums">
+                          Token {appointment.queueToken}
+                        </Badge>
+                      )}
                       {appointment.slotCapacity > 1 && (
                         <Badge variant="secondary" className="bg-sky-50 font-semibold text-sky-800">
                           Place {appointment.slotNumber} of {appointment.slotCapacity}
