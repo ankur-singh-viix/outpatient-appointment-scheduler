@@ -71,9 +71,10 @@ function Overview({ session }: { session: Session }) {
         </Alert>
       )}
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Stat label="Today" value={list ? todays.length : '–'} />
         <Stat label="Upcoming" value={list ? upcoming.length : '–'} />
+        <Stat label="Next appointment" value={next ? formatTimeRange(next.startTime, next.endTime, true) : '–'} />
         <Stat label="New (24 h)" value={list ? newlyBooked.length : '–'} highlight={newlyBooked.length > 0} />
       </div>
 
@@ -123,7 +124,10 @@ function Overview({ session }: { session: Session }) {
                   <li key={a.id} className="flex flex-wrap items-center gap-x-4 gap-y-2 p-4">
                     <p className="w-40 shrink-0 font-semibold text-foreground">{formatTimeRange(a.startTime, a.endTime, true)}</p>
                     <div className="min-w-0 flex-1">
-                      <p className="font-medium text-foreground">{a.patient.name}</p>
+                      <p className="font-medium text-foreground">
+                        {a.patient.name}
+                        {a.queueToken != null && <span className="ml-2 text-sm font-semibold tabular-nums text-muted-foreground">Token {a.queueToken}</span>}
+                      </p>
                       <p className="text-sm text-muted-foreground">Booked {timeAgo(a.bookedAt, now)}</p>
                     </div>
                     <StatusBadge status={a.status} />
@@ -156,7 +160,10 @@ function Overview({ session }: { session: Session }) {
                       </Badge>
                     )}
                   </p>
-                  <p className="text-sm text-foreground/80">{next.patient.name}</p>
+                  <p className="text-sm text-foreground/80">
+                    {next.patient.name}
+                    {next.queueToken != null && <span className="ml-2 font-semibold tabular-nums">Token {next.queueToken}</span>}
+                  </p>
                   {next.patient.phone && <p className="text-sm text-muted-foreground">{next.patient.phone}</p>}
                 </CardContent>
               </Card>

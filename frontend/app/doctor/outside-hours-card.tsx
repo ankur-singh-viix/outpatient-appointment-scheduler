@@ -123,6 +123,7 @@ export function OutsideHoursCard({ session, version, onChanged, onAddSession }: 
       cancelledAt: null,
       cancelledBy: null,
       bookedAt: '',
+      queueToken: null,
       patient: appointment.patient,
     });
 
