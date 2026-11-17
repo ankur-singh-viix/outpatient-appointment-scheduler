@@ -84,7 +84,8 @@ export class DoctorPortalService {
       relations: WITH_PATIENT,
       order: { appointmentDate: 'ASC', startTime: 'ASC' },
     });
-    return rows.map(toDoctorAppointment);
+    const tokens = await this.queueTokensFor(rows.map((row) => row.id));
+    return rows.map((row) => toDoctorAppointment(row, tokens.get(row.id) ?? null));
   }
 
   /**
@@ -144,7 +145,8 @@ export class DoctorPortalService {
     });
     await this.payments.afterCommit(outcome);
     const row = await this.appointmentsRepo.findOneOrFail({ where: { id }, relations: WITH_PATIENT });
-    return toDoctorAppointment(row);
+    const tokens = await this.queueTokensFor([id]);
+    return toDoctorAppointment(row, tokens.get(id) ?? null);
   }
 
   async availability(user: AuthUser) {
@@ -605,11 +607,22 @@ export class DoctorPortalService {
     if (!doctor) throw new ForbiddenException('No doctor profile is linked to this account.');
     return doctor;
   }
+
+  private async queueTokensFor(appointmentIds: string[]): Promise<Map<string, number>> {
+    const tokens = new Map<string, number>();
+    if (appointmentIds.length === 0) return tokens;
+    const rows: { appointment_id: string; token_number: number }[] = await this.dataSource.query(
+      'SELECT appointment_id, token_number FROM queue_entries WHERE appointment_id = ANY($1::uuid[])',
+      [appointmentIds],
+    );
+    for (const row of rows) tokens.set(row.appointment_id, Number(row.token_number));
+    return tokens;
+  }
 }
 
 const WITH_PATIENT = { patient: { user: true }, cancelledBy: true } as const;
 
-function toDoctorAppointment(row: Appointment) {
+function toDoctorAppointment(row: Appointment, queueToken: number | null = null) {
   return {
     id: row.id,
     date: row.appointmentDate,
@@ -620,6 +633,8 @@ function toDoctorAppointment(row: Appointment) {
     cancelledAt: row.cancelledAt,
     cancelledBy: row.cancelledBy?.role ?? null,
     bookedAt: row.createdAt,
+    /** Issued when the booking was confirmed; null until then. */
+    queueToken,
     patient: { name: row.patient.user.name, phone: row.patient.phone },
   };
 }

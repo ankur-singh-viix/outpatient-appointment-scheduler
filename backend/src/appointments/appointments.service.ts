@@ -13,6 +13,7 @@ import { ACTIVE_STATUSES, Appointment, Availability, Doctor, Patient, ScheduleOv
 import { isSlotConflict } from '../database/errors.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
+import { QueueService } from '../queue/queue.service.js';
 import type { PaymentSummary } from '../payments/payment-summary.js';
 import { changeBlockedReason } from '../scheduling/appointment-rules.js';
 import { addDays, clinicNow, isValidDate } from '../scheduling/calendar.js';
@@ -74,6 +75,7 @@ export class AppointmentsService {
     private readonly dataSource: DataSource,
     private readonly payments: PaymentsService,
     private readonly notifications: NotificationsService,
+    private readonly queue: QueueService,
   ) {}
 
   /**
@@ -141,7 +143,17 @@ export class AppointmentsService {
             holdExpiresAt: needsPayment ? new Date(Date.now() + this.payments.holdMinutes * 60_000) : null,
           }),
         );
-        if (!needsPayment) await this.notifications.bookingConfirmed(manager, saved.id);
+        // Token only when confirmed: unpaid holds must not reserve a queue number. Same doctor lock as the booking.
+        if (!needsPayment) {
+          await this.queue.issueTokenInTransaction(manager, {
+            appointmentId: saved.id,
+            doctorId: saved.doctorId,
+            patientId: saved.patientId,
+            queueDate: saved.appointmentDate,
+            actorUserId: user.id,
+          });
+          await this.notifications.bookingConfirmed(manager, saved.id);
+        }
         return saved.id;
       });
     } catch (error) {
@@ -257,6 +269,14 @@ export class AppointmentsService {
             rescheduledFromId: current.id,
           }),
         );
+        // New confirmed time gets a fresh token for that doctor-day; the cancelled previous booking keeps its old token unused.
+        await this.queue.issueTokenInTransaction(manager, {
+          appointmentId: saved.id,
+          doctorId: saved.doctorId,
+          patientId: saved.patientId,
+          queueDate: saved.appointmentDate,
+          actorUserId: user.id,
+        });
         // The payment follows the patient to the new time (no refund, no second charge) and the reminders move with it.
         await this.payments.moveToAppointment(manager, current.id, saved.id);
         await this.notifications.appointmentRescheduled(manager, current.id, saved.id);
@@ -341,9 +361,10 @@ export class AppointmentsService {
       order: { appointmentDate: 'DESC', startTime: 'DESC' },
     });
     const payments = await this.payments.summariesFor(rows.map((row) => row.id));
+    const tokens = await this.queueTokensFor(rows.map((row) => row.id));
     const outside = await this.outsideHours(rows);
     // `needsNewTime`: the doctor changed their hours and this booking no longer falls inside them. It is still booked.
-    return rows.map((row) => ({ ...toAppointment(row, payments.get(row.id)), needsNewTime: outside.has(row.id) }));
+    return rows.map((row) => ({ ...toAppointment(row, payments.get(row.id), tokens.get(row.id) ?? null), needsNewTime: outside.has(row.id) }));
   }
 
   /**
@@ -377,7 +398,20 @@ export class AppointmentsService {
 
   private async findOne(id: string) {
     const row = await this.appointments.findOneOrFail({ where: { id }, relations: WITH_DOCTOR });
-    return toAppointment(row, (await this.payments.summariesFor([id])).get(id));
+    const tokens = await this.queueTokensFor([id]);
+    return toAppointment(row, (await this.payments.summariesFor([id])).get(id), tokens.get(id) ?? null);
+  }
+
+  /** Queue tokens issued at confirmation (null for unpaid holds and appointments that never received one). */
+  private async queueTokensFor(appointmentIds: string[]): Promise<Map<string, number>> {
+    const tokens = new Map<string, number>();
+    if (appointmentIds.length === 0) return tokens;
+    const rows: { appointment_id: string; token_number: number }[] = await this.dataSource.query(
+      'SELECT appointment_id, token_number FROM queue_entries WHERE appointment_id = ANY($1::uuid[])',
+      [appointmentIds],
+    );
+    for (const row of rows) tokens.set(row.appointment_id, Number(row.token_number));
+    return tokens;
   }
 
   /**
@@ -430,7 +464,7 @@ export class AppointmentsService {
   }
 }
 
-function toAppointment(row: Appointment, payment?: PaymentSummary) {
+function toAppointment(row: Appointment, payment?: PaymentSummary, queueToken: number | null = null) {
   return {
     id: row.id,
     date: row.appointmentDate,
@@ -445,6 +479,8 @@ function toAppointment(row: Appointment, payment?: PaymentSummary) {
     createdAt: row.createdAt,
     /** While the booking waits for payment: when the held slot is released. Null otherwise. */
     holdExpiresAt: row.holdExpiresAt,
+    /** Issued when the booking was confirmed; null for unpaid holds. Never regenerated at check-in. */
+    queueToken,
     /** Payment, receipt and refunds for this appointment, or null when it was free. */
     payment: payment ?? null,
     doctor: {

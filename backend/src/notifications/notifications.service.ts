@@ -106,9 +106,11 @@ export class NotificationsService {
   async bookingConfirmed(manager: EntityManager, appointmentId: string, now = new Date()): Promise<void> {
     await this.safely(manager, `booking confirmation for ${appointmentId}`, async (inner) => {
       const loaded = await this.load(inner, appointmentId);
+      const tokenRows: { token_number: number }[] = await inner.query('SELECT token_number FROM queue_entries WHERE appointment_id = $1', [appointmentId]);
+      const token = tokenRows[0] ? Number(tokenRows[0].token_number) : null;
       await this.enqueue(inner, [
-        ...this.toPatient(loaded, templates.bookingConfirmed(loaded.facts), `booking-confirmed:${appointmentId}`),
-        ...this.toDoctor(loaded, templates.bookingConfirmed(loaded.facts, 'doctor'), `booking-confirmed:${appointmentId}`),
+        ...this.toPatient(loaded, templates.bookingConfirmed(loaded.facts, 'patient', { token }), `booking-confirmed:${appointmentId}`),
+        ...this.toDoctor(loaded, templates.bookingConfirmed(loaded.facts, 'doctor', { token }), `booking-confirmed:${appointmentId}`),
         ...this.reminders(loaded, now),
       ]);
     });

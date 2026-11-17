@@ -1,14 +1,14 @@
 import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
-export const QUEUE_STATUSES = ['WAITING', 'SERVING', 'COMPLETED', 'CHECKED_OUT', 'SKIPPED', 'CANCELLED'] as const;
+export const QUEUE_STATUSES = ['BOOKED', 'WAITING', 'SERVING', 'COMPLETED', 'CHECKED_OUT', 'SKIPPED', 'CANCELLED'] as const;
 export type QueueStatus = (typeof QUEUE_STATUSES)[number];
 
-export const QUEUE_EVENTS = ['CHECKED_IN', 'CALLED', 'COMPLETED', 'CHECKED_OUT', 'SKIPPED', 'RETURNED', 'CANCELLED'] as const;
+export const QUEUE_EVENTS = ['BOOKED', 'CHECKED_IN', 'CALLED', 'COMPLETED', 'CHECKED_OUT', 'SKIPPED', 'RETURNED', 'CANCELLED'] as const;
 export type QueueEventName = (typeof QUEUE_EVENTS)[number];
 
 /**
- * A patient who has arrived for an appointment, waiting for (or being seen by, or done with) one doctor on one day. See migration 015.
- * One per appointment. The appointment keeps its own status; this only records the queue.
+ * A place in one doctor's queue for one day. The token is issued when the appointment is confirmed (status BOOKED).
+ * Check-in moves it to WAITING without changing the token. See migrations 015 and 017.
  */
 @Entity('queue_entries')
 export class QueueEntry {
@@ -31,14 +31,15 @@ export class QueueEntry {
   @Column({ name: 'token_number', type: 'integer' })
   tokenNumber: number;
 
-  @Column({ type: 'varchar', length: 12, default: 'WAITING' })
+  @Column({ type: 'varchar', length: 12, default: 'BOOKED' })
   status: QueueStatus;
 
-  @Column({ name: 'checked_in_at', type: 'timestamptz', default: () => 'now()' })
-  checkedInAt: Date;
+  /** Null while BOOKED; set when the receptionist checks the patient in. */
+  @Column({ name: 'checked_in_at', type: 'timestamptz', nullable: true })
+  checkedInAt: Date | null;
 
-  @Column({ name: 'checked_in_by_user_id', type: 'uuid' })
-  checkedInByUserId: string;
+  @Column({ name: 'checked_in_by_user_id', type: 'uuid', nullable: true })
+  checkedInByUserId: string | null;
 
   @Column({ name: 'called_at', type: 'timestamptz', nullable: true })
   calledAt: Date | null;
