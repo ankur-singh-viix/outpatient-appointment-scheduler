@@ -72,11 +72,32 @@ describe('missingTables', () => {
 
 describe('missingColumns', () => {
   it('reports the hide-from-history column when migration 014 has not been applied, and says only that feature is affected', async () => {
-    const missing = await missingColumns({ query: async () => [] });
+    const missing = await missingColumns({
+      query: async (sql: string) => (sql.includes('hidden_by_patient_at') ? [] : [{ is_nullable: 'YES' }]),
+    });
     expect(missing).toEqual([expect.objectContaining({ table: 'appointments', column: 'hidden_by_patient_at', migration: '014_hide_appointments_from_history.sql' })]);
     expect(missing[0].consequence).toMatch(/everything else keeps working/);
   });
-  it('reports nothing when the column is there', async () => {
-    expect(await missingColumns({ query: async () => [{ found: 1 }] })).toEqual([]);
+
+  it('reports queue checked_in_at when migration 017 has not made it nullable', async () => {
+    const missing = await missingColumns({
+      query: async (sql: string) => {
+        if (sql.includes('hidden_by_patient_at')) return [{ is_nullable: 'YES' }];
+        if (sql.includes('checked_in_at')) return [{ is_nullable: 'NO' }];
+        return [];
+      },
+    });
+    expect(missing).toEqual([
+      expect.objectContaining({
+        table: 'queue_entries',
+        column: 'checked_in_at',
+        migration: '017_booking_time_queue_tokens.sql',
+      }),
+    ]);
+    expect(missing[0].consequence).toMatch(/booking-time queue tokens fail/);
+  });
+
+  it('reports nothing when required columns exist and nullable ones allow NULL', async () => {
+    expect(await missingColumns({ query: async () => [{ is_nullable: 'YES' }] })).toEqual([]);
   });
 });

@@ -70,13 +70,27 @@ export async function missingTables(dataSource: Queryable): Promise<MissingTable
   return missing;
 }
 
-/** Columns later migrations add to existing tables, and what stops working without them. */
-const REQUIRED_COLUMNS = [
+/** Columns later migrations add or relax on existing tables, and what stops working without them. */
+const REQUIRED_COLUMNS: {
+  table: string;
+  column: string;
+  migration: string;
+  consequence: string;
+  /** When set, the column must exist and allow NULL (migration relaxed a former NOT NULL). */
+  mustAllowNull?: boolean;
+}[] = [
   {
     table: 'appointments',
     column: 'hidden_by_patient_at',
     migration: '014_hide_appointments_from_history.sql',
     consequence: 'patients cannot remove past bookings from their history (everything else keeps working)',
+  },
+  {
+    table: 'queue_entries',
+    column: 'checked_in_at',
+    migration: '017_booking_time_queue_tokens.sql',
+    mustAllowNull: true,
+    consequence: 'booking-time queue tokens fail (checked_in_at rejects NULL for BOOKED entries); check-in and the rest of the queue keep working once the migration is applied',
   },
 ];
 
@@ -87,12 +101,20 @@ export interface MissingColumn {
   consequence: string;
 }
 
-/** The required columns this database does not have (an empty list when migrations are up to date). */
+/** The required columns this database does not have (or that are still NOT NULL when they must allow NULL). */
 export async function missingColumns(dataSource: Queryable): Promise<MissingColumn[]> {
   const missing: MissingColumn[] = [];
   for (const entry of REQUIRED_COLUMNS) {
-    const rows = (await dataSource.query(`SELECT 1 AS found FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '${entry.table}' AND column_name = '${entry.column}'`)) as unknown[];
-    if (rows.length === 0) missing.push(entry);
+    const rows = (await dataSource.query(
+      `SELECT is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '${entry.table}' AND column_name = '${entry.column}'`,
+    )) as { is_nullable: string }[];
+    if (rows.length === 0) {
+      missing.push(entry);
+      continue;
+    }
+    if (entry.mustAllowNull && rows[0].is_nullable !== 'YES') {
+      missing.push(entry);
+    }
   }
   return missing;
 }

@@ -50,20 +50,33 @@ const details = (facts: AppointmentFacts) =>
 const patientDetails = (facts: AppointmentFacts) =>
   `Patient: ${facts.patientName}\nWhen: ${when(facts)}\nWhere: ${facts.clinicName}, ${facts.clinicAddress}`;
 
-export function bookingConfirmed(facts: AppointmentFacts, audience: Audience = 'patient'): MessageContent {
+export function bookingConfirmed(
+  facts: AppointmentFacts,
+  audience: Audience = 'patient',
+  extra: { token?: number | null } = {},
+): MessageContent {
+  const tokenLine = extra.token != null ? `Queue token: ${extra.token}` : null;
   if (audience === 'doctor') {
     return {
       kind: 'booking-confirmed',
       subject: `New booking: ${facts.patientName}, ${when(facts)}`,
-      body: `Hello ${facts.doctorName},\n\nAn appointment has been booked with you.\n\n${patientDetails(facts)}`,
+      body: `Hello ${facts.doctorName},\n\nAn appointment has been booked with you.\n\n${patientDetails(facts)}${tokenLine ? `\n${tokenLine}` : ''}`,
       sms: '',
     };
   }
   return {
     kind: 'booking-confirmed',
     subject: `Appointment confirmed: ${facts.doctorName}, ${when(facts)}`,
-    body: `Hi ${facts.patientName},\n\nYour appointment is confirmed. Your booking is complete and your place is reserved.\n\n${details(facts)}\n\nYou can cancel or reschedule from your CareSlot dashboard.`,
-    sms: clip(`CareSlot: appointment confirmed with ${facts.doctorName}, ${when(facts)}.`),
+    body:
+      `Hi ${facts.patientName},\n\nYour appointment is confirmed. Your booking is complete and your place is reserved.\n\n` +
+      `${details(facts)}` +
+      `${tokenLine ? `\n${tokenLine}\n\nBring this token when you arrive. The front desk will check you in with the same number.` : ''}` +
+      `\n\nYou can cancel or reschedule from your CareSlot dashboard.`,
+    sms: clip(
+      extra.token != null
+        ? `CareSlot: appointment confirmed with ${facts.doctorName}, ${when(facts)}. Your queue token is ${extra.token}.`
+        : `CareSlot: appointment confirmed with ${facts.doctorName}, ${when(facts)}.`,
+    ),
   };
 }
 

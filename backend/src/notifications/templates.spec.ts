@@ -11,11 +11,14 @@ const facts = {
 
 describe('message templates', () => {
   it('describes the appointment in plain words, in the clinic time', () => {
-    const message = templates.bookingConfirmed(facts);
+    const message = templates.bookingConfirmed(facts, 'patient', { token: 12 });
     expect(message.subject).toContain('Dr. Rohan Das');
     expect(message.subject).toContain('2:05 PM');
     expect(message.body).toContain('Mon, 2 Nov, 2026');
     expect(message.body).toContain('City Clinic, 12 MG Road');
+    expect(message.body).toContain('Queue token: 12');
+    expect(message.body).toContain('Bring this token when you arrive');
+    expect(message.sms).toContain('Your queue token is 12');
     expect(message.kind).toBe('booking-confirmed');
   });
 
@@ -50,10 +53,12 @@ describe('message templates', () => {
     expect(templates.reminder(facts, 2).kind).toBe('reminder');
   });
 
-  it('never includes anything but the patient-facing facts', () => {
-    for (const message of [templates.bookingConfirmed(facts), templates.paymentReceived(facts, { amountPaise: 65000, receipt: 'pay_1' })]) {
-      expect(message.body).not.toMatch(/secret|password|token/i);
-    }
+  it('never includes credentials or secrets; queue tokens are patient-facing facts', () => {
+    const withToken = templates.bookingConfirmed(facts, 'patient', { token: 4 });
+    expect(withToken.body).toContain('Queue token: 4');
+    expect(withToken.body).not.toMatch(/secret|password|hash/i);
+    expect(templates.bookingConfirmed(facts).body).not.toMatch(/Queue token|Bring this token/i);
+    expect(templates.paymentReceived(facts, { amountPaise: 65000, receipt: 'pay_1' }).body).not.toMatch(/secret|password|token/i);
     expect(templates.paymentReceived(facts, { amountPaise: 65000, receipt: 'pay_1' }).body).toContain('Receipt: pay_1');
   });
 });
@@ -66,12 +71,13 @@ describe('doctor messages, payment failure and text messages', () => {
   });
 
   it('writes the doctor a different message from the patient, naming the patient and nothing sensitive', () => {
-    const toDoctor = templates.bookingConfirmed(range, 'doctor');
+    const toDoctor = templates.bookingConfirmed(range, 'doctor', { token: 8 });
     expect(toDoctor.subject).toBe('New booking: Rahul Sharma, Mon, 2 Nov, 2026 at 11:15 AM – 11:45 AM');
     expect(toDoctor.body).toContain('Hello Dr. Rohan Das');
     expect(toDoctor.body).toContain('Patient: Rahul Sharma');
+    expect(toDoctor.body).toContain('Queue token: 8');
     expect(toDoctor.subject).not.toBe(templates.bookingConfirmed(range).subject);
-    expect(toDoctor.body).not.toMatch(/@|\+\d|password|token/i); // no email address, phone number or credential
+    expect(toDoctor.body).not.toMatch(/@|\+\d|password|hash/i); // no email address, phone number or credential
   });
 
   it('tells the doctor who cancelled, and the patient who cancelled', () => {
