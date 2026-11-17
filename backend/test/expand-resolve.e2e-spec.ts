@@ -81,7 +81,7 @@ describe('Extending hours releases the appointments a reduction left waiting (e2
   const outside = async () => (await http().get('/api/doctor-portal/appointments/outside-hours').set(as(doctorToken)).expect(200)).body.appointments as { id: string }[];
   const statuses = () => rows<{ id: string; status: string; appointment_date: string; start_time: string }>('SELECT id, status, appointment_date::text, start_time::text FROM appointments ORDER BY id');
   const clean = async () => {
-    await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
     await db.query('DELETE FROM schedule_overrides; DELETE FROM availability;');
   };
 

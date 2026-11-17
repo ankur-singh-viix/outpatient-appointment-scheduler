@@ -127,7 +127,7 @@ describe('Elastic scheduling: expanding availability (e2e)', () => {
   });
 
   beforeEach(async () => {
-    await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments;');
     await db.query('DELETE FROM schedule_overrides; DELETE FROM availability;');
   });
 
@@ -649,7 +649,7 @@ describe('Elastic scheduling: expanding availability (e2e)', () => {
 
     it('stays consistent when patients book while the hours are being reduced: nobody is booked into removed time after the change, and everyone booked before it is asked', async () => {
       for (let round = 0; round < 3; round++) {
-        await db.query('DELETE FROM notifications; DELETE FROM appointments; DELETE FROM availability;');
+        await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM appointments; DELETE FROM availability;');
         const id = await addRow({ dow: 1, mode: 'WAVE', perSlot: 2 });
         const responses = await Promise.all([shrink(id, '10:00', '11:00', { acknowledge: true }), ...[0, 1, 2, 3, 4, 5].map((patient) => book(patient, monday, '11:00'))]);
         // The change takes the doctor lock either before the bookings (they are all turned away) or after some of them (they are

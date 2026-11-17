@@ -96,7 +96,7 @@ describe('Slot windows, intervals and overlap protection (e2e)', () => {
   });
 
   beforeEach(async () => {
-    await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments;');
     await db.query('UPDATE doctors SET consultation_minutes = 30, slot_interval_minutes = 15 WHERE id = $1', [overlapDoctorId]);
   });
 

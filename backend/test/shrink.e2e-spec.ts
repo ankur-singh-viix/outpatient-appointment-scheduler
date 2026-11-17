@@ -113,7 +113,7 @@ describe('Shrinking hours, production readiness (e2e)', () => {
 
   beforeEach(async () => {
     vi.restoreAllMocks();
-    await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
     await db.query('DELETE FROM schedule_overrides; DELETE FROM availability;');
   });
 
@@ -398,7 +398,7 @@ describe('Shrinking hours, production readiness (e2e)', () => {
   describe('booking racing the change', () => {
     it('never leaves a booked appointment outside the hours without a record of it', async () => {
       for (let round = 0; round < 5; round++) {
-        await db.query('DELETE FROM notifications; DELETE FROM schedule_changes; DELETE FROM appointments; DELETE FROM availability;');
+        await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM schedule_changes; DELETE FROM appointments; DELETE FROM availability;');
         const id = await addRow({ perSlot: 3 });
         await Promise.all([
           ...[0, 1, 2, 3, 4, 5].map((n) => book(n, monday, n % 2 ? '11:00' : '11:30')),

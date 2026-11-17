@@ -118,7 +118,7 @@ describe('Schedule changes are safe, whichever route is used (e2e)', () => {
   });
 
   beforeEach(async () => {
-    await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
     await db.query('DELETE FROM schedule_overrides; DELETE FROM availability;');
   });
 
@@ -577,7 +577,7 @@ describe('Schedule changes with the notice window switched off (SCHEDULE_CHANGE_
     process.env.SCHEDULE_CHANGE_MIN_NOTICE_HOURS = '0';
     db = new pg.Client({ connectionString: TEST_DATABASE_URL });
     await db.connect();
-    await db.query('DELETE FROM notifications; DELETE FROM schedule_changes; DELETE FROM appointments; DELETE FROM schedule_overrides; DELETE FROM availability;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM schedule_changes; DELETE FROM appointments; DELETE FROM schedule_overrides; DELETE FROM availability;');
     doctorId = (await db.query("SELECT d.id FROM doctors d JOIN users u ON u.id = d.user_id WHERE u.email = 'safe@test.local'")).rows[0].id as string;
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).overrideProvider(EMAIL_SENDER).useValue({ send: async () => ({ reference: 'em_1' }) }).compile();
     app = moduleRef.createNestApplication({ rawBody: true });
