@@ -44,15 +44,23 @@ export function DoctorQueuePanel({ session }: { session: Session }) {
     <section aria-labelledby="queue-heading" className="space-y-3">
       <div className="flex flex-wrap items-end justify-between gap-2">
         <h2 id="queue-heading" className="text-lg font-semibold text-foreground">
-          Queue management
+          Live queue
         </h2>
         {day && (
           <p className="text-sm text-muted-foreground" aria-live="polite">
-            {day.counts.waiting} waiting · {day.counts.completed + day.counts.checkedOut} seen
+            Serving {day.currentlyServingToken ?? '–'} · Next {day.waiting[0]?.token ?? '–'} · {day.counts.waiting} waiting · {day.counts.completed + day.counts.checkedOut} completed
             {day.counts.skipped > 0 ? ` · ${day.counts.skipped} skipped` : ''}
           </p>
         )}
       </div>
+      {day && (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <QueueStat label="Serving token" value={day.currentlyServingToken ?? '–'} />
+          <QueueStat label="Next token" value={day.waiting[0]?.token ?? '–'} />
+          <QueueStat label="Waiting" value={day.counts.waiting} />
+          <QueueStat label="Completed" value={day.counts.completed + day.counts.checkedOut} />
+        </div>
+      )}
 
       {notice && <Alert tone={notice.tone}>{notice.text}</Alert>}
 
@@ -101,7 +109,8 @@ export function DoctorQueuePanel({ session }: { session: Session }) {
                         {entry.patient.name} <span className="text-sm font-normal text-muted-foreground">· {entry.position === 1 ? 'next' : `#${entry.position} in line`}</span>
                       </p>
                       <p className="text-xs text-muted-foreground">
-                        Appointment {formatTimeRange(entry.appointment.startTime, entry.appointment.endTime, true)} · waiting since {timeAgo(entry.checkedInAt, now)}
+                        Appointment {formatTimeRange(entry.appointment.startTime, entry.appointment.endTime, true)}
+                        {entry.checkedInAt ? ` · waiting since ${timeAgo(entry.checkedInAt, now)}` : ''}
                       </p>
                     </div>
                     {entryActions('DOCTOR', entry.status).includes('skip') && (
@@ -172,6 +181,15 @@ function Progress({ day }: { day: DoctorQueue }) {
         <div className="h-full bg-primary transition-[width] duration-500" style={{ width: `${percent}%` }} />
       </div>
       {done}/{total} seen
+    </div>
+  );
+}
+
+function QueueStat({ label, value }: { label: string; value: number | string }) {
+  return (
+    <div className="rounded-lg border bg-card px-3 py-2">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="text-lg font-semibold tabular-nums text-foreground">{value}</p>
     </div>
   );
 }
