@@ -1,5 +1,6 @@
 // Doctor-wise queue management (backend foundation).
-//  - tokens: the next number in ONE doctor's queue for ONE clinic day, safe under concurrent check-ins, never reused, restarting each day;
+//  - tokens: issued when a booking is confirmed (BOOKED), unique per doctor-day, never reused, restarting each day;
+//  - check-in reuses that token (BOOKED -> WAITING) and never allocates a new one;
 //  - the receptionist checks patients in and out (only doctors who assigned them); the doctor calls the next patient and completes the consultation;
 //  - the lifecycle is enforced (no double check-in, no checkout before completion, never two patients served at once);
 //  - positions (serving token, ahead, behind) come from the live entries; a cancelled appointment leaves the queue without the
@@ -61,6 +62,7 @@ describe('Queue management (e2e)', () => {
 
   const checkIn = (apptId: string, token = tokens.reception1) => http().post(`/api/queue/reception/appointments/${apptId}/check-in`).set(as(token)).send({});
   const checkOut = (entryId: string, token = tokens.reception1) => http().post(`/api/queue/reception/entries/${entryId}/check-out`).set(as(token)).send({});
+  const completeDesk = (entryId: string, token = tokens.reception1) => http().post(`/api/queue/reception/entries/${entryId}/complete`).set(as(token)).send({});
   const skipDesk = (entryId: string, token = tokens.reception1) => http().post(`/api/queue/reception/entries/${entryId}/skip`).set(as(token)).send({});
   const returnDesk = (entryId: string, token = tokens.reception1) => http().post(`/api/queue/reception/entries/${entryId}/return`).set(as(token)).send({});
   const callNext = (token = tokens.doctorA) => http().post('/api/queue/doctor/call-next').set(as(token)).send({});
@@ -70,21 +72,24 @@ describe('Queue management (e2e)', () => {
   const board = (token = tokens.reception1, query = '') => http().get(`/api/queue/reception${query}`).set(as(token));
   const mine = (patient: number) => http().get('/api/queue/mine').set(as(patientTokens[patient]));
 
-  /** An appointment today (or another day) written straight to the database, so the tests do not depend on the time of day. */
+  /** An appointment today (or another day) written straight to the database, so the tests do not depend on the time of day.
+   * CONFIRMED bookings also get a BOOKED queue token (same as the live booking path), so check-in only reuses it. */
   const appt = async (options: { patient: number; doctor?: string; status?: Status; date?: string }) => {
     const n = ++seq;
     const start = `${String(8 + Math.floor(n / 2)).padStart(2, '0')}:${n % 2 ? '30' : '00'}`;
     const status = options.status ?? 'CONFIRMED';
     const cancelled = status === 'CANCELLED';
-    return (
+    const doctorId = options.doctor ?? doctorA;
+    const date = options.date ?? today;
+    const id = (
       await db.query(
         `INSERT INTO appointments (patient_id, doctor_id, booked_by_user_id, appointment_date, start_time, end_time, slot_capacity, slot_number, status, cancelled_at, cancelled_by_user_id, cancel_reason, hold_expires_at)
          VALUES ($1, $2, $3, $4, $5::time, ($5::time + interval '30 minutes'), 1, 1, $6, $7, $8, $9, $10) RETURNING id`,
         [
           patientIds[options.patient],
-          options.doctor ?? doctorA,
+          doctorId,
           patientUserIds[options.patient],
-          options.date ?? today,
+          date,
           start,
           status,
           cancelled ? new Date() : null,
@@ -94,6 +99,18 @@ describe('Queue management (e2e)', () => {
         ],
       )
     ).rows[0].id as string;
+    if (status === 'CONFIRMED') {
+      const [{ next }] = await rows<{ next: number }>(
+        'SELECT COALESCE(MAX(token_number), 0) + 1 AS next FROM queue_entries WHERE doctor_id = $1 AND queue_date = $2',
+        [doctorId, date],
+      );
+      await db.query(
+        `INSERT INTO queue_entries (appointment_id, doctor_id, patient_id, queue_date, token_number, status, checked_in_at, checked_in_by_user_id)
+         VALUES ($1, $2, $3, $4, $5, 'BOOKED', NULL, NULL)`,
+        [id, doctorId, patientIds[options.patient], date, next],
+      );
+    }
+    return id;
   };
   const cancelAppt = (id: string) =>
     db.query("UPDATE appointments SET status = 'CANCELLED', cancelled_at = now(), cancelled_by_user_id = $2, cancel_reason = 'test' WHERE id = $1", [id, patientUserIds[0]]);
@@ -169,22 +186,32 @@ describe('Queue management (e2e)', () => {
   });
 
   describe('tokens', () => {
-    it('gives the next token in the doctor\'s queue in the order patients arrive, not the order of their appointments', async () => {
-      const first = await appt({ patient: 0 }); // earliest appointment
+    it('issues tokens at booking time and check-in reuses them, whatever order patients arrive', async () => {
+      const first = await appt({ patient: 0 }); // earliest appointment / first booked
       const second = await appt({ patient: 1 });
       const third = await appt({ patient: 2 });
+      expect(await rows('SELECT token_number, status, checked_in_at, checked_in_by_user_id FROM queue_entries ORDER BY token_number')).toEqual([
+        { token_number: 1, status: 'BOOKED', checked_in_at: null, checked_in_by_user_id: null },
+        { token_number: 2, status: 'BOOKED', checked_in_at: null, checked_in_by_user_id: null },
+        { token_number: 3, status: 'BOOKED', checked_in_at: null, checked_in_by_user_id: null },
+      ]);
+      // Arrive out of booking order: tokens stay the booking-time numbers.
       const a = (await checkIn(third).expect(200)).body;
       const b = (await checkIn(first).expect(200)).body;
       const c = (await checkIn(second).expect(200)).body;
-      expect([a.token, b.token, c.token]).toEqual([1, 2, 3]);
-      expect(a).toMatchObject({ appointmentId: third, status: 'WAITING', queueDate: today, doctor: { name: 'Dr. Alpha' }, patient: { name: 'Patient 3' }, ahead: 0, behind: 0, currentlyServingToken: null });
-      expect(c).toMatchObject({ ahead: 2, behind: 0 }); // the last to arrive has the two before them ahead
-      expect((await doctorQueue().expect(200)).body.waiting.map((entry: { token: number; appointment: { startTime: string } }) => entry.token)).toEqual([1, 2, 3]);
-      expect(await rows('SELECT token_number, checked_in_by_user_id FROM queue_entries ORDER BY token_number')).toEqual([
-        { token_number: 1, checked_in_by_user_id: receptionistUser1 },
-        { token_number: 2, checked_in_by_user_id: receptionistUser1 },
-        { token_number: 3, checked_in_by_user_id: receptionistUser1 },
+      expect([a.token, b.token, c.token]).toEqual([3, 1, 2]);
+      expect(a).toMatchObject({ appointmentId: third, status: 'WAITING', queueDate: today, doctor: { name: 'Dr. Alpha' }, patient: { name: 'Patient 3' } });
+      expect(a.checkedInAt).toBeTruthy();
+      expect((await doctorQueue().expect(200)).body.waiting.map((entry: { token: number }) => entry.token)).toEqual([1, 2, 3]);
+      const after = await rows<{ token_number: number; status: string; checked_in_at: Date | null; checked_in_by_user_id: string }>(
+        'SELECT token_number, status, checked_in_at, checked_in_by_user_id FROM queue_entries ORDER BY token_number',
+      );
+      expect(after.map((row) => ({ token_number: row.token_number, status: row.status, checked_in_by_user_id: row.checked_in_by_user_id }))).toEqual([
+        { token_number: 1, status: 'WAITING', checked_in_by_user_id: receptionistUser1 },
+        { token_number: 2, status: 'WAITING', checked_in_by_user_id: receptionistUser1 },
+        { token_number: 3, status: 'WAITING', checked_in_by_user_id: receptionistUser1 },
       ]);
+      expect(after.every((row) => row.checked_in_at != null)).toBe(true);
     });
 
     it('keeps a separate queue for each doctor: no hospital-wide sequence', async () => {
@@ -199,10 +226,11 @@ describe('Queue management (e2e)', () => {
 
     it('starts again at 1 each day, per doctor, and leaves an earlier day alone', async () => {
       const yesterday = addDays(today, -1);
-      // Yesterday's queue for the same doctor got as far as token 7.
+      // Yesterday's queue for the same doctor got as far as token 7 (override BOOKED rows with WAITING for the prior day).
       for (let n = 0; n < 3; n++) {
         const id = await appt({ patient: n, date: yesterday });
-        await db.query('INSERT INTO queue_entries (appointment_id, doctor_id, patient_id, queue_date, token_number, status, checked_in_by_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7)', [id, doctorA, patientIds[n], yesterday, n + 5, 'WAITING', receptionistUser1]);
+        await db.query('DELETE FROM queue_entries WHERE appointment_id = $1', [id]);
+        await db.query('INSERT INTO queue_entries (appointment_id, doctor_id, patient_id, queue_date, token_number, status, checked_in_at, checked_in_by_user_id) VALUES ($1, $2, $3, $4, $5, $6, now(), $7)', [id, doctorA, patientIds[n], yesterday, n + 5, 'WAITING', receptionistUser1]);
       }
       const first = await appt({ patient: 5 });
       const second = await appt({ patient: 6 });
@@ -212,7 +240,7 @@ describe('Queue management (e2e)', () => {
       expect((await doctorQueue().expect(200)).body.waiting.map((entry: { token: number }) => entry.token)).toEqual([1, 2]); // and does not appear in today's queue
     });
 
-    it('never gives a token out twice in one day, even a cancelled one\'s', async () => {
+    it('never reuses a cancelled booking\'s token for a later booking', async () => {
       const first = await appt({ patient: 0 });
       const second = await appt({ patient: 1 });
       const third = await appt({ patient: 2 });
@@ -222,13 +250,24 @@ describe('Queue management (e2e)', () => {
       expect((await checkIn(third).expect(200)).body.token).toBe(3);
     });
 
-    it('gives ten patients checking in at the same moment ten different tokens, 1 to 10, with no failures', async () => {
+    it('lets ten patients check in at once, each keeping the token issued at booking', async () => {
       const ids: string[] = [];
       for (let n = 0; n < 10; n++) ids.push(await appt({ patient: n }));
+      const booked = await rows<{ token_number: number }>('SELECT token_number FROM queue_entries ORDER BY token_number');
+      expect(booked.map((row) => row.token_number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       const results = await Promise.all(ids.map((id) => checkIn(id)));
       expect(results.map((res) => res.status)).toEqual(Array(10).fill(200));
       expect(results.map((res) => res.body.token).sort((x, y) => x - y)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-      expect(await rows('SELECT 1 FROM queue_entries')).toHaveLength(10);
+      expect(await rows("SELECT 1 FROM queue_entries WHERE status = 'WAITING'")).toHaveLength(10);
+    });
+
+    it('shows BOOKED tokens on the receptionist board before check-in', async () => {
+      const id = await appt({ patient: 0 });
+      const desk = (await board().expect(200)).body;
+      const doctor = desk.doctors.find((row: { doctor: { id: string } }) => row.doctor.id === doctorA);
+      expect(doctor.booked.map((entry: { appointmentId: string; token: number; status: string }) => [entry.appointmentId, entry.token, entry.status])).toEqual([[id, 1, 'BOOKED']]);
+      expect(doctor.waiting).toEqual([]);
+      expect(doctor.counts.booked).toBe(1);
     });
   });
 
@@ -255,7 +294,12 @@ describe('Queue management (e2e)', () => {
         const res = await checkIn(id).expect(409);
         expect(res.body.code, words).toBe(code);
         expect(res.body.message, words).toContain(words);
-        expect(await entryOf(id), words).toBeUndefined();
+        const entry = await entryOf(id);
+        if (status === 'CONFIRMED') {
+          expect(entry, words).toMatchObject({ status: 'BOOKED' }); // token already issued; check-in did not move it
+        } else {
+          expect(entry, words).toBeUndefined();
+        }
       }
     });
 
@@ -267,7 +311,7 @@ describe('Queue management (e2e)', () => {
       await checkIn('11111111-1111-4111-8111-111111111111').expect(404);
       await checkIn('not-a-uuid').expect(400);
       await http().post(`/api/queue/reception/appointments/${mine}/check-in`).set(as(tokens.reception1)).send({ token: 99 }).expect(400); // no body fields
-      expect(await rows('SELECT 1 FROM queue_entries')).toEqual([]);
+      expect(await rows("SELECT status FROM queue_entries ORDER BY token_number")).toEqual([{ status: 'BOOKED' }, { status: 'BOOKED' }]); // tokens exist; nobody was checked in
       await checkIn(theirs, tokens.reception2).expect(200); // the right receptionist can
     });
 
@@ -281,11 +325,11 @@ describe('Queue management (e2e)', () => {
   describe('calling and completing (the doctor)', () => {
     it('calls the lowest token next, one patient at a time', async () => {
       const ids = [await appt({ patient: 0 }), await appt({ patient: 1 }), await appt({ patient: 2 })];
-      const second = await arrive(ids[1]);
+      await arrive(ids[1]);
       await arrive(ids[2]);
-      await arrive(ids[0]);
+      const firstToken = await arrive(ids[0]); // token 1 was issued at booking for ids[0]
       const called = (await callNext().expect(200)).body;
-      expect(called).toMatchObject({ id: second, token: 1, status: 'SERVING', ahead: 0, behind: 2, currentlyServingToken: 1 });
+      expect(called).toMatchObject({ id: firstToken, token: 1, status: 'SERVING', ahead: 0, behind: 2, currentlyServingToken: 1 });
       const again = await callNext().expect(409);
       expect(again.body).toMatchObject({ code: 'CURRENT_NOT_COMPLETED', token: 1 });
       expect(await rows("SELECT token_number FROM queue_entries WHERE status = 'SERVING'")).toEqual([{ token_number: 1 }]);
@@ -297,6 +341,20 @@ describe('Queue management (e2e)', () => {
       expect(results.filter((res) => res.status === 200)).toHaveLength(1);
       expect(results.filter((res) => res.status === 409).every((res) => res.body.code === 'CURRENT_NOT_COMPLETED')).toBe(true);
       expect(await rows("SELECT 1 FROM queue_entries WHERE status = 'SERVING'")).toHaveLength(1);
+    });
+
+    it('lets the receptionist complete a serving patient without changing their token, then check them out', async () => {
+      const id = await appt({ patient: 0 });
+      const entry = await arrive(id);
+      expect((await entryOf(id)).token_number).toBe(1);
+      await callNext().expect(200);
+      expect((await completeDesk(entry).expect(200)).body).toMatchObject({ id: entry, token: 1, status: 'COMPLETED' });
+      expect((await entryOf(id)).token_number).toBe(1);
+      expect(await apptStatus(id)).toBe('COMPLETED');
+      expect((await checkOut(entry).expect(200)).body).toMatchObject({ token: 1, status: 'CHECKED_OUT' });
+      const desk = (await board().expect(200)).body;
+      const doctor = desk.doctors.find((row: { doctor: { id: string } }) => row.doctor.id === doctorA);
+      expect(doctor.checkedOut.map((row: { token: number }) => row.token)).toEqual([1]);
     });
 
     it('the database itself refuses a second patient being served by the same doctor on the same day', async () => {
@@ -477,9 +535,9 @@ describe('Queue management (e2e)', () => {
       expect((await mine(0).expect(200)).body[0]).toMatchObject({ status: 'COMPLETED', ahead: null, behind: null });
     });
 
-    it('a patient who has not been checked in has no queue position', async () => {
+    it('a patient who has not been checked in still sees their BOOKED token, with no place in the live line yet', async () => {
       await appt({ patient: 0 });
-      expect((await mine(0).expect(200)).body).toEqual([]);
+      expect((await mine(0).expect(200)).body).toMatchObject([{ status: 'BOOKED', token: 1, checkedInAt: null, ahead: null, behind: null }]);
     });
 
     it('shows a patient only their own entry: other patients appear as counts, never as names or tokens', async () => {
@@ -577,7 +635,7 @@ describe('Queue management (e2e)', () => {
       await complete(entry).expect(200);
       await checkOut(entry).expect(200);
       expect(await rows('SELECT event, from_status, to_status, actor_user_id FROM queue_events WHERE entry_id = $1 ORDER BY id', [entry])).toEqual([
-        { event: 'CHECKED_IN', from_status: null, to_status: 'WAITING', actor_user_id: receptionistUser1 },
+        { event: 'CHECKED_IN', from_status: 'BOOKED', to_status: 'WAITING', actor_user_id: receptionistUser1 },
         { event: 'CALLED', from_status: 'WAITING', to_status: 'SERVING', actor_user_id: doctorUserA },
         { event: 'COMPLETED', from_status: 'SERVING', to_status: 'COMPLETED', actor_user_id: doctorUserA },
         { event: 'CHECKED_OUT', from_status: 'COMPLETED', to_status: 'CHECKED_OUT', actor_user_id: receptionistUser1 },

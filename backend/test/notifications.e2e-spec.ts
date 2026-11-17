@@ -236,7 +236,7 @@ describe('Appointment notifications (e2e)', () => {
   });
 
   beforeEach(async () => {
-    await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments;');
     mailer.reset();
     sms.sent.length = 0;
     sms.failWith = null;
@@ -263,23 +263,30 @@ describe('Appointment notifications (e2e)', () => {
       expect(toPatient.subject).toContain('Appointment confirmed: Dr. Free Doctor');
       expect(toPatient.body).toContain('10:15 AM – 10:30 AM');
       expect(toPatient.body).toContain('Test Clinic, 1 Test St');
+      expect(toPatient.body).toMatch(/Queue token: \d+/);
+      const mine = (await http().get('/api/appointments/mine').set(as(tokens.patient1)).expect(200)).body as { id: string; queueToken: number | null }[];
+      const listed = mine.find((row) => row.id === booked.id);
+      expect(listed?.queueToken).toEqual(expect.any(Number));
+      expect(toPatient.body).toContain(`Queue token: ${listed!.queueToken}`);
 
       const toDoctor = pick(list, 'DOCTOR', 'email');
       expect(toDoctor.to_address).toBe('free.doctor@test.local');
       expect(toDoctor.subject).toMatch(/^New booking: Pat One/);
       expect(toDoctor.body).toContain('Hello Dr. Free Doctor');
       expect(toDoctor.body).toContain('10:15 AM – 10:30 AM');
+      expect(toDoctor.body).toMatch(/Queue token: \d+/);
 
       const text = pick(list, 'PATIENT', 'sms');
       expect(text.to_address).toBe('+919876543210');
       expect(text.body).toMatch(/^CareSlot: appointment confirmed with Dr\. Free Doctor/);
+      expect(text.body).toMatch(/Your queue token is \d+/);
       expect(text.body.length).toBeLessThanOrEqual(160);
       expect(sms.sent.map((m) => m.to)).toEqual(['+919876543210']);
 
-      // Neither side is given the other's contact details.
+      // Neither side is given the other's contact details or credentials.
       expect(toDoctor.body).not.toMatch(/patient1@test\.local|98765/);
       expect(toPatient.body).not.toMatch(/free\.doctor@test\.local/);
-      for (const row of list) expect(row.body).not.toMatch(/password|token|hash/i);
+      for (const row of list) expect(row.body).not.toMatch(/password|hash/i);
     });
 
     it('sends no text, and does not fail, when the patient has no usable phone number', async () => {
@@ -793,7 +800,7 @@ describe('Appointment notifications without SMS credentials (e2e)', () => {
   });
 
   it('books normally, queues only emails, queues no text at all, and never fails because SMS is missing', async () => {
-    await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments;');
     const login = async (email: string) =>
       (await request(app.getHttpServer()).post('/api/auth/login').send({ email, password: PASSWORD }).expect(200)).body.accessToken as string;
     const token = await login('patient1@test.local'); // has a valid phone number

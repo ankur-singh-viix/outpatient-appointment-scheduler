@@ -60,13 +60,23 @@ describe('Queue notifications (e2e)', () => {
   const appt = async (patient: number) => {
     const n = ++seq;
     const start = `${String(8 + Math.floor(n / 2)).padStart(2, '0')}:${n % 2 ? '30' : '00'}`;
-    return (
+    const id = (
       await db.query(
         `INSERT INTO appointments (patient_id, doctor_id, booked_by_user_id, appointment_date, start_time, end_time, slot_capacity, slot_number, status)
          VALUES ($1, $2, $3, $4, $5::time, ($5::time + interval '30 minutes'), 1, 1, 'CONFIRMED') RETURNING id`,
         [patientIds[patient], doctorId, patientUserIds[patient], today, start],
       )
     ).rows[0].id as string;
+    const [{ next }] = await rows<{ next: number }>(
+      'SELECT COALESCE(MAX(token_number), 0) + 1 AS next FROM queue_entries WHERE doctor_id = $1 AND queue_date = $2',
+      [doctorId, today],
+    );
+    await db.query(
+      `INSERT INTO queue_entries (appointment_id, doctor_id, patient_id, queue_date, token_number, status, checked_in_at, checked_in_by_user_id)
+       VALUES ($1, $2, $3, $4, $5, 'BOOKED', NULL, NULL)`,
+      [id, doctorId, patientIds[patient], today, next],
+    );
+    return id;
   };
 
   beforeAll(async () => {
