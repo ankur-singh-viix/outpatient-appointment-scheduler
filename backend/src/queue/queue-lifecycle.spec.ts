@@ -9,6 +9,8 @@ describe('queue lifecycle', () => {
 
   it('allows exactly the moves the queue has', () => {
     const allowed: [QueueStatus, QueueStatus][] = [
+      ['BOOKED', 'WAITING'],
+      ['BOOKED', 'CANCELLED'],
       ['WAITING', 'SERVING'],
       ['WAITING', 'SKIPPED'],
       ['WAITING', 'CANCELLED'],
@@ -26,7 +28,7 @@ describe('queue lifecycle', () => {
   });
 
   it('checkout is only possible after completion, and a waiting or serving patient cannot be checked out', () => {
-    for (const from of ['WAITING', 'SERVING', 'SKIPPED', 'CANCELLED'] as QueueStatus[]) expect(canQueueTransition(from, 'CHECKED_OUT')).toBe(false);
+    for (const from of ['BOOKED', 'WAITING', 'SERVING', 'SKIPPED', 'CANCELLED'] as QueueStatus[]) expect(canQueueTransition(from, 'CHECKED_OUT')).toBe(false);
     expect(canQueueTransition('COMPLETED', 'CHECKED_OUT')).toBe(true);
   });
 
@@ -46,10 +48,13 @@ describe('queue lifecycle', () => {
       expect((error as { getResponse: () => unknown }).getResponse()).toMatchObject({ statusCode: 409, code: 'INVALID_QUEUE_TRANSITION' });
     }
     expect(() => assertQueueTransition('WAITING', 'SERVING')).not.toThrow();
+    expect(() => assertQueueTransition('BOOKED', 'WAITING')).not.toThrow();
   });
 
   it('names the audit event for each move', () => {
+    expect(eventFor(null, 'BOOKED')).toBe('BOOKED');
     expect(eventFor(null, 'WAITING')).toBe('CHECKED_IN');
+    expect(eventFor('BOOKED', 'WAITING')).toBe('CHECKED_IN');
     expect(eventFor('WAITING', 'SERVING')).toBe('CALLED');
     expect(eventFor('SERVING', 'COMPLETED')).toBe('COMPLETED');
     expect(eventFor('COMPLETED', 'CHECKED_OUT')).toBe('CHECKED_OUT');

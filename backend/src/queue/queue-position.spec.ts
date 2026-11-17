@@ -44,7 +44,17 @@ describe('buildDay', () => {
   });
 
   it('an empty day has nothing in it', () => {
-    expect(buildDay([])).toEqual({ currentlyServingToken: null, serving: null, waiting: [], completed: [], checkedOut: [], skipped: [], cancelled: [] });
+    expect(buildDay([])).toEqual({ currentlyServingToken: null, serving: null, booked: [], waiting: [], completed: [], checkedOut: [], skipped: [], cancelled: [] });
+  });
+
+  it('keeps BOOKED entries (token reserved at booking) apart from the waiting list', () => {
+    const day = buildDay([row(1, 'BOOKED'), row(2, 'WAITING'), row(3, 'BOOKED')]);
+    expect(day.booked.map((entry) => entry.token)).toEqual([1, 3]);
+    expect(day.waiting.map((entry) => entry.token)).toEqual([2]);
+  });
+
+  it('treats a cancelled booking that still has a BOOKED token as cancelled', () => {
+    expect(buildDay([row(4, 'BOOKED', 'CANCELLED')]).cancelled.map((entry) => entry.token)).toEqual([4]);
   });
 });
 

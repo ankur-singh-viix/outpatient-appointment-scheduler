@@ -4,6 +4,7 @@ import type { QueueEventName, QueueStatus } from '../database/entities/queue-ent
 /**
  * Which status a queue entry may move to from each status. The whole queue lifecycle in one place; every writer checks it first.
  *
+ *   BOOKED       -> WAITING (check-in), CANCELLED
  *   WAITING      -> SERVING (the doctor calls the patient), SKIPPED (not here), CANCELLED
  *   SERVING      -> COMPLETED (the doctor finishes), SKIPPED (called but absent), CANCELLED
  *   COMPLETED    -> CHECKED_OUT (the receptionist checks the patient out)
@@ -14,6 +15,7 @@ import type { QueueEventName, QueueStatus } from '../database/entities/queue-ent
  * appointment was cancelled). Everywhere else a cancelled appointment is recognised from the appointment's own status.
  */
 export const QUEUE_TRANSITIONS: Record<QueueStatus, readonly QueueStatus[]> = {
+  BOOKED: ['WAITING', 'CANCELLED'],
   WAITING: ['SERVING', 'SKIPPED', 'CANCELLED'],
   SERVING: ['COMPLETED', 'SKIPPED', 'CANCELLED'],
   COMPLETED: ['CHECKED_OUT'],
@@ -22,7 +24,7 @@ export const QUEUE_TRANSITIONS: Record<QueueStatus, readonly QueueStatus[]> = {
   CANCELLED: [],
 };
 
-/** The patients still to be seen or being seen. Everything else has left the active queue. */
+/** The patients still to be seen or being seen. BOOKED means token reserved but not yet at the clinic. */
 export const ACTIVE_QUEUE_STATUSES: readonly QueueStatus[] = ['WAITING', 'SERVING'];
 
 export function canQueueTransition(from: QueueStatus, to: QueueStatus): boolean {
@@ -30,6 +32,7 @@ export function canQueueTransition(from: QueueStatus, to: QueueStatus): boolean 
 }
 
 const WORDS: Record<QueueStatus, string> = {
+  BOOKED: 'booked',
   WAITING: 'waiting',
   SERVING: 'being served',
   COMPLETED: 'completed',
@@ -52,7 +55,8 @@ export function assertQueueTransition(from: QueueStatus, to: QueueStatus): void 
 
 /** The audit event name for a move. */
 export function eventFor(from: QueueStatus | null, to: QueueStatus): QueueEventName {
-  if (from === null) return 'CHECKED_IN';
+  if (from === null && to === 'BOOKED') return 'BOOKED';
+  if (from === null || (from === 'BOOKED' && to === 'WAITING')) return 'CHECKED_IN';
   if (to === 'SERVING') return 'CALLED';
   if (to === 'COMPLETED') return 'COMPLETED';
   if (to === 'CHECKED_OUT') return 'CHECKED_OUT';

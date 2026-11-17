@@ -16,7 +16,9 @@ export interface DayRow {
  * copied, so the existing cancel and reschedule flows need no knowledge of the queue.
  */
 export function effectiveStatus(stored: QueueStatus, appointmentStatus: string): QueueStatus {
-  if ((stored === 'WAITING' || stored === 'SERVING') && (appointmentStatus === 'CANCELLED' || appointmentStatus === 'NO_SHOW')) return 'CANCELLED';
+  if ((stored === 'BOOKED' || stored === 'WAITING' || stored === 'SERVING') && (appointmentStatus === 'CANCELLED' || appointmentStatus === 'NO_SHOW')) {
+    return 'CANCELLED';
+  }
   return stored;
 }
 
@@ -24,6 +26,8 @@ export interface Day<T extends DayRow> {
   /** The token being served right now, or null. */
   currentlyServingToken: number | null;
   serving: T | null;
+  /** Confirmed bookings with a token who have not checked in yet. */
+  booked: T[];
   /** Waiting patients, lowest token first: the order they will be called in. */
   waiting: T[];
   completed: T[];
@@ -45,6 +49,7 @@ export function buildDay<T extends DayRow>(rows: T[]): Day<T> {
   return {
     currentlyServingToken: serving?.token ?? null,
     serving,
+    booked: ordered.filter((row) => row.status === 'BOOKED'),
     waiting: waiting.sort((a, b) => a.token - b.token),
     completed: ordered.filter((row) => row.status === 'COMPLETED'),
     checkedOut: ordered.filter((row) => row.status === 'CHECKED_OUT'),
@@ -68,7 +73,7 @@ export interface Position {
  * completed, checked out or cancelled is not in the active queue and has no place in it.
  */
 export function positionOf<T extends DayRow>(day: Day<T>, id: string): Position | null {
-  const all = [day.serving, ...day.waiting, ...day.completed, ...day.checkedOut, ...day.skipped, ...day.cancelled].filter((row): row is T => row !== null);
+  const all = [day.serving, ...day.waiting, ...day.booked, ...day.completed, ...day.checkedOut, ...day.skipped, ...day.cancelled].filter((row): row is T => row !== null);
   const row = all.find((candidate) => candidate.id === id);
   if (!row) return null;
   const base = { status: row.status, currentlyServingToken: day.currentlyServingToken };
