@@ -243,6 +243,11 @@ function AppointmentCard({
                   {when}
                 </Badge>
               )}
+              {a.queueToken != null && (
+                <Badge variant="secondary" className="bg-emerald-50 font-semibold tabular-nums text-emerald-900" aria-label={`Queue token ${a.queueToken}`}>
+                  Token {a.queueToken}
+                </Badge>
+              )}
             </p>
             <p className="text-sm text-foreground/80">
               {a.doctor.name} · {a.doctor.specialty}

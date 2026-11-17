@@ -11,6 +11,7 @@ import type { AdminQueueBoard, MyQueueEntry, QueueCounts, QueueDay, QueueEntryRe
 export const APPROACHING_AT = 2;
 
 export const STATUS_LABEL: Record<QueueStatus, string> = {
+  BOOKED: 'Booked',
   WAITING: 'Waiting',
   SERVING: 'Serving',
   COMPLETED: 'Completed',
@@ -50,6 +51,8 @@ export function patientMessage(entry: Pick<MyQueueEntry, 'status' | 'ahead' | 'c
         detail: `${ahead} patients are ahead of you${entry.currentlyServingToken === null ? '' : `; token ${entry.currentlyServingToken} is being seen now`}. This page updates by itself.`,
       };
     }
+    case 'BOOKED':
+      return { tone: 'waiting', headline: 'Your appointment is booked.', detail: 'Check in at the front desk when you arrive. Your queue token is already reserved.' };
     case 'SERVING':
       return { tone: 'now', headline: 'Please proceed to the consultation room.', detail: 'Your consultation is in progress.' };
     case 'COMPLETED':
@@ -72,7 +75,8 @@ export type QueueAction = 'checkIn' | 'checkOut' | 'skip' | 'return' | 'complete
  */
 export function entryActions(role: 'RECEPTIONIST' | 'DOCTOR', status: QueueStatus): QueueAction[] {
   if (role === 'RECEPTIONIST') {
-    if (status === 'WAITING' || status === 'SERVING') return ['skip'];
+    if (status === 'SERVING') return ['complete', 'skip'];
+    if (status === 'WAITING') return ['skip'];
     if (status === 'COMPLETED') return ['checkOut'];
     if (status === 'SKIPPED') return ['return'];
     return [];
@@ -97,8 +101,11 @@ export function progress(counts: QueueCounts): { total: number; done: number; pe
 export interface ArrivalRow {
   appointmentId: string;
   patientName: string;
+  phone: string | null;
   startTime: string;
   endTime: string;
+  /** Token issued at booking; shown before check-in. */
+  token: number | null;
 }
 
 export interface DeskDoctor {
@@ -110,24 +117,54 @@ export interface DeskDoctor {
   awaitingPayment: ArrivalRow[];
 }
 
-const everyEntry = (day: QueueDay): QueueEntryView[] => [...(day.serving ? [day.serving] : []), ...day.waiting, ...day.completed, ...day.checkedOut, ...day.skipped, ...day.cancelled];
+const everyEntry = (day: QueueDay): QueueEntryView[] => [
+  ...(day.serving ? [day.serving] : []),
+  ...(day.booked ?? []),
+  ...day.waiting,
+  ...day.completed,
+  ...day.checkedOut,
+  ...day.skipped,
+  ...day.cancelled,
+];
 
 /**
- * The front desk's view: for each doctor, the live queue from the server and the appointments today that are still to arrive. An
- * appointment that already has a queue entry (in any state, even a cancelled one) is not listed as an arrival again.
+ * The front desk's view: for each doctor, the live queue from the server and the appointments today that are still to arrive.
+ * BOOKED queue entries (token already issued) are the primary arrivals list; any confirmed appointment without an entry is included
+ * as a fallback. PENDING appointments never have a token yet.
  */
 export function buildDesk(board: ReceptionBoard, appointments: ReceptionAppointment[]): DeskDoctor[] {
   const queued = new Set(board.doctors.flatMap((day) => everyEntry(day).map((entry) => entry.appointmentId)));
   return board.doctors.map((day) => {
     const { doctor } = day;
+    const fromBooked: ArrivalRow[] = (day.booked ?? [])
+      .slice()
+      .sort((a, b) => a.appointment.startTime.localeCompare(b.appointment.startTime) || a.patient.name.localeCompare(b.patient.name))
+      .map((entry) => ({
+        appointmentId: entry.appointmentId,
+        patientName: entry.patient.name,
+        phone: entry.patient.phone ?? null,
+        startTime: entry.appointment.startTime,
+        endTime: entry.appointment.endTime,
+        token: entry.token,
+      }));
     const todays = appointments
       .filter((appointment) => appointment.doctor.id === doctor.id && appointment.date === board.date && !queued.has(appointment.id))
       .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.patient.name.localeCompare(b.patient.name))
-      .map((appointment) => ({ appointment, row: { appointmentId: appointment.id, patientName: appointment.patient.name, startTime: appointment.startTime, endTime: appointment.endTime } }));
+      .map((appointment) => ({
+        appointment,
+        row: {
+          appointmentId: appointment.id,
+          patientName: appointment.patient.name,
+          phone: appointment.patient.phone,
+          startTime: appointment.startTime,
+          endTime: appointment.endTime,
+          token: appointment.queueToken,
+        },
+      }));
     return {
       doctor,
       day,
-      arrivals: todays.filter(({ appointment }) => appointment.status === 'CONFIRMED').map(({ row }) => row),
+      arrivals: [...fromBooked, ...todays.filter(({ appointment }) => appointment.status === 'CONFIRMED').map(({ row }) => row)],
       awaitingPayment: todays.filter(({ appointment }) => appointment.status === 'PENDING').map(({ row }) => row),
     };
   });
@@ -155,6 +192,10 @@ export function actionNotice(action: QueueAction | 'callNext', entry: QueueEntry
 /** The administrator's totals across every doctor, for the summary line. */
 export function adminTotals(board: AdminQueueBoard): QueueCounts {
   const total: QueueCounts = { waiting: 0, serving: 0, completed: 0, checkedOut: 0, skipped: 0, cancelled: 0 };
-  for (const { counts } of board.doctors) for (const key of Object.keys(total) as (keyof QueueCounts)[]) total[key] += counts[key];
+  for (const { counts } of board.doctors) {
+    for (const key of Object.keys(total) as (keyof QueueCounts)[]) {
+      total[key] = (total[key] ?? 0) + (counts[key] ?? 0);
+    }
+  }
   return total;
 }

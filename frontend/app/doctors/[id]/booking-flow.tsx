@@ -593,6 +593,7 @@ function BookingSuccess({
           </p>
         </div>
         <dl className="grid gap-3 rounded-lg bg-muted p-4 text-left text-sm sm:grid-cols-2">
+          {appointment.queueToken != null && <SummaryRow label="Queue token" value={String(appointment.queueToken)} />}
           <SummaryRow label="Doctor" value={`${appointment.doctor.name} · ${appointment.doctor.specialty}`} />
           <SummaryRow label="Date" value={formatDate(appointment.date, { weekday: 'long' })} />
           <SummaryRow label="Time" value={`${formatTime(appointment.startTime)} – ${formatTime(appointment.endTime)}`} />
