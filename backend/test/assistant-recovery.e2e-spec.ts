@@ -175,7 +175,7 @@ describe('AI assistant, phase 2 follow-up: recovery and reschedule validation (e
   });
 
   beforeEach(async () => {
-    await db.query('DELETE FROM assistant_actions; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
+    await db.query('DELETE FROM assistant_actions; DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
     await db.query('DELETE FROM schedule_overrides; DELETE FROM availability;');
     gateway.refundStatus = 'pending';
     requests.length = 0;
@@ -283,7 +283,7 @@ describe('AI assistant, phase 2 follow-up: recovery and reschedule validation (e
 
     it('never lets a booking and a move race into one place: whoever loses, capacity holds and the mover keeps the original', async () => {
       for (const target of ['10:00', '10:30', '11:00']) {
-        await db.query('DELETE FROM assistant_actions; DELETE FROM notifications; DELETE FROM appointments; DELETE FROM availability');
+        await db.query('DELETE FROM assistant_actions; DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM appointments; DELETE FROM availability');
         await session(freeDoctor, day(3), 1, '09:00', '12:00');
         const mine = (await book(0, freeDoctor, day(3), '09:00').expect(201)).body;
         const { card } = await prepare(0, 'prepare_reschedule', { appointmentId: mine.id, date: day(3), startTime: target });

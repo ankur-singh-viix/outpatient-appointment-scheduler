@@ -159,7 +159,7 @@ describe('AI assistant: doctor cancel, move, add hours and block a day (e2e)', (
   });
 
   beforeEach(async () => {
-    await db.query('DELETE FROM notifications; DELETE FROM schedule_changes; DELETE FROM appointments; DELETE FROM schedule_overrides; DELETE FROM availability;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM schedule_changes; DELETE FROM appointments; DELETE FROM schedule_overrides; DELETE FROM availability;');
     mail.sent.length = 0;
     requests.length = 0;
     (app.get(AssistantService) as unknown as { limiter: RateLimiter }).limiter = new RateLimiter(1000, 60_000);
