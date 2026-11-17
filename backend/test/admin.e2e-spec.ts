@@ -107,7 +107,7 @@ describe('Admin-managed receptionists (e2e)', () => {
   beforeEach(async () => {
     sent.length = 0;
     provider = 'accepts';
-    await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments; DELETE FROM availability;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments; DELETE FROM availability;');
     await db.query("DELETE FROM users WHERE role = 'RECEPTIONIST'"); // assignments go with them
   });
 

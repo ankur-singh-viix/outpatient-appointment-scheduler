@@ -7,6 +7,7 @@ import { Appointment, Doctor, DoctorReceptionistAssignment, Patient, QueueEntry,
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { clinicNow } from '../scheduling/calendar.js';
 import { hhmm } from '../scheduling/slots.js';
+import { issueBookedQueueToken } from './issue-token.js';
 import { assertQueueTransition, eventFor } from './queue-lifecycle.js';
 import { buildDay, positionOf, type Day, type DayRow } from './queue-position.js';
 
@@ -25,7 +26,9 @@ interface QueueRow extends DayRow {
   startTime: string;
   endTime: string;
   patientName: string;
-  checkedInAt: Date;
+  /** Present for the front desk; null on patient-facing responses that never read this field. */
+  patientPhone: string | null;
+  checkedInAt: Date | null;
   calledAt: Date | null;
   completedAt: Date | null;
   checkedOutAt: Date | null;
@@ -35,11 +38,11 @@ interface QueueRow extends DayRow {
 const conflict = (code: string, message: string, extra: Record<string, unknown> = {}) => new ConflictException({ statusCode: 409, error: 'Conflict', code, message, ...extra });
 
 /**
- * The queue: doctor-wise tokens, check-in and checkout by the receptionist, calling and completing by the doctor.
+ * The queue: doctor-wise tokens (issued at booking), check-in and checkout by the receptionist, calling and completing by the doctor.
  *
- *  - A token belongs to one doctor and one day. It is the next number in that doctor's queue for that clinic-local day, taken while
- *    the doctor's row is locked (the same lock bookings take, in the same order: doctor, then appointment), and the database refuses
- *    a repeated token as well as a second entry for the same appointment and a second patient being served at once.
+ *  - A token belongs to one doctor and one day. It is allocated when the appointment is confirmed (status BOOKED), under the doctor
+ *    lock, and the database refuses a repeated token as well as a second entry for the same appointment and a second patient being
+ *    served at once. Check-in reuses that token and only moves BOOKED -> WAITING.
  *  - The appointment keeps its own status. A cancelled appointment is recognised from that status (never copied here), so the
  *    existing cancel and reschedule code needs no knowledge of the queue. When the doctor completes a consultation the appointment
  *    becomes COMPLETED through the transition the appointment lifecycle already allows.
@@ -55,9 +58,20 @@ export class QueueService {
     private readonly notifications: NotificationsService,
   ) {}
 
+  /**
+   * Issues a BOOKED token for a just-confirmed appointment. Caller must hold the doctor lock. Exported for booking and payment
+   * confirmation so they share one allocation path with check-in.
+   */
+  issueTokenInTransaction(
+    manager: EntityManager,
+    input: { appointmentId: string; doctorId: string; patientId: string; queueDate: string; actorUserId: string },
+  ) {
+    return issueBookedQueueToken(manager, input);
+  }
+
   // ---- Receptionist ----
 
-  /** Checks a patient in for a CONFIRMED appointment on its day, giving them the next token in that doctor's queue. */
+  /** Checks a patient in for a CONFIRMED appointment on its day, reusing the booking-time token (never allocating a new one). */
   async checkIn(user: AuthUser, appointmentId: string) {
     return this.guard(async () => {
       const doctorIds = await this.assignedDoctorIds(user);
@@ -74,19 +88,19 @@ export class QueueService {
         if (appointment.appointmentDate !== today) {
           throw conflict('NOT_TODAY', appointment.appointmentDate > today ? 'This appointment is not today, so the patient cannot be checked in yet.' : 'This appointment was on an earlier day, so the patient cannot be checked in.');
         }
-        const existing = await manager.findOneBy(QueueEntry, { appointmentId });
-        if (existing) throw conflict('ALREADY_CHECKED_IN', `This patient is already checked in with token ${existing.tokenNumber}.`, { token: existing.tokenNumber });
+        const existing = await manager.findOne(QueueEntry, { where: { appointmentId }, lock: { mode: 'pessimistic_write' } });
+        if (!existing) {
+          throw conflict('TOKEN_MISSING', 'This appointment has no queue token yet. It must be issued when the booking is confirmed.');
+        }
+        if (existing.status !== 'BOOKED') {
+          throw conflict('ALREADY_CHECKED_IN', `This patient is already checked in with token ${existing.tokenNumber}.`, { token: existing.tokenNumber });
+        }
 
-        const [{ next }]: { next: number }[] = await manager.query('SELECT COALESCE(MAX(token_number), 0) + 1 AS next FROM queue_entries WHERE doctor_id = $1 AND queue_date = $2', [appointment.doctorId, today]);
-        const entry = await manager.save(
-          manager.create(QueueEntry, { appointmentId, doctorId: appointment.doctorId, patientId: appointment.patientId, queueDate: today, tokenNumber: Number(next), status: 'WAITING', checkedInByUserId: user.id }),
-        );
-        await this.record(manager, entry.id, null, 'WAITING', user);
-        // The patient is told their token (email, and a text if they have a phone and allow texts). Queued in this transaction through the
-        // outbox: it can never undo the check-in, and a second request cannot get this far (the check-in is refused above).
-        const position = positionOf(buildDay(await this.dayRows(manager, appointment.doctorId, today)), entry.id);
-        await this.notifications.queueCheckedIn(manager, appointmentId, { entryId: entry.id, token: entry.tokenNumber, ahead: position?.ahead ?? 0 });
-        return entry.id;
+        await this.move(manager, existing, 'WAITING', user, { checkedInAt: new Date(), checkedInByUserId: user.id });
+        // The patient is told their (existing) token and how many are ahead among those already waiting. Queued in this transaction.
+        const position = positionOf(buildDay(await this.dayRows(manager, appointment.doctorId, today)), existing.id);
+        await this.notifications.queueCheckedIn(manager, appointmentId, { entryId: existing.id, token: existing.tokenNumber, ahead: position?.ahead ?? 0 });
+        return existing.id;
       });
       this.notifications.kick();
       return this.describe(entryId);
@@ -190,14 +204,21 @@ export class QueueService {
     });
   }
 
-  /** Completes the consultation of the patient being served; their appointment becomes COMPLETED. */
+  /** Completes the consultation of the patient being served; their appointment becomes COMPLETED. Doctors complete their own queue; receptionists may complete for assigned doctors. */
   async complete(user: AuthUser, entryId: string) {
     return this.guard(async () => {
-      const doctor = await this.doctorOf(user);
+      const doctorIds = user.role === 'RECEPTIONIST' ? await this.assignedDoctorIds(user) : [];
+      const doctor = user.role === 'DOCTOR' ? await this.doctorOf(user) : null;
       const outcome = await this.dataSource.transaction(async (manager) => {
-        await this.lockDoctor(manager, doctor.id);
+        const probe = await manager.findOneBy(QueueEntry, { id: entryId });
+        if (!probe) throw new NotFoundException('Queue entry not found.');
+        if (doctor) {
+          if (probe.doctorId !== doctor.id) throw new NotFoundException('Queue entry not found.');
+        } else {
+          await this.entryForAssignedDoctors(manager, entryId, doctorIds, false);
+        }
+        await this.lockDoctor(manager, probe.doctorId);
         const entry = await this.lockEntry(manager, entryId);
-        if (entry.doctorId !== doctor.id) throw new NotFoundException('Queue entry not found.');
         assertQueueTransition(entry.status, 'COMPLETED');
         const appointment = await manager.findOneOrFail(Appointment, { where: { id: entry.appointmentId }, lock: { mode: 'pessimistic_write' } });
         if (appointment.status === 'CANCELLED' || appointment.status === 'NO_SHOW') {
@@ -241,7 +262,7 @@ export class QueueService {
 
   // ---- Patient ----
 
-  /** The signed-in patient's own place in today's queue (an empty list when they have not been checked in). Nobody else's details are included. */
+  /** The signed-in patient's own place in today's queue (includes BOOKED tokens reserved at booking). Nobody else's details are included. */
   async myQueue(user: AuthUser) {
     return this.guard(async () => {
       const patient = await this.dataSource.getRepository(Patient).findOne({ where: { userId: user.id }, select: { id: true } });
@@ -253,7 +274,7 @@ export class QueueService {
       for (const entry of mine) {
         if (!days.has(entry.doctor_id)) days.set(entry.doctor_id, buildDay(await this.dayRows(this.dataSource.manager, entry.doctor_id, today)));
         const day = days.get(entry.doctor_id)!;
-        const all = [day.serving, ...day.waiting, ...day.completed, ...day.checkedOut, ...day.skipped, ...day.cancelled];
+        const all = [day.serving, ...day.waiting, ...day.booked, ...day.completed, ...day.checkedOut, ...day.skipped, ...day.cancelled];
         const row = all.find((candidate) => candidate?.id === entry.id);
         const position = positionOf(day, entry.id);
         if (!row || !position) continue;
@@ -269,7 +290,7 @@ export class QueueService {
           currentlyServingToken: position.currentlyServingToken,
           ahead: position.ahead,
           behind: position.behind,
-          checkedInAt: row.checkedInAt.toISOString(),
+          checkedInAt: row.checkedInAt?.toISOString() ?? null,
           calledAt: row.calledAt?.toISOString() ?? null,
           completedAt: row.completedAt?.toISOString() ?? null,
           checkedOutAt: row.checkedOutAt?.toISOString() ?? null,
@@ -380,7 +401,8 @@ export class QueueService {
     const rows: Record<string, unknown>[] = await manager.query(
       `SELECT q.id, q.appointment_id, q.doctor_id, du.name AS doctor_name, q.queue_date::text AS queue_date, q.token_number, q.status,
               q.checked_in_at, q.called_at, q.completed_at, q.checked_out_at, q.updated_at,
-              a.status::text AS appointment_status, a.start_time::text AS start_time, a.end_time::text AS end_time, pu.name AS patient_name
+              a.status::text AS appointment_status, a.start_time::text AS start_time, a.end_time::text AS end_time,
+              pu.name AS patient_name, p.phone AS patient_phone
          FROM queue_entries q
          JOIN appointments a ON a.id = q.appointment_id
          JOIN doctors d ON d.id = q.doctor_id JOIN users du ON du.id = d.user_id
@@ -401,7 +423,8 @@ export class QueueService {
       startTime: hhmm(row.start_time as string),
       endTime: hhmm(row.end_time as string),
       patientName: row.patient_name as string,
-      checkedInAt: row.checked_in_at as Date,
+      patientPhone: (row.patient_phone as string | null) ?? null,
+      checkedInAt: (row.checked_in_at as Date | null) ?? null,
       calledAt: row.called_at as Date | null,
       completedAt: row.completed_at as Date | null,
       checkedOutAt: row.checked_out_at as Date | null,
@@ -416,8 +439,8 @@ export class QueueService {
       token: row.token,
       status: row.status,
       appointment: { startTime: row.startTime, endTime: row.endTime },
-      patient: { name: row.patientName },
-      checkedInAt: row.checkedInAt.toISOString(),
+      patient: { name: row.patientName, phone: row.patientPhone },
+      checkedInAt: row.checkedInAt?.toISOString() ?? null,
       calledAt: row.calledAt?.toISOString() ?? null,
       completedAt: row.completedAt?.toISOString() ?? null,
       checkedOutAt: row.checkedOutAt?.toISOString() ?? null,
@@ -430,12 +453,21 @@ export class QueueService {
       date,
       currentlyServingToken: day.currentlyServingToken,
       serving: day.serving ? this.entryView(day.serving) : null,
+      booked: day.booked.map((row) => this.entryView(row)),
       waiting: day.waiting.map((row, index) => ({ ...this.entryView(row), position: index + 1 })),
       completed: day.completed.map((row) => this.entryView(row)),
       checkedOut: day.checkedOut.map((row) => this.entryView(row)),
       skipped: day.skipped.map((row) => this.entryView(row)),
       cancelled: day.cancelled.map((row) => this.entryView(row)),
-      counts: { waiting: day.waiting.length, serving: day.serving ? 1 : 0, completed: day.completed.length, checkedOut: day.checkedOut.length, skipped: day.skipped.length, cancelled: day.cancelled.length },
+      counts: {
+        booked: day.booked.length,
+        waiting: day.waiting.length,
+        serving: day.serving ? 1 : 0,
+        completed: day.completed.length,
+        checkedOut: day.checkedOut.length,
+        skipped: day.skipped.length,
+        cancelled: day.cancelled.length,
+      },
       updatedAt: new Date().toISOString(),
     };
   }
@@ -445,7 +477,7 @@ export class QueueService {
     const [located]: { doctor_id: string; queue_date: string }[] = await this.dataSource.query('SELECT doctor_id, queue_date::text AS queue_date FROM queue_entries WHERE id = $1', [entryId]);
     if (!located) throw new NotFoundException('Queue entry not found.');
     const day = buildDay(await this.dayRows(this.dataSource.manager, located.doctor_id, located.queue_date));
-    const all = [day.serving, ...day.waiting, ...day.completed, ...day.checkedOut, ...day.skipped, ...day.cancelled];
+    const all = [day.serving, ...day.waiting, ...day.booked, ...day.completed, ...day.checkedOut, ...day.skipped, ...day.cancelled];
     const row = all.find((candidate) => candidate?.id === entryId)!;
     const position = positionOf(day, entryId)!;
     return { ...this.entryView(row), queueDate: row.queueDate, doctor: { id: row.doctorId, name: row.doctorName }, currentlyServingToken: position.currentlyServingToken, ahead: position.ahead, behind: position.behind };

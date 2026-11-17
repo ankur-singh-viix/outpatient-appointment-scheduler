@@ -84,6 +84,14 @@ export class QueueController {
     return this.queue.callNext(user);
   }
 
+  /** Completes the consultation of the patient being served (front desk, for assigned doctors). */
+  @Post('reception/entries/:id/complete')
+  @HttpCode(200)
+  @Roles('RECEPTIONIST')
+  completeAtDesk(@CurrentUser() user: AuthUser, @Param(new ZodValidationPipe(idParam)) params: z.infer<typeof idParam>, @Body(new ZodValidationPipe(noBody)) _body: z.infer<typeof noBody>) {
+    return this.queue.complete(user, params.id);
+  }
+
   /** Completes the consultation of the patient being served. */
   @Post('doctor/entries/:id/complete')
   @HttpCode(200)

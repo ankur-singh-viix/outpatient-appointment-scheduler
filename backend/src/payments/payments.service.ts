@@ -15,9 +15,10 @@ import { DataSource, EntityManager, In, IsNull, LessThanOrEqual, Not, Repository
 import type { AuthUser } from '../auth/auth.types.js';
 import { zonedInstant } from '../common/zoned-time.js';
 import { loadConfig } from '../config.js';
-import { Appointment, Patient, Payment, PaymentEvent, Refund } from '../database/entities/index.js';
+import { Appointment, Doctor, Patient, Payment, PaymentEvent, Refund } from '../database/entities/index.js';
 import { isUniqueViolation } from '../database/errors.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
+import { QueueService } from '../queue/queue.service.js';
 import { hhmm } from '../scheduling/slots.js';
 import { GatewayError, PAYMENT_GATEWAY, type GatewayRefund, type PaymentGateway } from './payment-gateway.js';
 import { toPaymentSummary, type PaymentSummary } from './payment-summary.js';
@@ -72,6 +73,7 @@ export class PaymentsService {
     private readonly dataSource: DataSource,
     @Inject(PAYMENT_GATEWAY) private readonly gateway: PaymentGateway,
     private readonly notifications: NotificationsService,
+    private readonly queue: QueueService,
   ) {}
 
   /** Whether bookings with a fee must be paid for. Off without Razorpay keys, which keeps booking exactly as it was. */
@@ -185,6 +187,10 @@ export class PaymentsService {
   async settlePaid(paymentId: string, razorpayPaymentId: string): Promise<{ paymentStatus: string; appointmentStatus: string }> {
     const refundIds: string[] = [];
     const result = await this.dataSource.transaction(async (manager) => {
+      // Doctor first (same order as booking), then appointment and payment, so token allocation cannot deadlock with a concurrent book.
+      const unlocked = await manager.findOneByOrFail(Payment, { id: paymentId });
+      const probe = await manager.findOneByOrFail(Appointment, { id: unlocked.appointmentId });
+      await manager.findOne(Doctor, { where: { id: probe.doctorId }, lock: { mode: 'pessimistic_write' } });
       const { payment, appointment } = await this.lockAppointmentThenPayment(manager, paymentId);
       if (payment.status === 'PAID') {
         // Already settled. A DIFFERENT Razorpay payment id on a paid order would mean the customer was charged twice.
@@ -204,6 +210,13 @@ export class PaymentsService {
         appointment.status = 'CONFIRMED';
         appointment.holdExpiresAt = null;
         await manager.save(appointment);
+        await this.queue.issueTokenInTransaction(manager, {
+          appointmentId: appointment.id,
+          doctorId: appointment.doctorId,
+          patientId: appointment.patientId,
+          queueDate: appointment.appointmentDate,
+          actorUserId: appointment.bookedByUserId,
+        });
         await this.notifications.bookingConfirmed(manager, appointment.id);
         await this.notifications.paymentReceived(manager, appointment.id, { amountPaise: payment.amountPaise, receipt: razorpayPaymentId });
       } else if (appointment.status !== 'CONFIRMED') {

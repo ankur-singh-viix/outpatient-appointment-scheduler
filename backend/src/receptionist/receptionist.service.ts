@@ -71,34 +71,38 @@ export class ReceptionistService {
     const doctorIds = await this.assignedDoctorIds(user);
     if (doctorIds.length === 0) return [];
     const today = clinicNow(this.config.clinicTimezone).date;
-    const builder = this.appointments
-      .createQueryBuilder('appointment')
-      .innerJoinAndSelect('appointment.doctor', 'doctor')
-      .innerJoinAndSelect('doctor.user', 'doctorUser')
-      .innerJoinAndSelect('appointment.patient', 'patient')
-      .innerJoinAndSelect('patient.user', 'patientUser')
-      .where('appointment.doctorId IN (:...doctorIds)', { doctorIds })
-      .andWhere('appointment.status IN (:...statuses)', { statuses: ACTIVE_STATUSES })
-      .andWhere(query.date ? 'appointment.appointmentDate = :date' : 'appointment.appointmentDate >= :date', { date: query.date ?? today })
-      .orderBy('appointment.appointmentDate', 'ASC')
-      .addOrderBy('appointment.startTime', 'ASC')
-      .addOrderBy('appointment.slotNumber', 'ASC')
-      .take(200);
+    const params: unknown[] = [doctorIds, ACTIVE_STATUSES, query.date ?? today];
+    let sql = `
+      SELECT a.id, a.appointment_date::text AS date, a.start_time::text AS start_time, a.end_time::text AS end_time,
+             a.status::text AS status, a.slot_number, a.slot_capacity,
+             p.id AS patient_id, pu.name AS patient_name, p.phone AS patient_phone,
+             d.id AS doctor_id, du.name AS doctor_name,
+             q.token_number
+        FROM appointments a
+        JOIN doctors d ON d.id = a.doctor_id JOIN users du ON du.id = d.user_id
+        JOIN patients p ON p.id = a.patient_id JOIN users pu ON pu.id = p.user_id
+        LEFT JOIN queue_entries q ON q.appointment_id = a.id
+       WHERE a.doctor_id = ANY($1::uuid[])
+         AND a.status::text = ANY($2::text[])
+         AND ${query.date ? 'a.appointment_date = $3::date' : 'a.appointment_date >= $3::date'}`;
     if (query.doctorId) {
       if (!doctorIds.includes(query.doctorId)) return [];
-      builder.andWhere('appointment.doctorId = :doctorId', { doctorId: query.doctorId });
+      params.push(query.doctorId);
+      sql += ` AND a.doctor_id = $${params.length}`;
     }
-    const rows = await builder.getMany();
+    sql += ' ORDER BY a.appointment_date ASC, a.start_time ASC, a.slot_number ASC LIMIT 200';
+    const rows: Record<string, unknown>[] = await this.appointments.manager.query(sql, params);
     return rows.map((row) => ({
-      id: row.id,
-      date: row.appointmentDate,
-      startTime: hhmm(row.startTime),
-      endTime: hhmm(row.endTime),
-      status: row.status,
-      slotNumber: row.slotNumber,
-      slotCapacity: row.slotCapacity,
-      patient: { id: row.patient.id, name: row.patient.user.name, phone: row.patient.phone },
-      doctor: { id: row.doctor.id, name: row.doctor.user.name },
+      id: row.id as string,
+      date: row.date as string,
+      startTime: hhmm(row.start_time as string),
+      endTime: hhmm(row.end_time as string),
+      status: row.status as string,
+      slotNumber: Number(row.slot_number),
+      slotCapacity: Number(row.slot_capacity),
+      queueToken: row.token_number == null ? null : Number(row.token_number),
+      patient: { id: row.patient_id as string, name: row.patient_name as string, phone: (row.patient_phone as string | null) ?? null },
+      doctor: { id: row.doctor_id as string, name: row.doctor_name as string },
     }));
   }
 
