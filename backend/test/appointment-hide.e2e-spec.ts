@@ -148,7 +148,7 @@ describe('patient: remove a past booking from my history (e2e)', () => {
   });
 
   beforeEach(async () => {
-    await db.query('DELETE FROM notifications; DELETE FROM refunds; DELETE FROM payment_events; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM refunds; DELETE FROM payment_events; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
     (app.get(AssistantService) as unknown as { limiter: RateLimiter }).limiter = new RateLimiter(10_000, 60_000);
     script = () => ({ text: 'ok', toolCalls: [] });
   });

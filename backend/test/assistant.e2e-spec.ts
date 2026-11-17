@@ -141,7 +141,7 @@ describe('AI assistant, phase 1: read-only chat (e2e)', () => {
   });
 
   beforeEach(async () => {
-    await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
     await db.query('DELETE FROM schedule_overrides; DELETE FROM availability;');
     configured = true;
     requests.length = 0;
@@ -211,7 +211,7 @@ describe('AI assistant, phase 1: read-only chat (e2e)', () => {
       expect(output.overCapacity).toEqual([expect.objectContaining({ patientsPerSlot: 1, slotsOver: 1, mostBooked: 2 })]);
       expect(shown).not.toMatch(/\+9190|@test\.local/);
       // Nothing is left to report once there is nothing wrong.
-      await db.query('DELETE FROM appointments');
+      await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM appointments');
       expect((await ask(tokenA, 'find_scheduling_conflicts')).output).toMatchObject({ outsideWorkingHours: { appointments: [] }, overCapacity: [] });
     });
 
