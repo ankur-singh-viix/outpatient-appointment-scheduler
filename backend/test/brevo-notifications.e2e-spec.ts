@@ -133,7 +133,7 @@ describe('Notifications through Brevo (mocked API)', () => {
   });
 
   const clean = async () => {
-    await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM schedule_changes; DELETE FROM appointments;');
     await db.query('DELETE FROM schedule_overrides; DELETE FROM availability;');
   };
 

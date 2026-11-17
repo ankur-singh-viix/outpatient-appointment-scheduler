@@ -162,7 +162,7 @@ describe('Appointment reminders and notification preferences (e2e)', () => {
   });
 
   beforeEach(async () => {
-    await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments; DELETE FROM notification_preferences;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments; DELETE FROM notification_preferences;');
     mailer.reset();
     sms.sent.length = 0;
     sms.failWith = null;

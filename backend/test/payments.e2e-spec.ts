@@ -244,7 +244,7 @@ describe('Payments, refunds and notifications (e2e)', () => {
 
   beforeEach(async () => {
     // Every test starts from the same clean slate: no appointments, payments, refunds or messages.
-    await db.query('DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments;');
+    await db.query('DELETE FROM queue_events; DELETE FROM queue_entries; DELETE FROM notifications; DELETE FROM payment_events; DELETE FROM refunds; DELETE FROM payments; DELETE FROM appointments;');
     gateway.orders = [];
     gateway.refundCalls = [];
     gateway.created = [];
