@@ -15,8 +15,8 @@ const entry = (token: number, status: QueueStatus, appointmentId = `appt-${token
   checkedOutAt: null,
 });
 const counts = (patch: Partial<QueueCounts> = {}): QueueCounts => ({ waiting: 0, serving: 0, completed: 0, checkedOut: 0, skipped: 0, cancelled: 0, ...patch });
-const day = (patch: Partial<QueueDay> = {}): QueueDay => ({ date: '2026-11-16', currentlyServingToken: null, serving: null, waiting: [], completed: [], checkedOut: [], skipped: [], cancelled: [], counts: counts(), updatedAt: '2026-11-16T04:00:00Z', ...patch });
-const appointment = (id: string, doctorId: string, startTime: string, status: 'CONFIRMED' | 'PENDING' = 'CONFIRMED', date = '2026-11-16', name = `Patient ${id}`): ReceptionAppointment => ({
+const day = (patch: Partial<QueueDay> = {}): QueueDay => ({ date: '2026-11-16', currentlyServingToken: null, serving: null, booked: [], waiting: [], completed: [], checkedOut: [], skipped: [], cancelled: [], counts: counts(), updatedAt: '2026-11-16T04:00:00Z', ...patch });
+const appointment = (id: string, doctorId: string, startTime: string, status: 'CONFIRMED' | 'PENDING' = 'CONFIRMED', date = '2026-11-16', name = `Patient ${id}`, queueToken: number | null = null): ReceptionAppointment => ({
   id,
   date,
   startTime,
@@ -24,6 +24,7 @@ const appointment = (id: string, doctorId: string, startTime: string, status: 'C
   status,
   slotNumber: 1,
   slotCapacity: 1,
+  queueToken,
   patient: { id: `p-${id}`, name, phone: '+911' },
   doctor: { id: doctorId, name: doctorId },
 });
@@ -75,17 +76,16 @@ describe('aheadText', () => {
 });
 
 describe('entryActions: which buttons each role is offered', () => {
-  it('lets the receptionist skip a patient who is waiting or called, return a skipped one, and check out a completed one', () => {
+  it('lets the receptionist skip a waiting patient, complete or skip one being served, return a skipped one, and check out a completed one', () => {
     expect(entryActions('RECEPTIONIST', 'WAITING')).toEqual(['skip']);
-    expect(entryActions('RECEPTIONIST', 'SERVING')).toEqual(['skip']);
+    expect(entryActions('RECEPTIONIST', 'SERVING')).toEqual(['complete', 'skip']);
     expect(entryActions('RECEPTIONIST', 'SKIPPED')).toEqual(['return']);
     expect(entryActions('RECEPTIONIST', 'COMPLETED')).toEqual(['checkOut']);
   });
 
-  it('offers a receptionist nothing for a patient who has left, and never lets them complete a consultation', () => {
+  it('offers a receptionist nothing for a patient who has left', () => {
     expect(entryActions('RECEPTIONIST', 'CHECKED_OUT')).toEqual([]);
     expect(entryActions('RECEPTIONIST', 'CANCELLED')).toEqual([]);
-    for (const status of Object.keys(STATUS_LABEL) as QueueStatus[]) expect(entryActions('RECEPTIONIST', status)).not.toContain('complete');
   });
 
   it('lets the doctor complete the patient being served and skip one who is unavailable, but not check out or return anyone', () => {
@@ -125,17 +125,50 @@ describe('buildDesk: the front desk, one doctor at a time', () => {
   };
 
   it('lists as arrivals the confirmed appointments of today that have no queue entry yet, in appointment order', () => {
-    const desk = buildDesk(board, [appointment('a1', 'dr-1', '09:00'), appointment('a2', 'dr-1', '09:30'), appointment('a3', 'dr-1', '11:00'), appointment('a4', 'dr-1', '10:00'), appointment('b1', 'dr-2', '10:00')]);
+    const desk = buildDesk(board, [
+      appointment('a1', 'dr-1', '09:00', 'CONFIRMED', '2026-11-16', 'Patient a1', 1),
+      appointment('a2', 'dr-1', '09:30', 'CONFIRMED', '2026-11-16', 'Patient a2', 2),
+      appointment('a3', 'dr-1', '11:00', 'CONFIRMED', '2026-11-16', 'Patient a3', 3),
+      appointment('a4', 'dr-1', '10:00', 'CONFIRMED', '2026-11-16', 'Patient a4', 4),
+      appointment('b1', 'dr-2', '10:00', 'CONFIRMED', '2026-11-16', 'Patient b1', 1),
+    ]);
     expect(desk.map((doctor) => doctor.doctor.name)).toEqual(['Dr. One', 'Dr. Two']);
     expect(desk[0].arrivals.map((row) => row.appointmentId)).toEqual(['a4', 'a3']); // a1 and a2 are already in the queue
+    expect(desk[0].arrivals.map((row) => row.token)).toEqual([4, 3]);
     expect(desk[1].arrivals.map((row) => row.appointmentId)).toEqual(['b1']);
     expect(desk[0].day.waiting.map((row) => row.token)).toEqual([2]);
   });
 
+  it('lists BOOKED queue entries (token already issued) as arrivals before check-in', () => {
+    const withBooked: ReceptionBoard = {
+      date: '2026-11-16',
+      doctors: [
+        {
+          ...day({
+            booked: [entry(9, 'BOOKED', 'booked-1')],
+            counts: counts({ booked: 1 }),
+          }),
+          doctor: { id: 'dr-1', name: 'Dr. One', clinic: 'Clinic' },
+        },
+      ],
+    };
+    withBooked.doctors[0].booked![0] = {
+      ...withBooked.doctors[0].booked![0],
+      appointment: { startTime: '10:15', endTime: '10:45' },
+      patient: { name: 'Booked Patient', phone: '+911' },
+      checkedInAt: null,
+    };
+    const desk = buildDesk(withBooked, []);
+    expect(desk[0].arrivals).toEqual([
+      { appointmentId: 'booked-1', patientName: 'Booked Patient', phone: '+911', startTime: '10:15', endTime: '10:45', token: 9 },
+    ]);
+  });
+
   it('keeps a booking that is still waiting for payment apart: it cannot be checked in', () => {
-    const desk = buildDesk(board, [appointment('a5', 'dr-1', '10:00', 'PENDING'), appointment('a6', 'dr-1', '10:30')]);
+    const desk = buildDesk(board, [appointment('a5', 'dr-1', '10:00', 'PENDING'), appointment('a6', 'dr-1', '10:30', 'CONFIRMED', '2026-11-16', 'Patient a6', 6)]);
     expect(desk[0].awaitingPayment.map((row) => row.appointmentId)).toEqual(['a5']);
     expect(desk[0].arrivals.map((row) => row.appointmentId)).toEqual(['a6']);
+    expect(desk[0].arrivals[0].token).toBe(6);
   });
 
   it('ignores appointments of other days and of doctors who are not on the board', () => {

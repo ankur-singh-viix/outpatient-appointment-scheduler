@@ -130,6 +130,11 @@ function Dashboard({ session }: { session: Session }) {
                         {relativeDay(next.date, today)}
                       </Badge>
                     )}
+                    {next.queueToken != null && (
+                      <Badge variant="secondary" className="bg-emerald-50 font-semibold tabular-nums text-emerald-900">
+                        Token {next.queueToken}
+                      </Badge>
+                    )}
                   </p>
                   <p className="text-sm text-foreground/80">
                     {next.doctor.name} · {next.doctor.specialty}

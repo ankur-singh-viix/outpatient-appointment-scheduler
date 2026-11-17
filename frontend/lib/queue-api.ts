@@ -19,6 +19,7 @@ export function createQueueApi(call: Call) {
     board: (session: Session, params: { doctorId?: string; date?: string } = {}) => get<ReceptionBoard>(session, withDate('/queue/reception', params)),
     checkIn: (session: Session, appointmentId: string) => post(session, `/queue/reception/appointments/${appointmentId}/check-in`),
     checkOut: (session: Session, entryId: string) => post(session, `/queue/reception/entries/${entryId}/check-out`),
+    completeAtDesk: (session: Session, entryId: string) => post(session, `/queue/reception/entries/${entryId}/complete`),
     skipAtDesk: (session: Session, entryId: string) => post(session, `/queue/reception/entries/${entryId}/skip`),
     returnToQueue: (session: Session, entryId: string) => post(session, `/queue/reception/entries/${entryId}/return`),
     // doctor

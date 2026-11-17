@@ -134,6 +134,8 @@ export interface PatientAppointment {
   holdExpiresAt: string | null;
   /** The doctor changed their hours and this booking no longer falls inside them. It is still booked until the patient moves it. */
   needsNewTime?: boolean;
+  /** Issued when the booking was confirmed; null for unpaid holds. Reused at check-in. */
+  queueToken: number | null;
   /** Payment, receipt and refunds, or null when the visit was free. */
   payment: PaymentSummary | null;
   doctor: { id: string; name: string; specialty: string; consultationFee: number };
@@ -268,6 +270,8 @@ export interface DoctorAppointment {
   cancelledAt: string | null;
   cancelledBy: Role | null;
   bookedAt: string;
+  /** Issued when the booking was confirmed; null until then. */
+  queueToken: number | null;
   patient: { name: string; phone: string | null };
 }
 
@@ -361,6 +365,8 @@ export interface ReceptionAppointment {
   status: AppointmentStatus;
   slotNumber: number;
   slotCapacity: number;
+  /** Issued when the booking was confirmed; reused at check-in. Null for unpaid holds. */
+  queueToken: number | null;
   patient: { id: string; name: string; phone: string | null };
   doctor: { id: string; name: string };
 }
@@ -592,7 +598,7 @@ export interface ActionResult {
 
 // ---- Queue management (the backend's /queue routes) ----
 
-export type QueueStatus = 'WAITING' | 'SERVING' | 'COMPLETED' | 'CHECKED_OUT' | 'SKIPPED' | 'CANCELLED';
+export type QueueStatus = 'BOOKED' | 'WAITING' | 'SERVING' | 'COMPLETED' | 'CHECKED_OUT' | 'SKIPPED' | 'CANCELLED';
 
 /** One patient in a doctor's queue, as the doctor and the front desk see them: a token, a name and a time. No phone, no medical details. */
 export interface QueueEntryView {
@@ -601,8 +607,10 @@ export interface QueueEntryView {
   token: number;
   status: QueueStatus;
   appointment: { startTime: string; endTime: string };
-  patient: { name: string };
-  checkedInAt: string;
+  /** Phone is for the front desk; patients never receive other patients' details. */
+  patient: { name: string; phone?: string | null };
+  /** Null while BOOKED (token reserved at booking, not yet checked in). */
+  checkedInAt: string | null;
   calledAt: string | null;
   completedAt: string | null;
   checkedOutAt: string | null;
@@ -611,6 +619,7 @@ export interface QueueEntryView {
 }
 
 export interface QueueCounts {
+  booked?: number;
   waiting: number;
   serving: number;
   completed: number;
@@ -624,6 +633,8 @@ export interface QueueDay {
   date: string;
   currentlyServingToken: number | null;
   serving: QueueEntryView | null;
+  /** Confirmed bookings with a token who have not checked in yet. */
+  booked?: QueueEntryView[];
   /** In token order: the order they will be called in. */
   waiting: QueueEntryView[];
   completed: QueueEntryView[];
