@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { actionNotice, adminTotals, aheadText, buildDesk, canCallNext, entryActions, patientMessage, progress, STATUS_LABEL } from './queue-view';
+import { waitingDuration } from './format';
+import { actionNotice, adminTotals, aheadText, arrivalPhase, ARRIVAL_GRACE_MINUTES, buildDesk, canCallNext, doctorCheckInDetail, entryActions, ordinal, patientMessage, progress, queuePositionLabel, receptionCheckInDetail, STATUS_LABEL, wasLateCheckIn } from './queue-view';
 import type { AdminQueueBoard, QueueCounts, QueueDay, QueueEntryResult, QueueEntryView, QueueStatus, ReceptionAppointment, ReceptionBoard } from './types';
 
 const entry = (token: number, status: QueueStatus, appointmentId = `appt-${token}`): QueueEntryView => ({
@@ -25,6 +26,8 @@ const appointment = (id: string, doctorId: string, startTime: string, status: 'C
   slotNumber: 1,
   slotCapacity: 1,
   queueToken,
+  queueEntryId: queueToken == null ? null : `q-${id}`,
+  queueStatus: queueToken == null ? null : 'BOOKED',
   patient: { id: `p-${id}`, name, phone: '+911' },
   doctor: { id: doctorId, name: doctorId },
 });
@@ -33,16 +36,25 @@ describe('patientMessage: what a patient waiting at the clinic is told', () => {
   it('says "you are waiting" while several are ahead, with who is being seen', () => {
     expect(patientMessage({ status: 'WAITING', ahead: 5, currentlyServingToken: 4 })).toEqual({
       tone: 'waiting',
-      headline: 'You are waiting.',
+      headline: 'You are 6th in the queue.',
       detail: '5 patients are ahead of you; token 4 is being seen now. This page updates by itself.',
     });
+    expect(patientMessage({ status: 'WAITING', ahead: 3, currentlyServingToken: null }).headline).toBe('You are 4th in the queue.');
     expect(patientMessage({ status: 'WAITING', ahead: 3, currentlyServingToken: null }).detail).toBe('3 patients are ahead of you. This page updates by itself.');
   });
 
   it('says the turn is approaching when two or fewer are ahead', () => {
-    expect(patientMessage({ status: 'WAITING', ahead: 2, currentlyServingToken: 1 })).toMatchObject({ tone: 'soon', headline: 'Your turn is approaching.', detail: '2 patients are ahead of you. Please stay nearby.' });
-    expect(patientMessage({ status: 'WAITING', ahead: 1, currentlyServingToken: 1 }).detail).toBe('1 patient is ahead of you. Please stay nearby.');
-    expect(patientMessage({ status: 'WAITING', ahead: 0, currentlyServingToken: null }).detail).toBe('You are next. Please stay close to the consultation room.');
+    expect(patientMessage({ status: 'WAITING', ahead: 2, currentlyServingToken: 1 })).toMatchObject({
+      tone: 'soon',
+      headline: 'Your turn is approaching.',
+      detail: 'You are 3rd in the queue: 2 patients are ahead of you. Please stay nearby.',
+    });
+    expect(patientMessage({ status: 'WAITING', ahead: 1, currentlyServingToken: 1 }).detail).toBe('You are 2nd in the queue: 1 patient is ahead of you. Please stay nearby.');
+    expect(patientMessage({ status: 'WAITING', ahead: 0, currentlyServingToken: null })).toMatchObject({
+      tone: 'soon',
+      headline: 'You are next.',
+      detail: 'Please stay close to the consultation room.',
+    });
   });
 
   it('tells a patient who has been called to go in, and that the consultation is in progress', () => {
@@ -72,6 +84,21 @@ describe('aheadText', () => {
     expect(aheadText(1)).toBe('1 patient ahead');
     expect(aheadText(6)).toBe('6 patients ahead');
     expect(aheadText(null)).toBe('–');
+  });
+});
+
+describe('ordinal and queuePositionLabel', () => {
+  it('forms everyday ordinals', () => {
+    expect([1, 2, 3, 4, 11, 12, 13, 21, 22].map(ordinal)).toEqual(['1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd']);
+  });
+
+  it('turns the server ahead count into a place in line for waiting patients', () => {
+    expect(queuePositionLabel({ status: 'WAITING', ahead: 0 })).toBe('You are next');
+    expect(queuePositionLabel({ status: 'WAITING', ahead: 1 })).toBe('2nd in queue');
+    expect(queuePositionLabel({ status: 'WAITING', ahead: 2 })).toBe('3rd in queue');
+    expect(queuePositionLabel({ status: 'SERVING', ahead: 0 })).toBe('Being seen now');
+    expect(queuePositionLabel({ status: 'BOOKED', ahead: null })).toBeNull();
+    expect(queuePositionLabel({ status: 'COMPLETED', ahead: null })).toBeNull();
   });
 });
 
@@ -209,6 +236,56 @@ describe('actionNotice: what is said after an action', () => {
     expect(actionNotice('checkOut', result())).toBe('Checked out Patient 4 (token 4).');
     expect(actionNotice('skip', result())).toBe('Skipped token 4, Patient 4.');
     expect(actionNotice('return', result())).toBe('Returned token 4, Patient 4, to the queue.');
+    expect(actionNotice('lateArrival', result())).toBe('Late arrival: checked in Patient 4 with token 4. 3 patients ahead.');
+    expect(actionNotice('noShow', result())).toMatch(/no show/i);
+  });
+});
+
+describe('arrivalPhase and grace', () => {
+  it('keeps the grace window between 10 and 15 minutes', () => {
+    expect(ARRIVAL_GRACE_MINUTES).toBeGreaterThanOrEqual(10);
+    expect(ARRIVAL_GRACE_MINUTES).toBeLessThanOrEqual(15);
+  });
+
+  it('is on time before the start, late inside grace, then no-show eligible', () => {
+    const base = { appointmentDate: '2026-11-18', startTime: '10:00', nowDate: '2026-11-18' };
+    expect(arrivalPhase({ ...base, nowTime: '09:59' })).toBe('on_time');
+    expect(arrivalPhase({ ...base, nowTime: '10:00' })).toBe('late');
+    expect(arrivalPhase({ ...base, nowTime: '10:14' })).toBe('late');
+    expect(arrivalPhase({ ...base, nowTime: '10:15' })).toBe('no_show_eligible');
+  });
+});
+
+describe('check-in time visibility helpers', () => {
+  const checkedInAt = '2026-11-18T04:48:00.000Z'; // 10:18 Asia/Kolkata
+  const now = Date.parse('2026-11-18T05:00:00.000Z'); // 10:30 Asia/Kolkata → waited 12 min
+
+  it('formats waiting duration from the actual check-in timestamp', () => {
+    expect(waitingDuration(checkedInAt, now)).toBe('12 min');
+    expect(waitingDuration(checkedInAt, Date.parse(checkedInAt) + 30_000)).toBe('just checked in');
+    expect(waitingDuration(checkedInAt, Date.parse(checkedInAt) + 65 * 60_000)).toBe('1 h 5 min');
+  });
+
+  it('flags late check-in when the server timestamp is at or after the booked start', () => {
+    expect(wasLateCheckIn({ appointmentDate: '2026-11-18', startTime: '10:00', checkedInAt })).toBe(true);
+    expect(wasLateCheckIn({ appointmentDate: '2026-11-18', startTime: '10:30', checkedInAt })).toBe(false);
+  });
+
+  it('builds the doctor detail without the original appointment slot', () => {
+    expect(doctorCheckInDetail({ checkedInAt }, now)).toMatch(/^Checked in .+ · waiting 12 min$/);
+    expect(doctorCheckInDetail({ checkedInAt: null }, now)).toBeNull();
+    expect(doctorCheckInDetail({ checkedInAt }, now)).not.toMatch(/Appointment|10:00|AM –/);
+  });
+
+  it('builds the reception detail with appointment context, check-in time, late flag and waiting duration', () => {
+    const detail = receptionCheckInDetail(
+      { checkedInAt, appointment: { startTime: '10:00', endTime: '10:30' } },
+      { appointmentDate: '2026-11-18', phone: '+911', nowMs: now },
+    );
+    expect(detail).toContain('+911');
+    expect(detail).toMatch(/checked in/);
+    expect(detail).toContain('late arrival');
+    expect(detail).toContain('waiting 12 min');
   });
 });
 

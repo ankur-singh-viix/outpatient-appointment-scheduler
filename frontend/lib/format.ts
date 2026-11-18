@@ -46,6 +46,11 @@ export function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString('en-IN', { timeZone: CLINIC_TIMEZONE, day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
+/** Clock time of an ISO instant in the clinic zone: "2:30 PM". Used for actual check-in times on queue screens. */
+export function formatClockTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString('en-IN', { timeZone: CLINIC_TIMEZONE, hour: 'numeric', minute: '2-digit' });
+}
+
 /** "14:30" -> "2:30 PM" */
 export function formatTime(time: string): string {
   const [h, m] = time.split(':').map(Number);
@@ -170,4 +175,17 @@ export function timeAgo(iso: string, now: number): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours} h ago`;
   return `${Math.floor(hours / 24)} d ago`;
+}
+
+/**
+ * How long the patient has been waiting since the server check-in timestamp: "just checked in", "12 min", "1 h 5 min".
+ * Recalculate whenever `now` refreshes so the live queue stays current.
+ */
+export function waitingDuration(checkedInAt: string, now: number): string {
+  const minutes = Math.max(0, Math.floor((now - Date.parse(checkedInAt)) / 60_000));
+  if (minutes < 1) return 'just checked in';
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rem = minutes % 60;
+  return rem === 0 ? `${hours} h` : `${hours} h ${rem} min`;
 }

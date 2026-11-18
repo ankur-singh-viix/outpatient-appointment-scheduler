@@ -6,13 +6,12 @@ import { Alert, EmptyState } from '@/components/common';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { errorMessage } from '@/lib/api';
-import { formatTimeRange, timeAgo } from '@/lib/format';
 import { useNow } from '@/lib/hooks';
 import { queueApi } from '@/lib/queue-client';
-import { actionNotice, canCallNext, entryActions, progress, type QueueAction } from '@/lib/queue-view';
+import { STATUS_LABEL, actionNotice, canCallNext, doctorCheckInDetail, entryActions, progress, type QueueAction } from '@/lib/queue-view';
 import type { DoctorQueue, QueueEntryResult, QueueEntryView, Session } from '@/lib/types';
 import { useQueuePolling } from '../queue/use-queue-polling';
-import { Freshness, TokenBadge } from '../queue/queue-ui';
+import { Freshness, QueueStatusPill, TokenBadge } from '../queue/queue-ui';
 
 /**
  * The doctor's queue management: who is being seen, who is waiting (in token order), and the three things a doctor does: call the next
@@ -23,7 +22,8 @@ export function DoctorQueuePanel({ session }: { session: Session }) {
   const queue = useQueuePolling<DoctorQueue>(`queue-doctor:${session.user.id}`, () => queueApi.doctorQueue(session), 8_000);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
-  const now = useNow(15_000);
+  // Refresh often enough that waiting duration stays current between poll rounds.
+  const now = useNow(10_000);
 
   const act = async (key: string, action: QueueAction | 'callNext', run: () => Promise<QueueEntryResult>) => {
     if (busy) return; // one action at a time: a double click sends one request
@@ -86,7 +86,7 @@ export function DoctorQueuePanel({ session }: { session: Session }) {
       {day && (
         <>
           <Freshness updatedAt={queue.updatedAt} stale={queue.stale} error={queue.error} onRetry={() => void queue.refresh()} />
-          <NowServing day={day} busy={busy} onComplete={(entry) => void act(entry.id, 'complete', () => queueApi.complete(session, entry.id))} onSkip={(entry) => void act(entry.id, 'skip', () => queueApi.skipAsDoctor(session, entry.id))} onCallNext={() => void act('call-next', 'callNext', () => queueApi.callNext(session))} />
+          <NowServing day={day} now={now} busy={busy} onComplete={(entry) => void act(entry.id, 'complete', () => queueApi.complete(session, entry.id))} onSkip={(entry) => void act(entry.id, 'skip', () => queueApi.skipAsDoctor(session, entry.id))} onCallNext={() => void act('call-next', 'callNext', () => queueApi.callNext(session))} />
 
           <div className="rounded-xl border bg-card">
             <div className="flex items-center justify-between gap-2 border-b px-4 py-3">
@@ -108,11 +108,13 @@ export function DoctorQueuePanel({ session }: { session: Session }) {
                       <p className="font-medium text-foreground">
                         {entry.patient.name} <span className="text-sm font-normal text-muted-foreground">· {entry.position === 1 ? 'next' : `#${entry.position} in line`}</span>
                       </p>
-                      <p className="text-xs text-muted-foreground">
-                        Appointment {formatTimeRange(entry.appointment.startTime, entry.appointment.endTime, true)}
-                        {entry.checkedInAt ? ` · waiting since ${timeAgo(entry.checkedInAt, now)}` : ''}
+                      <p className="text-xs text-muted-foreground" aria-live="polite">
+                        {doctorCheckInDetail(entry, now) ?? 'Awaiting check-in time'}
+                        {' · '}
+                        {STATUS_LABEL[entry.status]}
                       </p>
                     </div>
+                    <QueueStatusPill status={entry.status} />
                     {entryActions('DOCTOR', entry.status).includes('skip') && (
                       <Button size="sm" variant="outline" disabled={busy !== null} aria-label={`Skip token ${entry.token}, ${entry.patient.name}`} onClick={() => void act(entry.id, 'skip', () => queueApi.skipAsDoctor(session, entry.id))}>
                         <SkipForwardIcon aria-hidden /> Skip
@@ -134,7 +136,21 @@ export function DoctorQueuePanel({ session }: { session: Session }) {
   );
 }
 
-function NowServing({ day, busy, onCallNext, onComplete, onSkip }: { day: DoctorQueue; busy: string | null; onCallNext: () => void; onComplete: (entry: QueueEntryView) => void; onSkip: (entry: QueueEntryView) => void }) {
+function NowServing({
+  day,
+  now,
+  busy,
+  onCallNext,
+  onComplete,
+  onSkip,
+}: {
+  day: DoctorQueue;
+  now: number;
+  busy: string | null;
+  onCallNext: () => void;
+  onComplete: (entry: QueueEntryView) => void;
+  onSkip: (entry: QueueEntryView) => void;
+}) {
   const serving = day.serving;
   if (serving) {
     return (
@@ -144,8 +160,13 @@ function NowServing({ day, busy, onCallNext, onComplete, onSkip }: { day: Doctor
           <TokenBadge token={serving.token} size="xl" className="bg-emerald-700" />
           <div className="min-w-0 flex-1">
             <p className="text-xl font-semibold text-foreground">{serving.patient.name}</p>
-            <p className="text-sm text-emerald-900">Appointment {formatTimeRange(serving.appointment.startTime, serving.appointment.endTime)}</p>
+            <p className="text-sm text-emerald-900" aria-live="polite">
+              {doctorCheckInDetail(serving, now) ?? STATUS_LABEL.SERVING}
+              {' · '}
+              {STATUS_LABEL[serving.status]}
+            </p>
           </div>
+          <QueueStatusPill status={serving.status} />
         </div>
         <div className="flex flex-wrap gap-2">
           {entryActions('DOCTOR', 'SERVING').includes('complete') && (

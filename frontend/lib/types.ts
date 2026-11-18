@@ -367,6 +367,10 @@ export interface ReceptionAppointment {
   slotCapacity: number;
   /** Issued when the booking was confirmed; reused at check-in. Null for unpaid holds. */
   queueToken: number | null;
+  /** Queue row for this visit when one exists; needed to check the patient out after the doctor completes. */
+  queueEntryId: string | null;
+  /** Live queue status for this visit; COMPLETED means ready for front-desk check-out. */
+  queueStatus: QueueStatus | null;
   patient: { id: string; name: string; phone: string | null };
   doctor: { id: string; name: string };
 }
@@ -675,7 +679,8 @@ export interface MyQueueEntry {
   currentlyServingToken: number | null;
   ahead: number | null;
   behind: number | null;
-  checkedInAt: string;
+  /** Null while BOOKED (token reserved, not yet checked in). */
+  checkedInAt: string | null;
   calledAt: string | null;
   completedAt: string | null;
   checkedOutAt: string | null;

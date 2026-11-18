@@ -1,3 +1,4 @@
+import { clinicClock, formatClockTime, waitingDuration } from './format';
 import type { AdminQueueBoard, MyQueueEntry, QueueCounts, QueueDay, QueueEntryResult, QueueEntryView, QueueStatus, ReceptionAppointment, ReceptionBoard } from './types';
 
 /**
@@ -9,6 +10,77 @@ import type { AdminQueueBoard, MyQueueEntry, QueueCounts, QueueDay, QueueEntryRe
 
 /** A patient with this many people ahead (or fewer) is told their turn is approaching. */
 export const APPROACHING_AT = 2;
+
+/** Minutes after the booked start before the desk may mark a no-show (matches backend ARRIVAL_GRACE_MINUTES). */
+export const ARRIVAL_GRACE_MINUTES = 15;
+
+export type ArrivalPhase = 'on_time' | 'late' | 'no_show_eligible';
+
+/** Minutes from HH:MM `from` to HH:MM `to` on the same day. */
+export function minutesBetween(from: string, to: string): number {
+  const [fh, fm] = from.split(':').map(Number);
+  const [th, tm] = to.split(':').map(Number);
+  return th * 60 + tm - (fh * 60 + fm);
+}
+
+/**
+ * Where the clinic clock sits relative to the appointment start and the grace window.
+ * Late arrival still uses check-in; no-show is only offered once grace has elapsed.
+ */
+export function arrivalPhase(input: {
+  appointmentDate: string;
+  startTime: string;
+  nowDate: string;
+  nowTime: string;
+  graceMinutes?: number;
+}): ArrivalPhase {
+  const grace = input.graceMinutes ?? ARRIVAL_GRACE_MINUTES;
+  if (input.appointmentDate > input.nowDate) return 'on_time';
+  if (input.appointmentDate < input.nowDate) return 'no_show_eligible';
+  const elapsed = minutesBetween(input.startTime, input.nowTime);
+  if (elapsed < 0) return 'on_time';
+  if (elapsed < grace) return 'late';
+  return 'no_show_eligible';
+}
+
+/** True when the server check-in instant is at or after the booked start (clinic zone). */
+export function wasLateCheckIn(input: { appointmentDate: string; startTime: string; checkedInAt: string }): boolean {
+  const at = clinicClock(Date.parse(input.checkedInAt));
+  if (at.date > input.appointmentDate) return true;
+  if (at.date < input.appointmentDate) return false;
+  return minutesBetween(input.startTime, at.time) >= 0;
+}
+
+/**
+ * Doctor queue detail line: actual check-in clock time and live waiting duration — never the original appointment slot.
+ * Null when the patient has not checked in yet.
+ */
+export function doctorCheckInDetail(entry: Pick<QueueEntryView, 'checkedInAt'>, nowMs: number): string | null {
+  if (!entry.checkedInAt) return null;
+  return `Checked in ${formatClockTime(entry.checkedInAt)} · waiting ${waitingDuration(entry.checkedInAt, nowMs)}`;
+}
+
+/**
+ * Reception queue detail for a checked-in patient: appointment slot, actual check-in time, late flag, and live waiting duration.
+ */
+export function receptionCheckInDetail(
+  entry: Pick<QueueEntryView, 'checkedInAt' | 'appointment'>,
+  opts: { appointmentDate: string; phone?: string | null; nowMs: number; extra?: string },
+): string {
+  const parts: string[] = [];
+  if (opts.phone) parts.push(opts.phone);
+  if (entry.checkedInAt) {
+    parts.push(`checked in ${formatClockTime(entry.checkedInAt)}`);
+    if (wasLateCheckIn({ appointmentDate: opts.appointmentDate, startTime: entry.appointment.startTime, checkedInAt: entry.checkedInAt })) {
+      parts.push('late arrival');
+    }
+    parts.push(`waiting ${waitingDuration(entry.checkedInAt, opts.nowMs)}`);
+  } else {
+    parts.push('not checked in yet');
+  }
+  if (opts.extra) parts.push(opts.extra);
+  return parts.join(' · ');
+}
 
 export const STATUS_LABEL: Record<QueueStatus, string> = {
   BOOKED: 'Booked',
@@ -27,6 +99,34 @@ export function aheadText(ahead: number | null): string {
   return `${ahead} patient${ahead === 1 ? '' : 's'} ahead`;
 }
 
+/** 1 → "1st", 2 → "2nd", 3 → "3rd", 4 → "4th", … */
+export function ordinal(n: number): string {
+  const abs = Math.abs(n);
+  const mod100 = abs % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
+  switch (abs % 10) {
+    case 1:
+      return `${n}st`;
+    case 2:
+      return `${n}nd`;
+    case 3:
+      return `${n}rd`;
+    default:
+      return `${n}th`;
+  }
+}
+
+/**
+ * The patient's place in the live line from the server's `ahead` count (serving patients count as ahead).
+ * Null when they are not in the active queue yet (e.g. BOOKED) or have left it.
+ */
+export function queuePositionLabel(entry: Pick<MyQueueEntry, 'status' | 'ahead'>): string | null {
+  if (entry.status === 'SERVING') return 'Being seen now';
+  if (entry.status !== 'WAITING' || entry.ahead === null) return null;
+  if (entry.ahead === 0) return 'You are next';
+  return `${ordinal(entry.ahead + 1)} in queue`;
+}
+
 export interface PatientMessage {
   headline: string;
   detail: string;
@@ -38,16 +138,17 @@ export function patientMessage(entry: Pick<MyQueueEntry, 'status' | 'ahead' | 'c
   switch (entry.status) {
     case 'WAITING': {
       const ahead = entry.ahead ?? 0;
+      const place = ahead === 0 ? 'You are next' : `You are ${ordinal(ahead + 1)} in the queue`;
       if (ahead <= APPROACHING_AT) {
         return {
           tone: 'soon',
-          headline: 'Your turn is approaching.',
-          detail: ahead === 0 ? 'You are next. Please stay close to the consultation room.' : `${ahead} patient${ahead === 1 ? ' is' : 's are'} ahead of you. Please stay nearby.`,
+          headline: ahead === 0 ? 'You are next.' : 'Your turn is approaching.',
+          detail: ahead === 0 ? 'Please stay close to the consultation room.' : `${place}: ${ahead} patient${ahead === 1 ? ' is' : 's are'} ahead of you. Please stay nearby.`,
         };
       }
       return {
         tone: 'waiting',
-        headline: 'You are waiting.',
+        headline: `${place}.`,
         detail: `${ahead} patients are ahead of you${entry.currentlyServingToken === null ? '' : `; token ${entry.currentlyServingToken} is being seen now`}. This page updates by itself.`,
       };
     }
@@ -66,7 +167,7 @@ export function patientMessage(entry: Pick<MyQueueEntry, 'status' | 'ahead' | 'c
   }
 }
 
-export type QueueAction = 'checkIn' | 'checkOut' | 'skip' | 'return' | 'complete';
+export type QueueAction = 'checkIn' | 'lateArrival' | 'checkOut' | 'skip' | 'return' | 'complete' | 'noShow';
 
 /**
  * The buttons that make sense for a patient in a given status, by role. The receptionist skips someone who is not here, returns a
@@ -176,6 +277,8 @@ export function actionNotice(action: QueueAction | 'callNext', entry: QueueEntry
   switch (action) {
     case 'checkIn':
       return `Checked in ${who}: token ${entry.token}. ${aheadText(entry.ahead)}.`;
+    case 'lateArrival':
+      return `Late arrival: checked in ${who} with token ${entry.token}. ${aheadText(entry.ahead)}.`;
     case 'callNext':
       return `Called token ${entry.token}, ${who}.`;
     case 'complete':
@@ -186,6 +289,8 @@ export function actionNotice(action: QueueAction | 'callNext', entry: QueueEntry
       return `Skipped token ${entry.token}, ${who}.`;
     case 'return':
       return `Returned token ${entry.token}, ${who}, to the queue.`;
+    case 'noShow':
+      return `Marked ${who} (token ${entry.token}) as no show. Removed from the active queue; the appointment stays in history.`;
   }
 }
 

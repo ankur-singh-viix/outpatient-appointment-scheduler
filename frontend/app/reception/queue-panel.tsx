@@ -1,17 +1,18 @@
 'use client';
 
-import { CheckIcon, LogInIcon, LogOutIcon, RotateCcwIcon, SkipForwardIcon } from 'lucide-react';
+import { CheckIcon, LogInIcon, LogOutIcon, RotateCcwIcon, SkipForwardIcon, UserXIcon } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Alert, EmptyState } from '@/components/common';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api, errorMessage } from '@/lib/api';
-import { clinicToday, formatTimeRange, timeAgo } from '@/lib/format';
+import { clinicClock, clinicToday, formatTimeRange, timeAgo } from '@/lib/format';
 import { useNow } from '@/lib/hooks';
 import { queueApi } from '@/lib/queue-client';
-import { actionNotice, buildDesk, entryActions, type ArrivalRow, type DeskDoctor, type QueueAction } from '@/lib/queue-view';
+import { ARRIVAL_GRACE_MINUTES, actionNotice, arrivalPhase, buildDesk, entryActions, receptionCheckInDetail, wasLateCheckIn, type ArrivalRow, type DeskDoctor, type QueueAction } from '@/lib/queue-view';
 import type { QueueEntryResult, QueueEntryView, ReceptionAppointment, ReceptionBoard, ReceptionDoctor, Session } from '@/lib/types';
 import { useQueuePolling } from '../queue/use-queue-polling';
 import { Freshness, QueueStatusPill, TokenBadge } from '../queue/queue-ui';
@@ -26,8 +27,8 @@ const selectClass =
 
 /**
  * The front desk's queue: for each doctor who assigned this receptionist, who is being seen, who is waiting, who has finished or been
- * skipped, and who is still to arrive. Checking in reuses the booking-time token. Completing and checking out are available here.
- * Date, doctor and slot filters narrow what is shown; polling keeps the board current.
+ * skipped, and who is still to arrive. Tokens are issued at booking; check-in / late arrival reuse them. Skip, manual no-show (after
+ * the arrival grace), complete and check-out live here. Date, doctor and slot filters narrow what is shown; polling keeps the board current.
  */
 export function QueuePanel({ session, doctors = [], refreshKey = 0 }: { session: Session; doctors?: ReceptionDoctor[]; refreshKey?: number }) {
   const [date, setDate] = useState('');
@@ -125,8 +126,12 @@ export function QueuePanel({ session, doctors = [], refreshKey = 0 }: { session:
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Tokens are issued when the appointment is booked. <span className="font-medium text-foreground">Check in</span> reuses that token.
-        After the consultation, mark the patient <span className="font-medium text-foreground">Completed</span>, then check them out.
+        Tokens are issued when the appointment is booked. <span className="font-medium text-foreground">Check in</span> (or{' '}
+        <span className="font-medium text-foreground">Late arrival</span> after the start — including after the {ARRIVAL_GRACE_MINUTES}
+        -minute grace) reuses that token and puts them in the doctor&apos;s waiting list. After the grace you may also mark{' '}
+        <span className="font-medium text-foreground">No show</span> (separate action; never automatic). Use{' '}
+        <span className="font-medium text-foreground">Skip</span> for someone already in the queue who is not available. After the
+        consultation, mark them completed, then <span className="font-medium text-foreground">Check out</span>.
       </p>
       <div className="flex flex-wrap items-end gap-3 rounded-xl border bg-card p-4">
         <div className="space-y-2">
@@ -192,54 +197,101 @@ export function QueuePanel({ session, doctors = [], refreshKey = 0 }: { session:
 
 function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: string | null; act: (key: string, action: QueueAction, run: () => Promise<QueueEntryResult>) => Promise<void>; session: Session }) {
   const { doctor, day, arrivals, awaitingPayment } = entry;
-  const now = useNow(15_000);
+  const now = useNow(10_000);
   const run = (action: QueueAction, id: string) => {
     if (action === 'complete') return () => queueApi.completeAtDesk(session, id);
     if (action === 'skip') return () => queueApi.skipAtDesk(session, id);
     if (action === 'return') return () => queueApi.returnToQueue(session, id);
     return () => queueApi.checkOut(session, id);
   };
-  const row = (item: QueueEntryView, detail?: string) => (
-    <li key={item.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
-      <TokenBadge token={item.token} />
-      <div className="min-w-0 flex-1">
-        <p className="font-medium text-foreground">{item.patient.name}</p>
-        <p className="text-xs text-muted-foreground">
-          {formatTimeRange(item.appointment.startTime, item.appointment.endTime, true)}
-          {item.patient.phone ? ` · ${item.patient.phone}` : ''}
-          {' · '}
-          {detail ?? (item.checkedInAt ? `checked in ${timeAgo(item.checkedInAt, now)}` : 'not checked in yet')}
-        </p>
-      </div>
-      <QueueStatusPill status={item.status} />
-      {entryActions('RECEPTIONIST', item.status).map((action) => (
-        <Button key={action} size="sm" variant={action === 'checkOut' || action === 'complete' ? 'default' : 'outline'} disabled={busy !== null} aria-label={`${ACTION_LABEL[action]}: token ${item.token}, ${item.patient.name}`} onClick={() => void act(item.id, action, run(action, item.id))}>
-          {ACTION_ICON[action]} {busy === item.id ? 'Working…' : ACTION_LABEL[action]}
-        </Button>
-      ))}
-    </li>
-  );
+  const row = (item: QueueEntryView, detail?: string) => {
+    const late =
+      item.checkedInAt != null &&
+      wasLateCheckIn({ appointmentDate: day.date, startTime: item.appointment.startTime, checkedInAt: item.checkedInAt });
+    return (
+      <li key={item.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
+        <TokenBadge token={item.token} />
+        <div className="min-w-0 flex-1">
+          <p className="flex flex-wrap items-center gap-2 font-medium text-foreground">
+            {item.patient.name}
+            {late && (
+              <Badge variant="secondary" className="bg-amber-50 font-semibold text-amber-900">
+                Late arrival
+              </Badge>
+            )}
+          </p>
+          <p className="text-xs text-muted-foreground" aria-live="polite">
+            Appointment {formatTimeRange(item.appointment.startTime, item.appointment.endTime, true)}
+            {' · '}
+            {receptionCheckInDetail(item, {
+              appointmentDate: day.date,
+              phone: item.patient.phone,
+              nowMs: now,
+              extra: detail,
+            })}
+          </p>
+        </div>
+        <QueueStatusPill status={item.status} />
+        {entryActions('RECEPTIONIST', item.status).map((action) => (
+          <Button key={action} size="sm" variant={action === 'checkOut' || action === 'complete' ? 'default' : 'outline'} disabled={busy !== null} aria-label={`${ACTION_LABEL[action]}: token ${item.token}, ${item.patient.name}`} onClick={() => void act(item.id, action, run(action, item.id))}>
+            {ACTION_ICON[action]} {busy === item.id ? 'Working…' : ACTION_LABEL[action]}
+          </Button>
+        ))}
+      </li>
+    );
+  };
 
-  const arrival = (item: ArrivalRow, canCheckIn: boolean) => (
-    <li key={item.appointmentId} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
-      {item.token != null ? <TokenBadge token={item.token} /> : <span className="w-10 text-center text-xs text-muted-foreground">–</span>}
-      <div className="min-w-0 flex-1">
-        <p className="font-medium text-foreground">{item.patientName}</p>
-        <p className="text-xs text-muted-foreground">
-          Appointment {formatTimeRange(item.startTime, item.endTime, true)}
-          {item.phone ? ` · ${item.phone}` : ''}
-          {item.token != null ? ` · token ${item.token}` : ''}
-        </p>
-      </div>
-      {canCheckIn ? (
-        <Button size="sm" disabled={busy !== null} aria-label={`Check in ${item.patientName}`} onClick={() => void act(item.appointmentId, 'checkIn', () => queueApi.checkIn(session, item.appointmentId))}>
-          <LogInIcon aria-hidden /> {busy === item.appointmentId ? 'Checking in…' : 'Check in'}
-        </Button>
-      ) : (
-        <span className="text-xs font-medium text-amber-700">Awaiting payment</span>
-      )}
-    </li>
-  );
+  const clock = clinicClock(now);
+  const arrival = (item: ArrivalRow, canCheckIn: boolean) => {
+    const phase = arrivalPhase({ appointmentDate: day.date, startTime: item.startTime, nowDate: clock.date, nowTime: clock.time });
+    const late = phase === 'late' || phase === 'no_show_eligible';
+    const checkAction: QueueAction = late ? 'lateArrival' : 'checkIn';
+    return (
+      <li key={item.appointmentId} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
+        {item.token != null ? <TokenBadge token={item.token} /> : <span className="w-10 text-center text-xs text-muted-foreground">–</span>}
+        <div className="min-w-0 flex-1">
+          <p className="flex flex-wrap items-center gap-2 font-medium text-foreground">
+            {item.patientName}
+            {canCheckIn && late && (
+              <Badge variant="secondary" className="bg-amber-50 font-semibold text-amber-900">
+                {phase === 'no_show_eligible' ? 'Past grace' : 'Late'}
+              </Badge>
+            )}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Appointment {formatTimeRange(item.startTime, item.endTime, true)}
+            {item.phone ? ` · ${item.phone}` : ''}
+            {item.token != null ? ` · token ${item.token}` : ''}
+          </p>
+        </div>
+        {canCheckIn ? (
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              disabled={busy !== null}
+              aria-label={`${late ? 'Late arrival' : 'Check in'} ${item.patientName}`}
+              onClick={() => void act(item.appointmentId, checkAction, () => queueApi.checkIn(session, item.appointmentId))}
+            >
+              <LogInIcon aria-hidden /> {busy === item.appointmentId ? 'Checking in…' : late ? 'Late arrival' : 'Check in'}
+            </Button>
+            {phase === 'no_show_eligible' && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy !== null}
+                aria-label={`Mark no show for ${item.patientName}`}
+                onClick={() => void act(item.appointmentId, 'noShow', () => queueApi.markNoShow(session, item.appointmentId))}
+              >
+                <UserXIcon aria-hidden /> {busy === item.appointmentId ? 'Working…' : 'No show'}
+              </Button>
+            )}
+          </div>
+        ) : (
+          <span className="text-xs font-medium text-amber-700">Awaiting payment</span>
+        )}
+      </li>
+    );
+  };
 
   return (
     <section aria-label={`Queue for ${doctor.name}`} className="rounded-xl border bg-card">
@@ -267,20 +319,59 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
       </Group>
       {day.completed.length > 0 && <Group title={`Completed — check out (${day.completed.length})`}>{day.completed.map((item) => row(item))}</Group>}
       {day.checkedOut.length > 0 && <Group title={`Checked out (${day.checkedOut.length})`}>{day.checkedOut.map((item) => row(item))}</Group>}
-      {day.skipped.length > 0 && <Group title={`Skipped (${day.skipped.length})`}>{day.skipped.map((item) => row(item))}</Group>}
+      {day.skipped.length > 0 && (
+        <Group title={`Skipped (${day.skipped.length})`}>
+          {day.skipped.map((item) => {
+            const phase = arrivalPhase({ appointmentDate: day.date, startTime: item.appointment.startTime, nowDate: clock.date, nowTime: clock.time });
+            return (
+              <li key={item.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
+                <TokenBadge token={item.token} />
+                <div className="min-w-0 flex-1">
+                  <p className="font-medium text-foreground">{item.patient.name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {formatTimeRange(item.appointment.startTime, item.appointment.endTime, true)}
+                    {item.patient.phone ? ` · ${item.patient.phone}` : ''}
+                  </p>
+                </div>
+                <QueueStatusPill status={item.status} />
+                {entryActions('RECEPTIONIST', item.status).map((action) => (
+                  <Button key={action} size="sm" variant="outline" disabled={busy !== null} aria-label={`${ACTION_LABEL[action]}: token ${item.token}, ${item.patient.name}`} onClick={() => void act(item.id, action, run(action, item.id))}>
+                    {ACTION_ICON[action]} {busy === item.id ? 'Working…' : ACTION_LABEL[action]}
+                  </Button>
+                ))}
+                {phase === 'no_show_eligible' && (
+                  <Button size="sm" variant="outline" disabled={busy !== null} aria-label={`Mark no show for ${item.patient.name}`} onClick={() => void act(item.appointmentId, 'noShow', () => queueApi.markNoShow(session, item.appointmentId))}>
+                    <UserXIcon aria-hidden /> {busy === item.appointmentId ? 'Working…' : 'No show'}
+                  </Button>
+                )}
+              </li>
+            );
+          })}
+        </Group>
+      )}
       {day.cancelled.length > 0 && (
-        <p className="border-t px-4 py-2 text-xs text-muted-foreground">{day.cancelled.length} cancelled (token kept, not reused)</p>
+        <p className="border-t px-4 py-2 text-xs text-muted-foreground">{day.cancelled.length} cancelled or no-show (token kept, not reused)</p>
       )}
     </section>
   );
 }
 
-const ACTION_LABEL: Record<QueueAction, string> = { checkIn: 'Check in', checkOut: 'Check out', skip: 'Skip', return: 'Return to queue', complete: 'Complete' };
+const ACTION_LABEL: Record<QueueAction, string> = {
+  checkIn: 'Check in',
+  lateArrival: 'Late arrival',
+  checkOut: 'Check out',
+  skip: 'Skip',
+  return: 'Return to queue',
+  complete: 'Complete',
+  noShow: 'No show',
+};
 const ACTION_ICON: Partial<Record<QueueAction, React.ReactNode>> = {
   complete: <CheckIcon aria-hidden />,
   checkOut: <LogOutIcon aria-hidden />,
   skip: <SkipForwardIcon aria-hidden />,
   return: <RotateCcwIcon aria-hidden />,
+  noShow: <UserXIcon aria-hidden />,
+  lateArrival: <LogInIcon aria-hidden />,
 };
 
 function Group({ title, empty, children }: { title: string; empty?: string; children: React.ReactNode }) {

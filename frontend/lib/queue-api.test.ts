@@ -41,6 +41,7 @@ describe('the queue API client', () => {
     const { calls, queue } = recorder();
     await queue.checkIn(session, 'appt-1');
     await queue.checkOut(session, 'entry-1');
+    await queue.markNoShow(session, 'appt-2');
     await queue.skipAtDesk(session, 'entry-2');
     await queue.returnToQueue(session, 'entry-3');
     await queue.callNext(session);
@@ -49,6 +50,7 @@ describe('the queue API client', () => {
     expect(calls.map((call) => call.path)).toEqual([
       '/queue/reception/appointments/appt-1/check-in',
       '/queue/reception/entries/entry-1/check-out',
+      '/queue/reception/appointments/appt-2/no-show',
       '/queue/reception/entries/entry-2/skip',
       '/queue/reception/entries/entry-3/return',
       '/queue/doctor/call-next',
