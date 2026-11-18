@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { waitingDuration } from './format';
-import { actionNotice, adminTotals, aheadText, arrivalPhase, ARRIVAL_GRACE_MINUTES, buildDesk, canCallNext, doctorCheckInDetail, entryActions, ordinal, patientMessage, progress, queuePositionLabel, receptionCheckInDetail, STATUS_LABEL, wasLateCheckIn } from './queue-view';
+import { actionNotice, adminTotals, aheadText, appointmentQueueSummary, arrivalPhase, ARRIVAL_GRACE_MINUTES, buildDesk, canCallNext, canReopenLateCheckIn, doctorCheckInDetail, entryActions, ordinal, patientMessage, progress, queuePositionLabel, receptionCheckInDetail, STATUS_LABEL, wasLateCheckIn } from './queue-view';
 import type { AdminQueueBoard, QueueCounts, QueueDay, QueueEntryResult, QueueEntryView, QueueStatus, ReceptionAppointment, ReceptionBoard } from './types';
 
 const entry = (token: number, status: QueueStatus, appointmentId = `appt-${token}`): QueueEntryView => ({
@@ -99,6 +99,39 @@ describe('ordinal and queuePositionLabel', () => {
     expect(queuePositionLabel({ status: 'SERVING', ahead: 0 })).toBe('Being seen now');
     expect(queuePositionLabel({ status: 'BOOKED', ahead: null })).toBeNull();
     expect(queuePositionLabel({ status: 'COMPLETED', ahead: null })).toBeNull();
+  });
+
+  it('summarises My Appointments token/queue visibility without inventing a live position before check-in', () => {
+    expect(appointmentQueueSummary({ status: 'CONFIRMED', queueToken: 12 }, { status: 'BOOKED', ahead: null })).toMatchObject({
+      statusLabel: 'Not checked in yet',
+      showLivePosition: false,
+      positionOrdinal: null,
+      aheadLabel: null,
+    });
+    expect(appointmentQueueSummary({ status: 'CONFIRMED', queueToken: 12 }, null)).toMatchObject({
+      statusLabel: 'Not checked in yet',
+      showLivePosition: false,
+    });
+    expect(appointmentQueueSummary({ status: 'CONFIRMED', queueToken: 12 }, { status: 'WAITING', ahead: 2 })).toMatchObject({
+      statusLabel: 'Waiting',
+      showLivePosition: true,
+      positionOrdinal: '3rd',
+      aheadLabel: '2 patients ahead',
+    });
+    expect(appointmentQueueSummary({ status: 'CONFIRMED', queueToken: 12 }, { status: 'SERVING', ahead: 0 })).toMatchObject({
+      statusLabel: 'In consultation',
+      showLivePosition: true,
+      headline: 'Your turn / In consultation.',
+    });
+    expect(appointmentQueueSummary({ status: 'CONFIRMED', queueToken: 12 }, { status: 'COMPLETED', ahead: null })?.statusLabel).toBe('Consultation completed');
+    expect(appointmentQueueSummary({ status: 'CONFIRMED', queueToken: 12 }, { status: 'CHECKED_OUT', ahead: null })?.statusLabel).toBe('Checked out');
+    expect(appointmentQueueSummary({ status: 'NO_SHOW', queueToken: 12 }, { status: 'CANCELLED', ahead: null })?.showLivePosition).toBe(false);
+    expect(appointmentQueueSummary({ status: 'CANCELLED', queueToken: 12 }, null)?.statusLabel).toBe('Cancelled');
+    expect(appointmentQueueSummary({ status: 'COMPLETED', queueToken: 12 }, null)).toMatchObject({
+      statusLabel: 'Consultation completed',
+      showLivePosition: false,
+    });
+    expect(appointmentQueueSummary({ status: 'PENDING', queueToken: null }, null)).toBeNull();
   });
 });
 
@@ -238,6 +271,14 @@ describe('actionNotice: what is said after an action', () => {
     expect(actionNotice('return', result())).toBe('Returned token 4, Patient 4, to the queue.');
     expect(actionNotice('lateArrival', result())).toBe('Late arrival: checked in Patient 4 with token 4. 3 patients ahead.');
     expect(actionNotice('noShow', result())).toMatch(/no show/i);
+    expect(actionNotice('reopenLateCheckIn', result())).toMatch(/Reopened and late-checked in Patient 4 with token 4/);
+  });
+
+  it('offers reopen only for manual no-shows still on the cancelled board', () => {
+    expect(canReopenLateCheckIn({ appointmentStatus: 'NO_SHOW', status: 'CANCELLED' })).toBe(true);
+    expect(canReopenLateCheckIn({ appointmentStatus: 'CANCELLED', status: 'CANCELLED' })).toBe(false);
+    expect(canReopenLateCheckIn({ appointmentStatus: 'NO_SHOW', status: 'WAITING' })).toBe(false);
+    expect(canReopenLateCheckIn({ appointmentStatus: 'CONFIRMED', status: 'BOOKED' })).toBe(false);
   });
 });
 

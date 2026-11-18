@@ -1,5 +1,16 @@
 import { clinicClock, formatClockTime, waitingDuration } from './format';
-import type { AdminQueueBoard, MyQueueEntry, QueueCounts, QueueDay, QueueEntryResult, QueueEntryView, QueueStatus, ReceptionAppointment, ReceptionBoard } from './types';
+import type {
+  AdminQueueBoard,
+  AppointmentStatus,
+  MyQueueEntry,
+  QueueCounts,
+  QueueDay,
+  QueueEntryResult,
+  QueueEntryView,
+  QueueStatus,
+  ReceptionAppointment,
+  ReceptionBoard,
+} from './types';
 
 /**
  * What the queue screens say and offer, as plain functions so it is tested without a browser. None of it decides anything about the
@@ -127,6 +138,125 @@ export function queuePositionLabel(entry: Pick<MyQueueEntry, 'status' | 'ahead'>
   return `${ordinal(entry.ahead + 1)} in queue`;
 }
 
+/** What My Appointments shows for token + live queue state. Uses /queue/mine when present; never invents a position from token number. */
+export interface AppointmentQueueSummary {
+  /** Short status for the card (Not checked in yet, Waiting, …). */
+  statusLabel: string;
+  /** True only while the patient is in the active wait / serving line. */
+  showLivePosition: boolean;
+  /** e.g. "3rd" when waiting; null when not in the live line. */
+  positionOrdinal: string | null;
+  /** e.g. "2 patients ahead"; null when not applicable. */
+  aheadLabel: string | null;
+  /** Calm headline for the live strip (Your turn, Consultation completed, …). */
+  headline: string;
+}
+
+/**
+ * Token/queue copy for a patient appointment card. Before check-in: token only + "Not checked in yet".
+ * After check-in: live place from server `ahead` (FIFO wait order). No other patients' details.
+ */
+export function appointmentQueueSummary(
+  appointment: { status: AppointmentStatus; queueToken: number | null },
+  queue: Pick<MyQueueEntry, 'status' | 'ahead'> | null | undefined,
+): AppointmentQueueSummary | null {
+  if (appointment.queueToken == null && !queue) return null;
+
+  if (appointment.status === 'CANCELLED' || appointment.status === 'NO_SHOW') {
+    return {
+      statusLabel: appointment.status === 'NO_SHOW' ? 'No show' : 'Cancelled',
+      showLivePosition: false,
+      positionOrdinal: null,
+      aheadLabel: null,
+      headline: appointment.status === 'NO_SHOW' ? 'Marked as no show.' : 'This appointment was cancelled.',
+    };
+  }
+
+  // Past visits may keep a token on the appointment after the day's queue row is gone.
+  if (appointment.status === 'COMPLETED' && (!queue || queue.status === 'CHECKED_OUT' || queue.status === 'COMPLETED')) {
+    return {
+      statusLabel: queue?.status === 'CHECKED_OUT' ? 'Checked out' : 'Consultation completed',
+      showLivePosition: false,
+      positionOrdinal: null,
+      aheadLabel: null,
+      headline: queue?.status === 'CHECKED_OUT' ? 'Checked out. Thank you for visiting.' : 'Consultation completed.',
+    };
+  }
+
+  if (!queue || queue.status === 'BOOKED') {
+    return {
+      statusLabel: 'Not checked in yet',
+      showLivePosition: false,
+      positionOrdinal: null,
+      aheadLabel: null,
+      headline: 'Check in at the front desk when you arrive. Your token is already reserved.',
+    };
+  }
+
+  if (queue.status === 'WAITING') {
+    const ahead = queue.ahead;
+    return {
+      statusLabel: 'Waiting',
+      showLivePosition: ahead != null,
+      positionOrdinal: ahead == null ? null : ahead === 0 ? 'Next' : ordinal(ahead + 1),
+      aheadLabel: ahead == null ? null : aheadText(ahead),
+      headline: ahead == null ? 'You are in the waiting queue.' : ahead === 0 ? 'You are next.' : `You are ${ordinal(ahead + 1)} in the queue.`,
+    };
+  }
+
+  if (queue.status === 'SERVING') {
+    return {
+      statusLabel: 'In consultation',
+      showLivePosition: true,
+      positionOrdinal: 'Now',
+      aheadLabel: 'Your turn',
+      headline: 'Your turn / In consultation.',
+    };
+  }
+
+  if (queue.status === 'COMPLETED') {
+    return {
+      statusLabel: 'Consultation completed',
+      showLivePosition: false,
+      positionOrdinal: null,
+      aheadLabel: null,
+      headline: 'Consultation completed. Please check out at the front desk.',
+    };
+  }
+
+  if (queue.status === 'CHECKED_OUT') {
+    return {
+      statusLabel: 'Checked out',
+      showLivePosition: false,
+      positionOrdinal: null,
+      aheadLabel: null,
+      headline: 'Checked out. Thank you for visiting.',
+    };
+  }
+
+  if (queue.status === 'SKIPPED') {
+    return {
+      statusLabel: 'Skipped',
+      showLivePosition: false,
+      positionOrdinal: null,
+      aheadLabel: null,
+      headline: 'You were skipped. Please see the front desk to rejoin the queue.',
+    };
+  }
+
+  if (queue.status === 'CANCELLED') {
+    return {
+      statusLabel: 'Cancelled',
+      showLivePosition: false,
+      positionOrdinal: null,
+      aheadLabel: null,
+      headline: 'This appointment was cancelled.',
+    };
+  }
+
+  return null;
+}
+
 export interface PatientMessage {
   headline: string;
   detail: string;
@@ -167,7 +297,7 @@ export function patientMessage(entry: Pick<MyQueueEntry, 'status' | 'ahead' | 'c
   }
 }
 
-export type QueueAction = 'checkIn' | 'lateArrival' | 'checkOut' | 'skip' | 'return' | 'complete' | 'noShow';
+export type QueueAction = 'checkIn' | 'lateArrival' | 'checkOut' | 'skip' | 'return' | 'complete' | 'noShow' | 'reopenLateCheckIn' | 'archive';
 
 /**
  * The buttons that make sense for a patient in a given status, by role. The receptionist skips someone who is not here, returns a
@@ -291,7 +421,16 @@ export function actionNotice(action: QueueAction | 'callNext', entry: QueueEntry
       return `Returned token ${entry.token}, ${who}, to the queue.`;
     case 'noShow':
       return `Marked ${who} (token ${entry.token}) as no show. Removed from the active queue; the appointment stays in history.`;
+    case 'reopenLateCheckIn':
+      return `Reopened and late-checked in ${who} with token ${entry.token}. ${aheadText(entry.ahead)}.`;
+    case 'archive':
+      return `Hidden ${who} (token ${entry.token}) from the dashboard. History is unchanged.`;
   }
+}
+
+/** Manual no-show rows that the desk may reopen for late check-in (same original token). Board status is CANCELLED via effectiveStatus. */
+export function canReopenLateCheckIn(entry: Pick<QueueEntryView, 'appointmentStatus' | 'status'>): boolean {
+  return entry.appointmentStatus === 'NO_SHOW' && entry.status === 'CANCELLED';
 }
 
 /** The administrator's totals across every doctor, for the summary line. */
