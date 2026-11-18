@@ -46,9 +46,18 @@ function when(facts: Pick<AppointmentFacts, 'date' | 'startTime' | 'endTime'>): 
 }
 
 const details = (facts: AppointmentFacts) =>
-  `Doctor: ${facts.doctorName}\n${facts.specialty ? `Specialty: ${facts.specialty}\n` : ''}When: ${when(facts)}\nWhere: ${facts.clinicName}, ${facts.clinicAddress}`;
+  `Patient: ${facts.patientName}\nDoctor: ${facts.doctorName}\n${facts.specialty ? `Specialty: ${facts.specialty}\n` : ''}When: ${when(facts)}\nWhere: ${facts.clinicName}, ${facts.clinicAddress}`;
 const patientDetails = (facts: AppointmentFacts) =>
   `Patient: ${facts.patientName}\nWhen: ${when(facts)}\nWhere: ${facts.clinicName}, ${facts.clinicAddress}`;
+
+/** Plain lines that tell the patient their queue token was issued at booking and must be kept for check-in (same number as in the database). */
+function tokenInstructions(token: number | null | undefined): string {
+  if (token == null) return '';
+  return (
+    `\nQueue token: ${token}\n\n` +
+    `This queue token was assigned when you booked. Keep it and bring it when you arrive: the front desk will check you in with the same number.`
+  );
+}
 
 export function bookingConfirmed(
   facts: AppointmentFacts,
@@ -70,30 +79,43 @@ export function bookingConfirmed(
     body:
       `Hi ${facts.patientName},\n\nYour appointment is confirmed. Your booking is complete and your place is reserved.\n\n` +
       `${details(facts)}` +
-      `${tokenLine ? `\n${tokenLine}\n\nBring this token when you arrive. The front desk will check you in with the same number.` : ''}` +
+      `${tokenInstructions(extra.token)}` +
       `\n\nYou can cancel or reschedule from your CareSlot dashboard.`,
     sms: clip(
       extra.token != null
-        ? `CareSlot: appointment confirmed with ${facts.doctorName}, ${when(facts)}. Your queue token is ${extra.token}.`
+        ? `CareSlot: appointment confirmed with ${facts.doctorName}, ${when(facts)}. Your queue token is ${extra.token}. Keep it for check-in.`
         : `CareSlot: appointment confirmed with ${facts.doctorName}, ${when(facts)}.`,
     ),
   };
 }
 
-export function bookingRescheduled(facts: AppointmentFacts, previous: Pick<AppointmentFacts, 'date' | 'startTime' | 'endTime'>, audience: Audience = 'patient'): MessageContent {
+export function bookingRescheduled(
+  facts: AppointmentFacts,
+  previous: Pick<AppointmentFacts, 'date' | 'startTime' | 'endTime'>,
+  audience: Audience = 'patient',
+  extra: { token?: number | null } = {},
+): MessageContent {
+  const tokenLine = extra.token != null ? `Queue token: ${extra.token}` : null;
   if (audience === 'doctor') {
     return {
       kind: 'booking-rescheduled',
       subject: `Booking rescheduled: ${facts.patientName}, ${when(facts)}`,
-      body: `Hello ${facts.doctorName},\n\n${facts.patientName} moved their appointment from ${when(previous)}.\n\nNew time:\n${patientDetails(facts)}`,
+      body: `Hello ${facts.doctorName},\n\n${facts.patientName} moved their appointment from ${when(previous)}.\n\nNew time:\n${patientDetails(facts)}${tokenLine ? `\n${tokenLine}` : ''}`,
       sms: '',
     };
   }
   return {
     kind: 'booking-rescheduled',
     subject: `Appointment rescheduled: ${facts.doctorName}, ${when(facts)}`,
-    body: `Hi ${facts.patientName},\n\nYour appointment was moved from ${when(previous)}.\n\nNew time:\n${details(facts)}\n\nYour payment, if any, carries over to the new time.`,
-    sms: clip(`CareSlot: appointment with ${facts.doctorName} moved from ${when(previous)} to ${when(facts)}.`),
+    body:
+      `Hi ${facts.patientName},\n\nYour appointment was moved from ${when(previous)}.\n\nNew time:\n${details(facts)}` +
+      `${tokenInstructions(extra.token)}` +
+      `\n\nYour payment, if any, carries over to the new time.`,
+    sms: clip(
+      extra.token != null
+        ? `CareSlot: appointment with ${facts.doctorName} moved to ${when(facts)}. Your queue token is ${extra.token}. Keep it for check-in.`
+        : `CareSlot: appointment with ${facts.doctorName} moved from ${when(previous)} to ${when(facts)}.`,
+    ),
   };
 }
 

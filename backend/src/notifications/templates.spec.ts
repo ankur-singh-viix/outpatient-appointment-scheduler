@@ -14,11 +14,15 @@ describe('message templates', () => {
     const message = templates.bookingConfirmed(facts, 'patient', { token: 12 });
     expect(message.subject).toContain('Dr. Rohan Das');
     expect(message.subject).toContain('2:05 PM');
+    expect(message.body).toContain('Patient: Rahul Sharma');
+    expect(message.body).toContain('Doctor: Dr. Rohan Das');
     expect(message.body).toContain('Mon, 2 Nov, 2026');
     expect(message.body).toContain('City Clinic, 12 MG Road');
     expect(message.body).toContain('Queue token: 12');
-    expect(message.body).toContain('Bring this token when you arrive');
+    expect(message.body).toContain('assigned when you booked');
+    expect(message.body).toContain('check you in with the same number');
     expect(message.sms).toContain('Your queue token is 12');
+    expect(message.sms).toContain('Keep it for check-in');
     expect(message.kind).toBe('booking-confirmed');
   });
 
@@ -57,9 +61,21 @@ describe('message templates', () => {
     const withToken = templates.bookingConfirmed(facts, 'patient', { token: 4 });
     expect(withToken.body).toContain('Queue token: 4');
     expect(withToken.body).not.toMatch(/secret|password|hash/i);
-    expect(templates.bookingConfirmed(facts).body).not.toMatch(/Queue token|Bring this token/i);
+    expect(templates.bookingConfirmed(facts).body).not.toMatch(/Queue token|assigned when you booked/i);
     expect(templates.paymentReceived(facts, { amountPaise: 65000, receipt: 'pay_1' }).body).not.toMatch(/secret|password|token/i);
     expect(templates.paymentReceived(facts, { amountPaise: 65000, receipt: 'pay_1' }).body).toContain('Receipt: pay_1');
+  });
+
+  it('puts the existing queue token on a reschedule notice with the same keep-for-check-in wording', () => {
+    const previous = { date: '2026-11-01', startTime: '10:00', endTime: '10:30' };
+    const message = templates.bookingRescheduled(facts, previous, 'patient', { token: 7 });
+    expect(message.body).toContain('Patient: Rahul Sharma');
+    expect(message.body).toContain('Doctor: Dr. Rohan Das');
+    expect(message.body).toContain('City Clinic, 12 MG Road');
+    expect(message.body).toContain('Queue token: 7');
+    expect(message.body).toContain('assigned when you booked');
+    expect(message.sms).toContain('Your queue token is 7');
+    expect(templates.bookingRescheduled(facts, previous, 'doctor', { token: 7 }).body).toContain('Queue token: 7');
   });
 });
 
@@ -108,8 +124,8 @@ describe('doctor messages, payment failure and text messages', () => {
   it('gives every patient event a short text version of at most 160 characters', () => {
     const long = { ...range, doctorName: 'Dr. Bartholomew Montgomery-Featherstonehaugh', clinicName: 'A Very Long Clinic Name Indeed' };
     const all = [
-      templates.bookingConfirmed(long),
-      templates.bookingRescheduled(long, { date: '2026-11-01', startTime: '10:00', endTime: '10:30' }),
+      templates.bookingConfirmed(long, 'patient', { token: 99 }),
+      templates.bookingRescheduled(long, { date: '2026-11-01', startTime: '10:00', endTime: '10:30' }, 'patient', { token: 99 }),
       templates.bookingCancelled(long, { cancelledBy: 'DOCTOR', reason: 'r' }),
       templates.paymentReceived(long, { amountPaise: 65000, receipt: 'pay_AbCdEfGhIjKl' }),
       templates.paymentFailed(long, { reason: 'x'.repeat(300) }),
@@ -144,15 +160,38 @@ describe('messages for the Brevo notification set', () => {
   const previous = { date: '2026-11-01', startTime: '10:00', endTime: '10:30' };
 
   it('confirms the booking with patient, doctor, specialty, date, time and clinic', () => {
-    const message = templates.bookingConfirmed(full);
-    for (const part of ['Rahul Sharma', 'Dr. Rohan Das', 'Specialty: ENT', 'Mon, 2 Nov, 2026', '2:05 PM – 2:35 PM', 'City Clinic, 12 MG Road', 'confirmed']) expect(message.body).toContain(part);
+    const message = templates.bookingConfirmed(full, 'patient', { token: 3 });
+    for (const part of [
+      'Patient: Rahul Sharma',
+      'Doctor: Dr. Rohan Das',
+      'Specialty: ENT',
+      'Mon, 2 Nov, 2026',
+      '2:05 PM – 2:35 PM',
+      'City Clinic, 12 MG Road',
+      'confirmed',
+      'Queue token: 3',
+      'assigned when you booked',
+    ]) {
+      expect(message.body).toContain(part);
+    }
     expect(templates.bookingConfirmed(facts).body).not.toContain('Specialty'); // an older caller without one still reads well
   });
 
   it('shows the previous and the new time, the doctor, and says it was rescheduled', () => {
-    const message = templates.bookingRescheduled(full, previous);
+    const message = templates.bookingRescheduled(full, previous, 'patient', { token: 5 });
     expect(message.subject).toMatch(/^Appointment rescheduled:/);
-    for (const part of ['moved from Sun, 1 Nov, 2026 at 10:00 AM', 'New time:', 'Dr. Rohan Das', 'Specialty: ENT', '2:05 PM']) expect(message.body).toContain(part);
+    for (const part of [
+      'moved from Sun, 1 Nov, 2026 at 10:00 AM',
+      'New time:',
+      'Patient: Rahul Sharma',
+      'Doctor: Dr. Rohan Das',
+      'Specialty: ENT',
+      '2:05 PM',
+      'Queue token: 5',
+      'assigned when you booked',
+    ]) {
+      expect(message.body).toContain(part);
+    }
   });
 
   it('confirms the cancellation, shows the appointment, and says what to do next', () => {

@@ -7,6 +7,7 @@ import { Appointment, Doctor, DoctorReceptionistAssignment, Patient, QueueEntry,
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { clinicNow } from '../scheduling/calendar.js';
 import { hhmm } from '../scheduling/slots.js';
+import { ARRIVAL_GRACE_MINUTES, arrivalPhase } from './arrival-grace.js';
 import { issueBookedQueueToken } from './issue-token.js';
 import { assertQueueTransition, eventFor } from './queue-lifecycle.js';
 import { buildDay, positionOf, type Day, type DayRow } from './queue-position.js';
@@ -71,7 +72,11 @@ export class QueueService {
 
   // ---- Receptionist ----
 
-  /** Checks a patient in for a CONFIRMED appointment on its day, reusing the booking-time token (never allocating a new one). */
+  /**
+   * Checks a patient in for a CONFIRMED appointment on its day, reusing the booking-time token (never allocating a new one).
+   * Allowed any time today while the entry is still BOOKED — including after the appointment start and after the arrival grace
+   * (late arrival). Grace only gates the separate manual no-show action; this never auto-marks NO_SHOW or COMPLETED.
+   */
   async checkIn(user: AuthUser, appointmentId: string) {
     return this.guard(async () => {
       const doctorIds = await this.assignedDoctorIds(user);
@@ -114,6 +119,74 @@ export class QueueService {
       await this.dataSource.transaction(async (manager) => {
         const entry = await this.entryForAssignedDoctors(manager, entryId, doctorIds);
         await this.move(manager, entry, 'CHECKED_OUT', user, { checkedOutAt: new Date(), checkedOutByUserId: user.id });
+      });
+      return this.describe(entryId);
+    });
+  }
+
+  /**
+   * Manual no-show at the front desk: only after the arrival grace (ARRIVAL_GRACE_MINUTES) has elapsed, for a patient who never
+   * checked in (BOOKED) or who was skipped and will not return. Sets the appointment to NO_SHOW (history kept, slot freed).
+   * BOOKED entries stay BOOKED in storage (check-in columns must stay null); the board treats them as cancelled via the
+   * appointment status. Skipped entries move to CANCELLED. No refund — unlike an explicit cancel.
+   */
+  async markNoShow(user: AuthUser, appointmentId: string) {
+    return this.guard(async () => {
+      const doctorIds = await this.assignedDoctorIds(user);
+      const clock = clinicNow(this.config.clinicTimezone);
+      const entryId = await this.dataSource.transaction(async (manager) => {
+        const found = await manager.findOne(Appointment, { where: { id: appointmentId }, relations: { doctor: true } });
+        if (!found || !doctorIds.includes(found.doctorId)) throw new NotFoundException('Appointment not found.');
+        await this.lockDoctor(manager, found.doctorId);
+        const appointment = await manager.findOneOrFail(Appointment, { where: { id: appointmentId }, lock: { mode: 'pessimistic_write' } });
+
+        if (appointment.status !== 'CONFIRMED') {
+          throw conflict('NOT_ELIGIBLE', `This appointment is ${appointment.status.replace('_', ' ').toLowerCase()}, so it cannot be marked no-show.`);
+        }
+        if (appointment.appointmentDate !== clock.date) {
+          throw conflict('NOT_TODAY', appointment.appointmentDate > clock.date ? 'Only today\'s appointments can be marked no-show.' : 'This appointment was on an earlier day.');
+        }
+
+        const phase = arrivalPhase({
+          appointmentDate: appointment.appointmentDate,
+          startTime: hhmm(appointment.startTime),
+          nowDate: clock.date,
+          nowTime: clock.time,
+          graceMinutes: ARRIVAL_GRACE_MINUTES,
+        });
+        if (phase !== 'no_show_eligible') {
+          throw conflict(
+            'GRACE_NOT_ELAPSED',
+            `Wait until ${ARRIVAL_GRACE_MINUTES} minutes after the appointment start before marking a no-show. The patient may still arrive late.`,
+            { graceMinutes: ARRIVAL_GRACE_MINUTES },
+          );
+        }
+
+        const existing = await manager.findOne(QueueEntry, { where: { appointmentId }, lock: { mode: 'pessimistic_write' } });
+        if (!existing) throw conflict('TOKEN_MISSING', 'This appointment has no queue token.');
+        if (existing.status !== 'BOOKED' && existing.status !== 'SKIPPED') {
+          throw conflict(
+            'NOT_ELIGIBLE',
+            existing.status === 'WAITING' || existing.status === 'SERVING'
+              ? 'This patient is already in the active queue. Skip them if they are not available, or complete the consultation.'
+              : `This patient is ${existing.status.replace('_', ' ').toLowerCase()} and cannot be marked no-show.`,
+          );
+        }
+
+        assertTransition(appointment.status, 'NO_SHOW');
+        appointment.status = 'NO_SHOW';
+        appointment.cancelReason = 'Marked no show at front desk';
+        appointment.cancelledAt = new Date();
+        appointment.cancelledByUserId = user.id;
+        await manager.save(appointment);
+
+        // Never-checked-in rows cannot become CANCELLED under ck_queue_checked_in_consistency; the board reads NO_SHOW as cancelled.
+        if (existing.status === 'SKIPPED') {
+          await this.move(manager, existing, 'CANCELLED', user, {});
+        } else {
+          await this.record(manager, existing.id, existing.status, 'CANCELLED', user);
+        }
+        return existing.id;
       });
       return this.describe(entryId);
     });
@@ -315,8 +388,8 @@ export class QueueService {
                 count(*) FILTER (WHERE q.status = 'SERVING' AND a.status = 'CONFIRMED')::int AS serving,
                 count(*) FILTER (WHERE q.status = 'COMPLETED')::int AS completed,
                 count(*) FILTER (WHERE q.status = 'CHECKED_OUT')::int AS checked_out,
-                count(*) FILTER (WHERE q.status = 'SKIPPED')::int AS skipped,
-                count(*) FILTER (WHERE q.status = 'CANCELLED' OR (q.status IN ('WAITING', 'SERVING') AND a.status IN ('CANCELLED', 'NO_SHOW')))::int AS cancelled,
+                count(*) FILTER (WHERE q.status = 'SKIPPED' AND a.status = 'CONFIRMED')::int AS skipped,
+                count(*) FILTER (WHERE q.status = 'CANCELLED' OR (q.status IN ('BOOKED', 'WAITING', 'SERVING', 'SKIPPED') AND a.status IN ('CANCELLED', 'NO_SHOW')))::int AS cancelled,
                 min(q.token_number) FILTER (WHERE q.status = 'SERVING' AND a.status = 'CONFIRMED') AS serving_token,
                 max(q.token_number)::int AS last_token
            FROM queue_entries q JOIN appointments a ON a.id = q.appointment_id JOIN doctors d ON d.id = q.doctor_id
