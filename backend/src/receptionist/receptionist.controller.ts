@@ -8,7 +8,12 @@ import { dateSchema, timeSchema } from '../scheduling/schemas.js';
 import { ReceptionistService } from './receptionist.service.js';
 
 const patientSearchQuery = z.object({ search: z.string().trim().min(2, 'type at least 2 characters').max(100) });
-const appointmentsQuery = z.object({ date: dateSchema.optional(), doctorId: z.uuid().optional() });
+const appointmentsQuery = z.object({
+  date: dateSchema.optional(),
+  doctorId: z.uuid().optional(),
+  /** active (default): upcoming/desk work. history: checked-out, no-show, cancelled, completed records (never deleted). */
+  view: z.enum(['active', 'history']).optional(),
+});
 const bookSchema = z.strictObject({
   patientId: z.uuid(),
   doctorId: z.uuid(),

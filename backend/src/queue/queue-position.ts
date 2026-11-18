@@ -8,6 +8,11 @@ export interface DayRow {
   status: QueueStatus;
   /** The status of the appointment the entry belongs to. */
   appointmentStatus: string;
+  /**
+   * When the patient joined the active wait line (server check-in time). Used to order WAITING so late arrivals join the end
+   * without cutting ahead of people already waiting. Null while BOOKED.
+   */
+  checkedInAt?: Date | string | null;
 }
 
 /**
@@ -16,7 +21,10 @@ export interface DayRow {
  * copied, so the existing cancel and reschedule flows need no knowledge of the queue.
  */
 export function effectiveStatus(stored: QueueStatus, appointmentStatus: string): QueueStatus {
-  if ((stored === 'BOOKED' || stored === 'WAITING' || stored === 'SERVING') && (appointmentStatus === 'CANCELLED' || appointmentStatus === 'NO_SHOW')) {
+  if (
+    (stored === 'BOOKED' || stored === 'WAITING' || stored === 'SERVING' || stored === 'SKIPPED') &&
+    (appointmentStatus === 'CANCELLED' || appointmentStatus === 'NO_SHOW')
+  ) {
     return 'CANCELLED';
   }
   return stored;
@@ -28,7 +36,7 @@ export interface Day<T extends DayRow> {
   serving: T | null;
   /** Confirmed bookings with a token who have not checked in yet. */
   booked: T[];
-  /** Waiting patients, lowest token first: the order they will be called in. */
+  /** Waiting patients in call order: earliest check-in first (late arrivals join the end); token breaks ties. */
   waiting: T[];
   completed: T[];
   checkedOut: T[];
@@ -36,25 +44,42 @@ export interface Day<T extends DayRow> {
   cancelled: T[];
 }
 
+/** Milliseconds since epoch for check-in ordering; missing times sort last among waiters (should not happen for WAITING). */
+function checkInMs(row: DayRow): number {
+  if (row.checkedInAt == null) return Number.POSITIVE_INFINITY;
+  const ms = row.checkedInAt instanceof Date ? row.checkedInAt.getTime() : Date.parse(String(row.checkedInAt));
+  return Number.isFinite(ms) ? ms : Number.POSITIVE_INFINITY;
+}
+
+/** Call order among waiting patients: check-in time ascending, then token number. */
+export function compareWaitingOrder(a: DayRow, b: DayRow): number {
+  const byCheckIn = checkInMs(a) - checkInMs(b);
+  return byCheckIn !== 0 ? byCheckIn : a.token - b.token;
+}
+
 /**
  * One doctor's day, worked out from the entries themselves (never from stored counts): who is being served, who is waiting and in
  * what order, and who has left. Every row comes back with its effective status. If two entries were somehow both being served (the
- * database forbids it), the lowest token is the one served and the other is counted as waiting, so the order stays defined.
+ * database forbids it), the earliest check-in is served and the other waits, so the order stays defined.
  */
 export function buildDay<T extends DayRow>(rows: T[]): Day<T> {
-  const ordered = [...rows].map((row) => ({ ...row, status: effectiveStatus(row.status, row.appointmentStatus) })).sort((a, b) => a.token - b.token);
-  const servingRows = ordered.filter((row) => row.status === 'SERVING');
+  const withStatus = [...rows].map((row) => ({ ...row, status: effectiveStatus(row.status, row.appointmentStatus) }));
+  const byToken = [...withStatus].sort((a, b) => a.token - b.token);
+  const servingRows = [...withStatus.filter((row) => row.status === 'SERVING')].sort(compareWaitingOrder);
   const serving = servingRows[0] ?? null;
-  const waiting = ordered.filter((row) => row.status === 'WAITING' || (row.status === 'SERVING' && row !== serving)).map((row) => (row.status === 'SERVING' ? { ...row, status: 'WAITING' as const } : row));
+  const waiting = withStatus
+    .filter((row) => row.status === 'WAITING' || (row.status === 'SERVING' && row !== serving))
+    .map((row) => (row.status === 'SERVING' ? { ...row, status: 'WAITING' as const } : row))
+    .sort(compareWaitingOrder);
   return {
     currentlyServingToken: serving?.token ?? null,
     serving,
-    booked: ordered.filter((row) => row.status === 'BOOKED'),
-    waiting: waiting.sort((a, b) => a.token - b.token),
-    completed: ordered.filter((row) => row.status === 'COMPLETED'),
-    checkedOut: ordered.filter((row) => row.status === 'CHECKED_OUT'),
-    skipped: ordered.filter((row) => row.status === 'SKIPPED'),
-    cancelled: ordered.filter((row) => row.status === 'CANCELLED'),
+    booked: byToken.filter((row) => row.status === 'BOOKED'),
+    waiting,
+    completed: byToken.filter((row) => row.status === 'COMPLETED'),
+    checkedOut: byToken.filter((row) => row.status === 'CHECKED_OUT'),
+    skipped: byToken.filter((row) => row.status === 'SKIPPED'),
+    cancelled: byToken.filter((row) => row.status === 'CANCELLED'),
   };
 }
 
@@ -68,9 +93,9 @@ export interface Position {
 }
 
 /**
- * Where one entry stands. The order is: the patient being served, then the waiting patients by token. A waiting patient has the
- * served patient and every lower waiting token ahead of them, and every higher waiting token behind them. A patient who is skipped,
- * completed, checked out or cancelled is not in the active queue and has no place in it.
+ * Where one entry stands. The order is: the patient being served, then waiting patients by check-in time (then token). A waiting
+ * patient has the served patient and everyone earlier in that waiting list ahead of them. Skipped, completed, checked out or
+ * cancelled patients are not in the active queue and have no place in it.
  */
 export function positionOf<T extends DayRow>(day: Day<T>, id: string): Position | null {
   const all = [day.serving, ...day.waiting, ...day.booked, ...day.completed, ...day.checkedOut, ...day.skipped, ...day.cancelled].filter((row): row is T => row !== null);
@@ -79,10 +104,11 @@ export function positionOf<T extends DayRow>(day: Day<T>, id: string): Position 
   const base = { status: row.status, currentlyServingToken: day.currentlyServingToken };
   if (row.status === 'SERVING') return { ...base, ahead: 0, behind: day.waiting.length };
   if (row.status === 'WAITING') {
+    const index = day.waiting.findIndex((other) => other.id === row.id);
     return {
       ...base,
-      ahead: (day.serving ? 1 : 0) + day.waiting.filter((other) => other.token < row.token).length,
-      behind: day.waiting.filter((other) => other.token > row.token).length,
+      ahead: (day.serving ? 1 : 0) + Math.max(0, index),
+      behind: Math.max(0, day.waiting.length - index - 1),
     };
   }
   return { ...base, ahead: null, behind: null };

@@ -10,7 +10,8 @@ import { clinicNow } from '../scheduling/calendar.js';
  *   PENDING   (an unpaid hold)     -> CONFIRMED (paid) or CANCELLED (released, or cancelled)
  *   CONFIRMED                      -> CANCELLED (patient, doctor, clinic; or moved by a reschedule), COMPLETED (its time has passed)
  *                                     or NO_SHOW
- *   CANCELLED, COMPLETED, NO_SHOW  -> nothing: they are final
+ *   NO_SHOW                        -> CONFIRMED (controlled front-desk reopen & late check-in only)
+ *   CANCELLED, COMPLETED           -> nothing: they are final (mistaken COMPLETED+BOOKED is repaired in the queue service, not here)
  *
  * "Needs a new time", "rescheduled" and "restored" are not statuses: they are worked out from the appointment's hours and its
  * tracking records (schedule_change_appointments), so the appointment itself never changes because a doctor changed their hours.
@@ -20,7 +21,7 @@ export const APPOINTMENT_TRANSITIONS: Record<AppointmentStatus, readonly Appoint
   CONFIRMED: ['CANCELLED', 'COMPLETED', 'NO_SHOW'],
   CANCELLED: [],
   COMPLETED: [],
-  NO_SHOW: [],
+  NO_SHOW: ['CONFIRMED'],
 };
 
 export function canTransition(from: AppointmentStatus, to: AppointmentStatus): boolean {

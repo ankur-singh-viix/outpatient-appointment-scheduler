@@ -2,9 +2,10 @@ import { APPOINTMENT_STATUSES, type AppointmentStatus } from '../database/entiti
 import { APPOINTMENT_TRANSITIONS, assertTransition, canTransition, QUEUE_STATUSES_BLOCKING_AUTO_COMPLETE } from './appointment-lifecycle.js';
 
 describe('appointment lifecycle', () => {
-  it('has an entry for every status, and the final ones lead nowhere', () => {
+  it('has an entry for every status; cancelled and completed stay final, no-show may reopen to confirmed', () => {
     expect(Object.keys(APPOINTMENT_TRANSITIONS).sort((x, y) => x.localeCompare(y))).toEqual([...APPOINTMENT_STATUSES].sort((x, y) => x.localeCompare(y)));
-    for (const final of ['CANCELLED', 'COMPLETED', 'NO_SHOW'] as AppointmentStatus[]) expect(APPOINTMENT_TRANSITIONS[final]).toEqual([]);
+    for (const final of ['CANCELLED', 'COMPLETED'] as AppointmentStatus[]) expect(APPOINTMENT_TRANSITIONS[final]).toEqual([]);
+    expect(APPOINTMENT_TRANSITIONS.NO_SHOW).toEqual(['CONFIRMED']);
   });
 
   it('allows exactly the moves the domain has', () => {
@@ -14,6 +15,7 @@ describe('appointment lifecycle', () => {
       ['CONFIRMED', 'CANCELLED'],
       ['CONFIRMED', 'COMPLETED'],
       ['CONFIRMED', 'NO_SHOW'],
+      ['NO_SHOW', 'CONFIRMED'],
     ];
     for (const from of APPOINTMENT_STATUSES) {
       for (const to of APPOINTMENT_STATUSES) {
@@ -22,10 +24,12 @@ describe('appointment lifecycle', () => {
     }
   });
 
-  it('never lets a final appointment be reopened or overwritten', () => {
-    for (const from of ['CANCELLED', 'COMPLETED', 'NO_SHOW'] as AppointmentStatus[]) {
+  it('never lets cancelled or completed appointments be reopened; no-show may return to confirmed only', () => {
+    for (const from of ['CANCELLED', 'COMPLETED'] as AppointmentStatus[]) {
       for (const to of APPOINTMENT_STATUSES) expect(() => assertTransition(from, to)).toThrow(/cannot become/);
     }
+    expect(() => assertTransition('NO_SHOW', 'CONFIRMED')).not.toThrow();
+    expect(() => assertTransition('NO_SHOW', 'COMPLETED')).toThrow(/cannot become/);
   });
 
   it('explains a refused move in plain words', () => {

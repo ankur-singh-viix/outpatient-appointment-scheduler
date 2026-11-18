@@ -2,9 +2,10 @@ import { QUEUE_STATUSES, type QueueStatus } from '../database/entities/queue-ent
 import { ACTIVE_QUEUE_STATUSES, QUEUE_TRANSITIONS, assertQueueTransition, canQueueTransition, eventFor } from './queue-lifecycle.js';
 
 describe('queue lifecycle', () => {
-  it('has an entry for every status, and the final ones lead nowhere', () => {
+  it('has an entry for every status; checked-out is final, cancelled may reopen to waiting', () => {
     expect(Object.keys(QUEUE_TRANSITIONS).sort((x, y) => x.localeCompare(y))).toEqual([...QUEUE_STATUSES].sort((x, y) => x.localeCompare(y)));
-    for (const final of ['CHECKED_OUT', 'CANCELLED'] as QueueStatus[]) expect(QUEUE_TRANSITIONS[final]).toEqual([]);
+    expect(QUEUE_TRANSITIONS.CHECKED_OUT).toEqual([]);
+    expect(QUEUE_TRANSITIONS.CANCELLED).toEqual(['WAITING']);
   });
 
   it('allows exactly the moves the queue has', () => {
@@ -20,6 +21,7 @@ describe('queue lifecycle', () => {
       ['COMPLETED', 'CHECKED_OUT'],
       ['SKIPPED', 'WAITING'],
       ['SKIPPED', 'CANCELLED'],
+      ['CANCELLED', 'WAITING'],
     ];
     for (const from of QUEUE_STATUSES) {
       for (const to of QUEUE_STATUSES) {
@@ -34,10 +36,12 @@ describe('queue lifecycle', () => {
   });
 
   it('a finished patient can never be called or completed again', () => {
-    for (const from of ['COMPLETED', 'CHECKED_OUT', 'CANCELLED'] as QueueStatus[]) {
+    for (const from of ['COMPLETED', 'CHECKED_OUT'] as QueueStatus[]) {
       expect(canQueueTransition(from, 'SERVING')).toBe(false);
       expect(canQueueTransition(from, 'COMPLETED')).toBe(false);
     }
+    expect(canQueueTransition('CANCELLED', 'SERVING')).toBe(false);
+    expect(canQueueTransition('CANCELLED', 'WAITING')).toBe(true);
   });
 
   it('explains a refused move in plain words, with a code', () => {
@@ -61,6 +65,7 @@ describe('queue lifecycle', () => {
     expect(eventFor('COMPLETED', 'CHECKED_OUT')).toBe('CHECKED_OUT');
     expect(eventFor('SERVING', 'SKIPPED')).toBe('SKIPPED');
     expect(eventFor('SKIPPED', 'WAITING')).toBe('RETURNED');
+    expect(eventFor('CANCELLED', 'WAITING')).toBe('CHECKED_IN');
     expect(eventFor('SERVING', 'CANCELLED')).toBe('CANCELLED');
   });
 
