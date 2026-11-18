@@ -20,6 +20,7 @@ export function createQueueApi(call: Call) {
     checkIn: (session: Session, appointmentId: string) => post(session, `/queue/reception/appointments/${appointmentId}/check-in`),
     checkOut: (session: Session, entryId: string) => post(session, `/queue/reception/entries/${entryId}/check-out`),
     markNoShow: (session: Session, appointmentId: string) => post(session, `/queue/reception/appointments/${appointmentId}/no-show`),
+    reopenLateCheckIn: (session: Session, appointmentId: string) => post(session, `/queue/reception/appointments/${appointmentId}/reopen-late-check-in`),
     completeAtDesk: (session: Session, entryId: string) => post(session, `/queue/reception/entries/${entryId}/complete`),
     skipAtDesk: (session: Session, entryId: string) => post(session, `/queue/reception/entries/${entryId}/skip`),
     returnToQueue: (session: Session, entryId: string) => post(session, `/queue/reception/entries/${entryId}/return`),

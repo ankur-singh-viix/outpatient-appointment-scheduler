@@ -11,7 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { api, errorMessage } from '@/lib/api';
-import { clinicClock, clinicToday, formatDate, formatTime, formatTimeRange } from '@/lib/format';
+import { clinicClock, clinicToday, formatClockTime, formatDate, formatTime, formatTimeRange } from '@/lib/format';
 import { useAutoRefresh, useNow, useQuery } from '@/lib/hooks';
 import { queueApi } from '@/lib/queue-client';
 import { ARRIVAL_GRACE_MINUTES, actionNotice, arrivalPhase } from '@/lib/queue-view';
@@ -42,8 +42,13 @@ export function AppointmentsPanel({
   const [doctorId, setDoctorId] = useState('');
   const [date, setDate] = useState('');
   const [slotTime, setSlotTime] = useState('');
+  const [view, setView] = useState<'active' | 'history'>('active');
   const today = clinicToday();
-  const query = new URLSearchParams({ ...(date && { date }), ...(doctorId && { doctorId }) }).toString();
+  const query = new URLSearchParams({
+    ...(date && { date }),
+    ...(doctorId && { doctorId }),
+    ...(view === 'history' && { view: 'history' }),
+  }).toString();
   const list = useQuery(`reception-appointments:${session.user.id}:${query}:${version}`, () =>
     api<ReceptionAppointment[]>(`/receptionist/appointments${query ? `?${query}` : ''}`, { token: session.accessToken }),
   );
@@ -60,6 +65,9 @@ export function AppointmentsPanel({
   const [checkingIn, setCheckingIn] = useState<string | null>(null);
   const [checkingOut, setCheckingOut] = useState<string | null>(null);
   const [markingNoShow, setMarkingNoShow] = useState<string | null>(null);
+  const [confirmNoShow, setConfirmNoShow] = useState<ReceptionAppointment | null>(null);
+  const [confirmReopen, setConfirmReopen] = useState<ReceptionAppointment | null>(null);
+  const [reopening, setReopening] = useState<string | null>(null);
   const [checkedInIds, setCheckedInIds] = useState<Set<string>>(() => new Set());
   const [checkInError, setCheckInError] = useState<string | null>(null);
   const [checkOutError, setCheckOutError] = useState<string | null>(null);
@@ -118,10 +126,10 @@ export function AppointmentsPanel({
           Appointments
         </CardTitle>
         <CardDescription>
-          Upcoming appointments for your assigned doctors. Today&apos;s confirmed visits can be checked in or marked late arrival here (even after the {ARRIVAL_GRACE_MINUTES}
-          -minute grace) or on the Queue &amp; check-in tab. No show is a separate action after that grace — never automatic. After the doctor
-          completes a consultation, check the patient out here.
-          {onOpenQueue && (
+          {view === 'history'
+            ? 'Checked-out, completed, no-show and cancelled records for your assigned doctors. Nothing is deleted.'
+            : `Upcoming appointments for your assigned doctors. Check in or late arrival (even after the ${ARRIVAL_GRACE_MINUTES}-minute grace) here or on Queue & check-in. No show is manual after that grace. After the doctor completes, check the patient out here.`}
+          {onOpenQueue && view === 'active' && (
             <>
               {' '}
               <button type="button" className="font-medium text-foreground underline-offset-2 hover:underline" onClick={onOpenQueue}>
@@ -133,6 +141,13 @@ export function AppointmentsPanel({
       </CardHeader>
       <CardContent className="space-y-5">
         <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-2">
+            <Label htmlFor="appt-view">List</Label>
+            <select id="appt-view" value={view} onChange={(event) => setView(event.target.value as 'active' | 'history')} className={selectClass}>
+              <option value="active">Active desk work</option>
+              <option value="history">History (checked out / no show / cancelled)</option>
+            </select>
+          </div>
           <div className="space-y-2">
             <Label htmlFor="appt-doctor">Doctor</Label>
             <select id="appt-doctor" value={doctorId} onChange={(event) => setDoctorId(event.target.value)} className={selectClass}>
@@ -159,7 +174,7 @@ export function AppointmentsPanel({
               ))}
             </select>
           </div>
-          {(date || slotTime) && (
+          {(date || slotTime || view === 'history') && (
             <Button
               type="button"
               variant="outline"
@@ -167,6 +182,7 @@ export function AppointmentsPanel({
               onClick={() => {
                 setDate('');
                 setSlotTime('');
+                setView('active');
               }}
             >
               Clear filters
@@ -190,8 +206,11 @@ export function AppointmentsPanel({
         {noShowError && <Alert tone="error">{noShowError}</Alert>}
         {list.loading && !items && <Spinner label="Loading appointments…" />}
         {items && items.length === 0 && (
-          <EmptyState title={date ? 'No appointments on this date' : 'No upcoming appointments'} icon={CalendarCheckIcon}>
-            <p>Bookings made here or online show up in this list.</p>
+          <EmptyState
+            title={view === 'history' ? (date ? 'No history on this date' : 'No history yet') : date ? 'No appointments on this date' : 'No upcoming appointments'}
+            icon={CalendarCheckIcon}
+          >
+            <p>{view === 'history' ? 'Checked-out, no-show, cancelled and completed visits appear here.' : 'Bookings made here or online show up in this list.'}</p>
           </EmptyState>
         )}
 
@@ -202,14 +221,26 @@ export function AppointmentsPanel({
             </h3>
             <ul className="divide-y rounded-xl border bg-card">
               {entries.map((appointment) => {
-                const readyToCheckOut = appointment.queueStatus === 'COMPLETED' && appointment.queueEntryId != null;
-                const canCancel = appointment.status === 'PENDING' || appointment.status === 'CONFIRMED';
-                const notYetInQueue =
+                const readyToCheckOut = view === 'active' && appointment.queueStatus === 'COMPLETED' && appointment.queueEntryId != null;
+                const canCancel = view === 'active' && (appointment.status === 'PENDING' || appointment.status === 'CONFIRMED');
+                const canReschedule =
+                  view === 'active' &&
                   appointment.status === 'CONFIRMED' &&
+                  appointment.queueStatus !== 'COMPLETED' &&
+                  appointment.queueStatus !== 'CHECKED_OUT';
+                // CONFIRMED today, or stuck COMPLETED+BOOKED (mistaken auto-complete) — still eligible for late arrival / no show.
+                const arrivalOpen =
+                  view === 'active' &&
                   appointment.date === today &&
                   !checkedInIds.has(appointment.id) &&
                   !readyToCheckOut &&
-                  (appointment.queueStatus === null || appointment.queueStatus === 'BOOKED');
+                  (appointment.queueStatus === null || appointment.queueStatus === 'BOOKED') &&
+                  (appointment.status === 'CONFIRMED' || (appointment.status === 'COMPLETED' && appointment.queueStatus === 'BOOKED'));
+                const canReopen =
+                  view === 'active' &&
+                  appointment.status === 'NO_SHOW' &&
+                  appointment.date === today &&
+                  (appointment.queueStatus === 'BOOKED' || appointment.queueStatus === 'CANCELLED');
                 const phase = arrivalPhase({
                   appointmentDate: appointment.date,
                   startTime: appointment.startTime,
@@ -217,7 +248,19 @@ export function AppointmentsPanel({
                   nowTime: clock.time,
                 });
                 const late = phase === 'late' || phase === 'no_show_eligible';
-                const deskBusy = checkingIn !== null || checkingOut !== null || markingNoShow !== null || busy;
+                const deskBusy = checkingIn !== null || checkingOut !== null || markingNoShow !== null || reopening !== null || busy;
+                const statusLabel =
+                  appointment.queueStatus === 'CHECKED_OUT'
+                    ? 'Checked out'
+                    : appointment.queueStatus === 'WAITING'
+                      ? 'Waiting'
+                      : appointment.queueStatus === 'SERVING'
+                        ? 'Serving'
+                        : appointment.queueStatus === 'COMPLETED'
+                          ? 'Completed'
+                          : appointment.queueStatus === 'BOOKED'
+                            ? 'Booked'
+                            : appointment.status.replace('_', ' ');
                 return (
                   <li key={appointment.id} className="flex flex-wrap items-center justify-between gap-3 p-4">
                     <div className="min-w-0 space-y-1">
@@ -228,6 +271,9 @@ export function AppointmentsPanel({
                             Token {appointment.queueToken}
                           </Badge>
                         )}
+                        <Badge variant="secondary" className="font-semibold capitalize">
+                          {statusLabel.toLowerCase()}
+                        </Badge>
                         {appointment.slotCapacity > 1 && (
                           <Badge variant="secondary" className="bg-sky-50 font-semibold text-sky-800">
                             Place {appointment.slotNumber} of {appointment.slotCapacity}
@@ -238,9 +284,14 @@ export function AppointmentsPanel({
                             Awaiting payment
                           </Badge>
                         )}
-                        {notYetInQueue && late && (
+                        {arrivalOpen && late && (
                           <Badge variant="secondary" className="bg-amber-50 font-semibold text-amber-900">
                             {phase === 'no_show_eligible' ? 'Past grace' : 'Late'}
+                          </Badge>
+                        )}
+                        {appointment.status === 'NO_SHOW' && (
+                          <Badge variant="secondary" className="bg-rose-50 font-semibold text-rose-900">
+                            No show
                           </Badge>
                         )}
                         {readyToCheckOut && (
@@ -252,102 +303,108 @@ export function AppointmentsPanel({
                       <p className="text-sm text-muted-foreground">
                         {appointment.doctor.name}
                         {appointment.patient.phone ? ` · ${appointment.patient.phone}` : ''}
+                        {appointment.checkedInAt ? ` · checked in ${formatClockTime(appointment.checkedInAt)}` : ''}
+                        {appointment.checkedOutAt ? ` · checked out ${formatClockTime(appointment.checkedOutAt)}` : ''}
                       </p>
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      {notYetInQueue && (
-                        <Button
-                          size="sm"
-                          disabled={deskBusy}
-                          aria-label={`${late ? 'Late arrival' : 'Check in'} ${appointment.patient.name}`}
-                          onClick={() => {
-                            void (async () => {
-                              if (checkingIn) return;
-                              setCheckingIn(appointment.id);
-                              setCheckInError(null);
-                              try {
-                                const result = await queueApi.checkIn(session, appointment.id);
-                                setCheckedInIds((current) => new Set(current).add(appointment.id));
-                                onChanged(actionNotice(late ? 'lateArrival' : 'checkIn', result), 'queue');
-                                list.reload();
-                              } catch (error) {
-                                setCheckInError(errorMessage(error));
-                              } finally {
-                                setCheckingIn(null);
-                              }
-                            })();
-                          }}
-                        >
-                          <LogInIcon aria-hidden /> {checkingIn === appointment.id ? 'Checking in…' : late ? 'Late arrival' : 'Check in'}
-                        </Button>
-                      )}
-                      {notYetInQueue && phase === 'no_show_eligible' && (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={deskBusy}
-                          aria-label={`Mark no show for ${appointment.patient.name}`}
-                          onClick={() => {
-                            void (async () => {
-                              if (markingNoShow) return;
-                              setMarkingNoShow(appointment.id);
+                    {view === 'active' && (
+                      <div className="flex flex-wrap gap-2">
+                        {arrivalOpen && (
+                          <Button
+                            size="sm"
+                            disabled={deskBusy}
+                            aria-label={`${late ? 'Late arrival' : 'Check in'} ${appointment.patient.name}`}
+                            onClick={() => {
+                              void (async () => {
+                                if (checkingIn) return;
+                                setCheckingIn(appointment.id);
+                                setCheckInError(null);
+                                try {
+                                  const result = await queueApi.checkIn(session, appointment.id);
+                                  setCheckedInIds((current) => new Set(current).add(appointment.id));
+                                  onChanged(actionNotice(late ? 'lateArrival' : 'checkIn', result), 'queue');
+                                  list.reload();
+                                } catch (error) {
+                                  setCheckInError(errorMessage(error));
+                                } finally {
+                                  setCheckingIn(null);
+                                }
+                              })();
+                            }}
+                          >
+                            <LogInIcon aria-hidden /> {checkingIn === appointment.id ? 'Checking in…' : late ? 'Late arrival' : 'Check in'}
+                          </Button>
+                        )}
+                        {arrivalOpen && phase === 'no_show_eligible' && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={deskBusy}
+                            aria-label={`Mark no show for ${appointment.patient.name}`}
+                            onClick={() => {
                               setNoShowError(null);
-                              try {
-                                const result = await queueApi.markNoShow(session, appointment.id);
-                                onChanged(actionNotice('noShow', result), 'queue');
-                                list.reload();
-                              } catch (error) {
-                                setNoShowError(errorMessage(error));
-                              } finally {
-                                setMarkingNoShow(null);
-                              }
-                            })();
-                          }}
-                        >
-                          <UserXIcon aria-hidden /> {markingNoShow === appointment.id ? 'Working…' : 'No show'}
-                        </Button>
-                      )}
-                      {appointment.status === 'CONFIRMED' && appointment.date === today && checkedInIds.has(appointment.id) && !readyToCheckOut && (
-                        <Badge variant="secondary" className="font-semibold">
-                          Checked in
-                        </Badge>
-                      )}
-                      {readyToCheckOut && (
-                        <Button
-                          size="sm"
-                          disabled={deskBusy}
-                          aria-label={`Check out ${appointment.patient.name}`}
-                          onClick={() => {
-                            void (async () => {
-                              if (checkingOut || !appointment.queueEntryId) return;
-                              setCheckingOut(appointment.id);
-                              setCheckOutError(null);
-                              try {
-                                const result = await queueApi.checkOut(session, appointment.queueEntryId);
-                                onChanged(actionNotice('checkOut', result), 'queue');
-                                list.reload();
-                              } catch (error) {
-                                setCheckOutError(errorMessage(error));
-                              } finally {
-                                setCheckingOut(null);
-                              }
-                            })();
-                          }}
-                        >
-                          <LogOutIcon aria-hidden /> {checkingOut === appointment.id ? 'Checking out…' : 'Check out'}
-                        </Button>
-                      )}
-                      {appointment.status === 'CONFIRMED' && (
-                        <Button variant="outline" size="sm" onClick={() => { setMoving(appointment); setNewDate(appointment.date); }} aria-label={`Reschedule ${appointment.patient.name}'s appointment`}>
-                          Reschedule
-                        </Button>
-                      )}
-                      {canCancel && (
-                        <Button variant="outline" size="sm" onClick={() => setCancelling(appointment)} aria-label={`Cancel ${appointment.patient.name}'s appointment`}>
-                          Cancel
-                        </Button>
-                      )}
-                    </div>
+                              setDialogError(null);
+                              setConfirmNoShow(appointment);
+                            }}
+                          >
+                            <UserXIcon aria-hidden /> No show
+                          </Button>
+                        )}
+                        {canReopen && (
+                          <Button
+                            size="sm"
+                            disabled={deskBusy}
+                            aria-label={`Reopen and late check-in ${appointment.patient.name}`}
+                            onClick={() => {
+                              setDialogError(null);
+                              setConfirmReopen(appointment);
+                            }}
+                          >
+                            <LogInIcon aria-hidden /> {reopening === appointment.id ? 'Working…' : 'Reopen & late check-in'}
+                          </Button>
+                        )}
+                        {appointment.status === 'CONFIRMED' && appointment.date === today && checkedInIds.has(appointment.id) && !readyToCheckOut && (
+                          <Badge variant="secondary" className="font-semibold">
+                            Checked in
+                          </Badge>
+                        )}
+                        {readyToCheckOut && (
+                          <Button
+                            size="sm"
+                            disabled={deskBusy}
+                            aria-label={`Check out ${appointment.patient.name}`}
+                            onClick={() => {
+                              void (async () => {
+                                if (checkingOut || !appointment.queueEntryId) return;
+                                setCheckingOut(appointment.id);
+                                setCheckOutError(null);
+                                try {
+                                  const result = await queueApi.checkOut(session, appointment.queueEntryId);
+                                  onChanged(actionNotice('checkOut', result), 'queue');
+                                  list.reload();
+                                } catch (error) {
+                                  setCheckOutError(errorMessage(error));
+                                } finally {
+                                  setCheckingOut(null);
+                                }
+                              })();
+                            }}
+                          >
+                            <LogOutIcon aria-hidden /> {checkingOut === appointment.id ? 'Checking out…' : 'Check out'}
+                          </Button>
+                        )}
+                        {canReschedule && (
+                          <Button variant="outline" size="sm" onClick={() => { setMoving(appointment); setNewDate(appointment.date); }} aria-label={`Reschedule ${appointment.patient.name}'s appointment`}>
+                            Reschedule
+                          </Button>
+                        )}
+                        {canCancel && (
+                          <Button variant="outline" size="sm" onClick={() => setCancelling(appointment)} aria-label={`Cancel ${appointment.patient.name}'s appointment`}>
+                            Cancel
+                          </Button>
+                        )}
+                      </div>
+                    )}
                   </li>
                 );
               })}
@@ -355,6 +412,78 @@ export function AppointmentsPanel({
           </section>
         ))}
       </CardContent>
+
+      <ConfirmDialog
+        open={confirmNoShow !== null}
+        title="Mark this patient as no show?"
+        description={
+          confirmNoShow &&
+          `${confirmNoShow.patient.name}${confirmNoShow.queueToken != null ? ` · token ${confirmNoShow.queueToken}` : ''} · ${formatTimeRange(confirmNoShow.startTime, confirmNoShow.endTime)}. They leave the active queue; history is kept.`
+        }
+        confirmLabel="Mark no show"
+        cancelLabel="Keep appointment"
+        busy={markingNoShow !== null}
+        error={dialogError}
+        onClose={() => {
+          if (markingNoShow) return;
+          setConfirmNoShow(null);
+          setDialogError(null);
+        }}
+        onConfirm={() => {
+          if (!confirmNoShow) return;
+          void (async () => {
+            setMarkingNoShow(confirmNoShow.id);
+            setDialogError(null);
+            setNoShowError(null);
+            try {
+              const result = await queueApi.markNoShow(session, confirmNoShow.id);
+              setConfirmNoShow(null);
+              onChanged(actionNotice('noShow', result), 'queue');
+              list.reload();
+            } catch (error) {
+              setDialogError(errorMessage(error));
+            } finally {
+              setMarkingNoShow(null);
+            }
+          })();
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmReopen !== null}
+        title="Reopen and late check-in?"
+        description={
+          confirmReopen &&
+          `${confirmReopen.patient.name}${confirmReopen.queueToken != null ? ` · token ${confirmReopen.queueToken}` : ''}. Restores the same appointment and token to the waiting queue.`
+        }
+        confirmLabel="Reopen & late check-in"
+        cancelLabel="Cancel"
+        busy={reopening !== null}
+        error={dialogError}
+        onClose={() => {
+          if (reopening) return;
+          setConfirmReopen(null);
+          setDialogError(null);
+        }}
+        onConfirm={() => {
+          if (!confirmReopen) return;
+          void (async () => {
+            setReopening(confirmReopen.id);
+            setDialogError(null);
+            try {
+              const result = await queueApi.reopenLateCheckIn(session, confirmReopen.id);
+              setConfirmReopen(null);
+              setCheckedInIds((current) => new Set(current).add(confirmReopen.id));
+              onChanged(actionNotice('reopenLateCheckIn', result), 'queue');
+              list.reload();
+            } catch (error) {
+              setDialogError(errorMessage(error));
+            } finally {
+              setReopening(null);
+            }
+          })();
+        }}
+      />
 
       <ConfirmDialog
         open={cancelling !== null}

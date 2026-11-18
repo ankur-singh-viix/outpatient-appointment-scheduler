@@ -2,7 +2,7 @@
 
 import { CalendarCheckIcon, ClockIcon, MapPinIcon } from 'lucide-react';
 import Link from 'next/link';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { RequireRole } from '@/components/require-role';
 import { Alert, EmptyState, Spinner, StatusBadge } from '@/components/common';
 import { PaymentChip } from '@/components/payment-info';
@@ -17,8 +17,12 @@ import { ChooseNewTime } from './choose-new-time';
 import { RemoveAllCancelled, RemoveFromHistory } from './remove-from-history';
 import { formatDate, formatFee, formatTimeRange, relativeDay } from '@/lib/format';
 import { useClinicToday, useQuery } from '@/lib/hooks';
+import { queueApi } from '@/lib/queue-client';
+import { appointmentQueueSummary } from '@/lib/queue-view';
 import { cn } from '@/lib/utils';
-import type { PatientAppointment, PaymentsConfig, Session } from '@/lib/types';
+import type { MyQueueEntry, PatientAppointment, PaymentsConfig, Session } from '@/lib/types';
+import { Freshness, TokenBadge } from '../queue/queue-ui';
+import { useQueuePolling } from '../queue/use-queue-polling';
 
 export function MyAppointments() {
   return (
@@ -40,6 +44,21 @@ function AppointmentList({ session }: { session: Session }) {
     api<PatientAppointment[]>('/appointments/mine', { token: session.accessToken }),
   );
   const config = useQuery('payments-config', () => api<PaymentsConfig>('/payments/config'));
+  // Live queue for today's visits only (own entries). Polls faster while waiting/serving.
+  const queue = useQueuePolling<MyQueueEntry[]>(
+    `appointments-queue-mine:${session.user.id}`,
+    () => queueApi.mine(session),
+    (latest) => {
+      if (!latest || latest.length === 0) return 60_000;
+      const live = latest.some((entry) => entry.status === 'WAITING' || entry.status === 'SERVING');
+      return live ? 8_000 : 30_000;
+    },
+  );
+  const queueByAppointment = useMemo(() => {
+    const map = new Map<string, MyQueueEntry>();
+    for (const entry of queue.data ?? []) map.set(entry.appointmentId, entry);
+    return map;
+  }, [queue.data]);
 
   // Keep showing the list while it refreshes after a cancellation.
   const data = appointments.data ?? appointments.previous;
@@ -76,6 +95,9 @@ function AppointmentList({ session }: { session: Session }) {
   return (
     <div className="space-y-4">
       {notice && <Alert tone="success">{notice}</Alert>}
+      {queue.data && (
+        <Freshness updatedAt={queue.updatedAt} stale={queue.stale} error={queue.error} onRetry={() => void queue.refresh()} />
+      )}
       <Tabs defaultValue="upcoming" className="gap-6">
         <TabsList variant="line" className="w-full justify-start border-b">
           <TabsTrigger value="upcoming" className="flex-none px-4">
@@ -91,17 +113,21 @@ function AppointmentList({ session }: { session: Session }) {
             today={today}
             session={session}
             policy={config.data ?? null}
+            queueByAppointment={queueByAppointment}
             onCancelled={() => {
               setNotice('Appointment cancelled. The slot is now free for other patients.');
               appointments.reload();
+              void queue.refresh();
             }}
             onPaid={() => {
               setNotice('Payment received. Your appointment is confirmed.');
               appointments.reload();
+              void queue.refresh();
             }}
             onMoved={() => {
               setNotice('Your appointment has been moved to the new time. Your booking and any payment came with it.');
               appointments.reload();
+              void queue.refresh();
             }}
             empty={
               <EmptyState title="No upcoming appointments" icon={CalendarCheckIcon}>
@@ -129,6 +155,7 @@ function AppointmentList({ session }: { session: Session }) {
             items={past}
             today={today}
             session={session}
+            queueByAppointment={queueByAppointment}
             onRemoved={(message) => {
               setNotice(message);
               appointments.reload();
@@ -146,6 +173,7 @@ function AppointmentGroup({
   today,
   session,
   policy = null,
+  queueByAppointment,
   onCancelled,
   onPaid,
   onMoved,
@@ -156,6 +184,7 @@ function AppointmentGroup({
   today: string | null;
   session: Session;
   policy?: PaymentsConfig | null;
+  queueByAppointment: Map<string, MyQueueEntry>;
   onCancelled?: () => void;
   onPaid?: () => void;
   onMoved?: () => void;
@@ -171,7 +200,17 @@ function AppointmentGroup({
           className="animate-in fade-in-0 slide-in-from-bottom-1 duration-300 fill-mode-backwards"
           style={{ animationDelay: `${Math.min(index, 5) * 40}ms` }}
         >
-          <AppointmentCard appointment={a} today={today} session={session} policy={policy} onCancelled={onCancelled} onPaid={onPaid} onMoved={onMoved} onRemoved={onRemoved} />
+          <AppointmentCard
+            appointment={a}
+            today={today}
+            session={session}
+            policy={policy}
+            queueEntry={queueByAppointment.get(a.id) ?? null}
+            onCancelled={onCancelled}
+            onPaid={onPaid}
+            onMoved={onMoved}
+            onRemoved={onRemoved}
+          />
         </li>
       ))}
     </ul>
@@ -183,6 +222,7 @@ function AppointmentCard({
   today,
   session,
   policy,
+  queueEntry,
   onCancelled,
   onPaid,
   onMoved,
@@ -191,7 +231,8 @@ function AppointmentCard({
   appointment: PatientAppointment;
   today: string | null;
   session: Session;
-  policy: PaymentsConfig | null;
+  policy?: PaymentsConfig | null;
+  queueEntry: MyQueueEntry | null;
   onCancelled?: () => void;
   onPaid?: () => void;
   onMoved?: () => void;
@@ -203,6 +244,9 @@ function AppointmentCard({
   const [error, setError] = useState<string | null>(null);
   const when = isActive(a) ? relativeDay(a.date, today) : null;
   const cancelled = a.status === 'CANCELLED';
+  // Prefer the booking token from the appointment; fall back to the live queue row (same number).
+  const token = a.queueToken ?? queueEntry?.token ?? null;
+  const queueSummary = appointmentQueueSummary({ status: a.status, queueToken: token }, queueEntry);
   // The buttons only appear on confirmed upcoming appointments (the server also refuses changes to anything else).
   // A booking still waiting for payment has its own Pay / Cancel buttons instead.
   const changeable = Boolean(onCancelled) && a.status === 'CONFIRMED';
@@ -243,11 +287,6 @@ function AppointmentCard({
                   {when}
                 </Badge>
               )}
-              {a.queueToken != null && (
-                <Badge variant="secondary" className="bg-emerald-50 font-semibold tabular-nums text-emerald-900" aria-label={`Queue token ${a.queueToken}`}>
-                  Token {a.queueToken}
-                </Badge>
-              )}
             </p>
             <p className="text-sm text-foreground/80">
               {a.doctor.name} · {a.doctor.specialty}
@@ -267,6 +306,35 @@ function AppointmentCard({
           </div>
           <StatusBadge status={a.status} />
         </div>
+
+        {token != null && queueSummary && (
+          <div
+            className="flex flex-col gap-4 rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 sm:flex-row sm:items-center sm:gap-6"
+            aria-label={`Queue token ${token}`}
+          >
+            <div className="flex shrink-0 flex-col items-center gap-1 sm:items-start">
+              <p className="text-xs font-semibold tracking-[0.2em] text-emerald-900 uppercase">Token</p>
+              <TokenBadge token={token} size="xl" className="bg-emerald-700 shadow-sm" />
+            </div>
+            <div className="min-w-0 flex-1 space-y-2" aria-live="polite">
+              <p className="text-sm font-semibold text-emerald-950">{queueSummary.statusLabel}</p>
+              {queueSummary.showLivePosition && (
+                <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+                  {queueSummary.positionOrdinal && (
+                    <p className="text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
+                      {queueSummary.positionOrdinal}
+                      <span className="ml-2 text-sm font-medium text-muted-foreground">in queue</span>
+                    </p>
+                  )}
+                  {queueSummary.aheadLabel && (
+                    <p className="text-base font-medium text-foreground/80">{queueSummary.aheadLabel}</p>
+                  )}
+                </div>
+              )}
+              <p className="text-sm text-emerald-950/90">{queueSummary.headline}</p>
+            </div>
+          </div>
+        )}
 
         {a.status === 'PENDING' && a.holdExpiresAt && onCancelled && (
           <PaymentStep appointment={a} session={session} onPaid={() => onPaid?.()} onCancelled={onCancelled} onExpired={onCancelled} />

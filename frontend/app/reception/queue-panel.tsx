@@ -1,8 +1,9 @@
 'use client';
 
-import { CheckIcon, LogInIcon, LogOutIcon, RotateCcwIcon, SkipForwardIcon, UserXIcon } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { ArchiveIcon, CheckIcon, EyeIcon, LogInIcon, LogOutIcon, RotateCcwIcon, SkipForwardIcon, UserXIcon } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { Alert, EmptyState } from '@/components/common';
+import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -12,7 +13,19 @@ import { api, errorMessage } from '@/lib/api';
 import { clinicClock, clinicToday, formatTimeRange, timeAgo } from '@/lib/format';
 import { useNow } from '@/lib/hooks';
 import { queueApi } from '@/lib/queue-client';
-import { ARRIVAL_GRACE_MINUTES, actionNotice, arrivalPhase, buildDesk, entryActions, receptionCheckInDetail, wasLateCheckIn, type ArrivalRow, type DeskDoctor, type QueueAction } from '@/lib/queue-view';
+import {
+  ARRIVAL_GRACE_MINUTES,
+  actionNotice,
+  arrivalPhase,
+  buildDesk,
+  canReopenLateCheckIn,
+  entryActions,
+  receptionCheckInDetail,
+  wasLateCheckIn,
+  type ArrivalRow,
+  type DeskDoctor,
+  type QueueAction,
+} from '@/lib/queue-view';
 import type { QueueEntryResult, QueueEntryView, ReceptionAppointment, ReceptionBoard, ReceptionDoctor, Session } from '@/lib/types';
 import { useQueuePolling } from '../queue/use-queue-polling';
 import { Freshness, QueueStatusPill, TokenBadge } from '../queue/queue-ui';
@@ -25,6 +38,23 @@ interface Desk {
 const selectClass =
   'h-10 rounded-lg border border-input bg-card px-3 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50';
 
+const archiveKey = (userId: string) => `reception-queue-hidden:${userId}`;
+
+function readHidden(userId: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(archiveKey(userId));
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? new Set(parsed.filter((id): id is string => typeof id === 'string')) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function writeHidden(userId: string, ids: Set<string>) {
+  localStorage.setItem(archiveKey(userId), JSON.stringify([...ids]));
+}
+
 /**
  * The front desk's queue: for each doctor who assigned this receptionist, who is being seen, who is waiting, who has finished or been
  * skipped, and who is still to arrive. Tokens are issued at booking; check-in / late arrival reuse them. Skip, manual no-show (after
@@ -34,6 +64,8 @@ export function QueuePanel({ session, doctors = [], refreshKey = 0 }: { session:
   const [date, setDate] = useState('');
   const [doctorId, setDoctorId] = useState('');
   const [slotTime, setSlotTime] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => new Set());
   const boardDate = date || undefined;
   const desk = useQueuePolling<Desk>(
     `queue-desk:${session.user.id}:${refreshKey}:${boardDate ?? 'today'}:${doctorId || 'all'}`,
@@ -49,6 +81,25 @@ export function QueuePanel({ session, doctors = [], refreshKey = 0 }: { session:
   );
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
+  const [confirmNoShow, setConfirmNoShow] = useState<{ appointmentId: string; name: string; token: number | null } | null>(null);
+  const [confirmReopen, setConfirmReopen] = useState<{ appointmentId: string; name: string; token: number } | null>(null);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setHiddenIds(readHidden(session.user.id));
+  }, [session.user.id]);
+
+  const hideFromDashboard = (appointmentId: string, entry: QueueEntryView) => {
+    setHiddenIds((current) => {
+      const next = new Set(current).add(appointmentId);
+      writeHidden(session.user.id, next);
+      return next;
+    });
+    setNotice({
+      tone: 'success',
+      text: `Hidden ${entry.patient.name} (token ${entry.token}) from the dashboard. History is unchanged.`,
+    });
+  };
 
   const act = async (key: string, action: QueueAction, run: () => Promise<QueueEntryResult>) => {
     if (busy) return;
@@ -127,11 +178,13 @@ export function QueuePanel({ session, doctors = [], refreshKey = 0 }: { session:
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
         Tokens are issued when the appointment is booked. <span className="font-medium text-foreground">Check in</span> (or{' '}
-        <span className="font-medium text-foreground">Late arrival</span> after the start — including after the {ARRIVAL_GRACE_MINUTES}
-        -minute grace) reuses that token and puts them in the doctor&apos;s waiting list. After the grace you may also mark{' '}
-        <span className="font-medium text-foreground">No show</span> (separate action; never automatic). Use{' '}
-        <span className="font-medium text-foreground">Skip</span> for someone already in the queue who is not available. After the
-        consultation, mark them completed, then <span className="font-medium text-foreground">Check out</span>.
+        <span className="font-medium text-foreground">Late arrival</span> after the start — including 30+ minutes late) reuses that
+        token and adds them at the <span className="font-medium text-foreground">end</span> of the waiting list. After the{' '}
+        {ARRIVAL_GRACE_MINUTES}-minute grace you may also mark <span className="font-medium text-foreground">No show</span>{' '}
+        (never automatic). Use <span className="font-medium text-foreground">Skip</span> for someone already in the queue who is not
+        available; Return keeps the same token at the end of the line. After the consultation,{' '}
+        <span className="font-medium text-foreground">Check out</span>. Checked-out and no-show history can be hidden here without
+        deleting records.
       </p>
       <div className="flex flex-wrap items-end gap-3 rounded-xl border bg-card p-4">
         <div className="space-y-2">
@@ -166,6 +219,10 @@ export function QueuePanel({ session, doctors = [], refreshKey = 0 }: { session:
             ))}
           </select>
         </div>
+        <Button type="button" variant="outline" className="h-10" onClick={() => setShowArchived((value) => !value)}>
+          {showArchived ? <EyeIcon aria-hidden /> : <ArchiveIcon aria-hidden />}
+          {showArchived ? 'Hide archived' : 'Show archived'}
+        </Button>
         {(date || doctorId || slotTime) && (
           <Button
             type="button"
@@ -189,13 +246,120 @@ export function QueuePanel({ session, doctors = [], refreshKey = 0 }: { session:
         </EmptyState>
       )}
       {filtered.map((doctor) => (
-        <DoctorDesk key={doctor.doctor.id} entry={doctor} busy={busy} act={act} session={session} />
+        <DoctorDesk
+          key={doctor.doctor.id}
+          entry={doctor}
+          busy={busy}
+          act={act}
+          session={session}
+          showArchived={showArchived}
+          hiddenIds={hiddenIds}
+          onHide={hideFromDashboard}
+          onRequestNoShow={(item) => {
+            setConfirmError(null);
+            setConfirmNoShow({ appointmentId: item.appointmentId, name: item.patientName, token: item.token });
+          }}
+          onRequestReopen={(item) => {
+            setConfirmError(null);
+            setConfirmReopen({ appointmentId: item.appointmentId, name: item.patient.name, token: item.token });
+          }}
+        />
       ))}
+
+      <ConfirmDialog
+        open={confirmNoShow !== null}
+        title="Mark this patient as no show?"
+        description={
+          confirmNoShow &&
+          `${confirmNoShow.name}${confirmNoShow.token != null ? ` · token ${confirmNoShow.token}` : ''}. They leave the active queue; the appointment and token stay in history.`
+        }
+        confirmLabel="Mark no show"
+        cancelLabel="Keep appointment"
+        busy={busy !== null}
+        error={confirmError}
+        onClose={() => {
+          if (busy) return;
+          setConfirmNoShow(null);
+          setConfirmError(null);
+        }}
+        onConfirm={() => {
+          if (!confirmNoShow) return;
+          void (async () => {
+            setBusy(confirmNoShow.appointmentId);
+            setConfirmError(null);
+            try {
+              const result = await queueApi.markNoShow(session, confirmNoShow.appointmentId);
+              setNotice({ tone: 'success', text: actionNotice('noShow', result) });
+              setConfirmNoShow(null);
+              await desk.refresh();
+            } catch (error) {
+              setConfirmError(errorMessage(error));
+            } finally {
+              setBusy(null);
+            }
+          })();
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmReopen !== null}
+        title="Reopen and late check-in?"
+        description={
+          confirmReopen &&
+          `${confirmReopen.name} · token ${confirmReopen.token}. Restores the same appointment and token to the waiting queue.`
+        }
+        confirmLabel="Reopen & late check-in"
+        cancelLabel="Cancel"
+        busy={busy !== null}
+        error={confirmError}
+        onClose={() => {
+          if (busy) return;
+          setConfirmReopen(null);
+          setConfirmError(null);
+        }}
+        onConfirm={() => {
+          if (!confirmReopen) return;
+          void (async () => {
+            setBusy(confirmReopen.appointmentId);
+            setConfirmError(null);
+            try {
+              const result = await queueApi.reopenLateCheckIn(session, confirmReopen.appointmentId);
+              setNotice({ tone: 'success', text: actionNotice('reopenLateCheckIn', result) });
+              setConfirmReopen(null);
+              await desk.refresh();
+            } catch (error) {
+              setConfirmError(errorMessage(error));
+            } finally {
+              setBusy(null);
+            }
+          })();
+        }}
+      />
     </div>
   );
 }
 
-function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: string | null; act: (key: string, action: QueueAction, run: () => Promise<QueueEntryResult>) => Promise<void>; session: Session }) {
+function DoctorDesk({
+  entry,
+  busy,
+  act,
+  session,
+  showArchived,
+  hiddenIds,
+  onHide,
+  onRequestNoShow,
+  onRequestReopen,
+}: {
+  entry: DeskDoctor;
+  busy: string | null;
+  act: (key: string, action: QueueAction, run: () => Promise<QueueEntryResult>) => Promise<void>;
+  session: Session;
+  showArchived: boolean;
+  hiddenIds: Set<string>;
+  onHide: (appointmentId: string, entry: QueueEntryView) => void;
+  onRequestNoShow: (item: ArrivalRow) => void;
+  onRequestReopen: (item: QueueEntryView) => void;
+}) {
   const { doctor, day, arrivals, awaitingPayment } = entry;
   const now = useNow(10_000);
   const run = (action: QueueAction, id: string) => {
@@ -204,7 +368,14 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
     if (action === 'return') return () => queueApi.returnToQueue(session, id);
     return () => queueApi.checkOut(session, id);
   };
-  const row = (item: QueueEntryView, detail?: string) => {
+  const visible = (appointmentId: string) => showArchived || !hiddenIds.has(appointmentId);
+  const checkedOut = day.checkedOut.filter((item) => visible(item.appointmentId));
+  const cancelled = day.cancelled.filter((item) => visible(item.appointmentId));
+  const archivedCount =
+    day.checkedOut.filter((item) => hiddenIds.has(item.appointmentId)).length +
+    day.cancelled.filter((item) => hiddenIds.has(item.appointmentId)).length;
+
+  const row = (item: QueueEntryView, detail?: string, opts?: { archiveable?: boolean }) => {
     const late =
       item.checkedInAt != null &&
       wasLateCheckIn({ appointmentDate: day.date, startTime: item.appointment.startTime, checkedInAt: item.checkedInAt });
@@ -233,10 +404,28 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
         </div>
         <QueueStatusPill status={item.status} />
         {entryActions('RECEPTIONIST', item.status).map((action) => (
-          <Button key={action} size="sm" variant={action === 'checkOut' || action === 'complete' ? 'default' : 'outline'} disabled={busy !== null} aria-label={`${ACTION_LABEL[action]}: token ${item.token}, ${item.patient.name}`} onClick={() => void act(item.id, action, run(action, item.id))}>
+          <Button
+            key={action}
+            size="sm"
+            variant={action === 'checkOut' || action === 'complete' ? 'default' : 'outline'}
+            disabled={busy !== null}
+            aria-label={`${ACTION_LABEL[action]}: token ${item.token}, ${item.patient.name}`}
+            onClick={() => void act(item.id, action, run(action, item.id))}
+          >
             {ACTION_ICON[action]} {busy === item.id ? 'Working…' : ACTION_LABEL[action]}
           </Button>
         ))}
+        {opts?.archiveable && (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy !== null}
+            aria-label={`Hide ${item.patient.name} from dashboard`}
+            onClick={() => onHide(item.appointmentId, item)}
+          >
+            <ArchiveIcon aria-hidden /> Hide
+          </Button>
+        )}
       </li>
     );
   };
@@ -280,9 +469,9 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
                 variant="outline"
                 disabled={busy !== null}
                 aria-label={`Mark no show for ${item.patientName}`}
-                onClick={() => void act(item.appointmentId, 'noShow', () => queueApi.markNoShow(session, item.appointmentId))}
+                onClick={() => onRequestNoShow(item)}
               >
-                <UserXIcon aria-hidden /> {busy === item.appointmentId ? 'Working…' : 'No show'}
+                <UserXIcon aria-hidden /> No show
               </Button>
             )}
           </div>
@@ -306,6 +495,7 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
           </span>
           <span className="text-muted-foreground">{day.counts.waiting} waiting</span>
           <span className="text-muted-foreground">{day.counts.completed + day.counts.checkedOut} done</span>
+          {!showArchived && archivedCount > 0 && <span className="text-muted-foreground">{archivedCount} archived</span>}
         </div>
       </div>
 
@@ -318,7 +508,6 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
         {awaitingPayment.map((item) => arrival(item, false))}
       </Group>
       {day.completed.length > 0 && <Group title={`Completed — check out (${day.completed.length})`}>{day.completed.map((item) => row(item))}</Group>}
-      {day.checkedOut.length > 0 && <Group title={`Checked out (${day.checkedOut.length})`}>{day.checkedOut.map((item) => row(item))}</Group>}
       {day.skipped.length > 0 && (
         <Group title={`Skipped (${day.skipped.length})`}>
           {day.skipped.map((item) => {
@@ -340,8 +529,23 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
                   </Button>
                 ))}
                 {phase === 'no_show_eligible' && (
-                  <Button size="sm" variant="outline" disabled={busy !== null} aria-label={`Mark no show for ${item.patient.name}`} onClick={() => void act(item.appointmentId, 'noShow', () => queueApi.markNoShow(session, item.appointmentId))}>
-                    <UserXIcon aria-hidden /> {busy === item.appointmentId ? 'Working…' : 'No show'}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busy !== null}
+                    aria-label={`Mark no show for ${item.patient.name}`}
+                    onClick={() =>
+                      onRequestNoShow({
+                        appointmentId: item.appointmentId,
+                        patientName: item.patient.name,
+                        phone: item.patient.phone ?? null,
+                        startTime: item.appointment.startTime,
+                        endTime: item.appointment.endTime,
+                        token: item.token,
+                      })
+                    }
+                  >
+                    <UserXIcon aria-hidden /> No show
                   </Button>
                 )}
               </li>
@@ -349,8 +553,34 @@ function DoctorDesk({ entry, busy, act, session }: { entry: DeskDoctor; busy: st
           })}
         </Group>
       )}
-      {day.cancelled.length > 0 && (
-        <p className="border-t px-4 py-2 text-xs text-muted-foreground">{day.cancelled.length} cancelled or no-show (token kept, not reused)</p>
+      {checkedOut.length > 0 && (
+        <Group title={`Checked out (${checkedOut.length})`}>{checkedOut.map((item) => row(item, undefined, { archiveable: true }))}</Group>
+      )}
+      {cancelled.length > 0 && (
+        <Group title={`No show / cancelled (${cancelled.length})`}>
+          {cancelled.map((item) => (
+            <li key={item.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
+              <TokenBadge token={item.token} />
+              <div className="min-w-0 flex-1">
+                <p className="font-medium text-foreground">{item.patient.name}</p>
+                <p className="text-xs text-muted-foreground">
+                  {formatTimeRange(item.appointment.startTime, item.appointment.endTime, true)}
+                  {item.appointmentStatus === 'NO_SHOW' ? ' · no show' : ' · cancelled'}
+                  {' · token kept'}
+                </p>
+              </div>
+              <QueueStatusPill status={item.status} />
+              {canReopenLateCheckIn(item) && (
+                <Button size="sm" disabled={busy !== null} aria-label={`Reopen and late check-in ${item.patient.name}`} onClick={() => onRequestReopen(item)}>
+                  <LogInIcon aria-hidden /> Reopen & late check-in
+                </Button>
+              )}
+              <Button size="sm" variant="ghost" disabled={busy !== null} aria-label={`Hide ${item.patient.name} from dashboard`} onClick={() => onHide(item.appointmentId, item)}>
+                <ArchiveIcon aria-hidden /> Hide
+              </Button>
+            </li>
+          ))}
+        </Group>
       )}
     </section>
   );
@@ -364,6 +594,8 @@ const ACTION_LABEL: Record<QueueAction, string> = {
   return: 'Return to queue',
   complete: 'Complete',
   noShow: 'No show',
+  reopenLateCheckIn: 'Reopen & late check-in',
+  archive: 'Hide',
 };
 const ACTION_ICON: Partial<Record<QueueAction, React.ReactNode>> = {
   complete: <CheckIcon aria-hidden />,
@@ -372,6 +604,8 @@ const ACTION_ICON: Partial<Record<QueueAction, React.ReactNode>> = {
   return: <RotateCcwIcon aria-hidden />,
   noShow: <UserXIcon aria-hidden />,
   lateArrival: <LogInIcon aria-hidden />,
+  reopenLateCheckIn: <LogInIcon aria-hidden />,
+  archive: <ArchiveIcon aria-hidden />,
 };
 
 function Group({ title, empty, children }: { title: string; empty?: string; children: React.ReactNode }) {

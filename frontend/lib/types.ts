@@ -371,6 +371,10 @@ export interface ReceptionAppointment {
   queueEntryId: string | null;
   /** Live queue status for this visit; COMPLETED means ready for front-desk check-out. */
   queueStatus: QueueStatus | null;
+  /** Server check-in time when present (ISO). */
+  checkedInAt?: string | null;
+  /** Server check-out time when present (ISO). */
+  checkedOutAt?: string | null;
   patient: { id: string; name: string; phone: string | null };
   doctor: { id: string; name: string };
 }
@@ -610,6 +614,8 @@ export interface QueueEntryView {
   appointmentId: string;
   token: number;
   status: QueueStatus;
+  /** Appointment lifecycle status (CONFIRMED, NO_SHOW, …) for desk actions such as reopen. */
+  appointmentStatus?: AppointmentStatus | string;
   appointment: { startTime: string; endTime: string };
   /** Phone is for the front desk; patients never receive other patients' details. */
   patient: { name: string; phone?: string | null };
@@ -639,7 +645,7 @@ export interface QueueDay {
   serving: QueueEntryView | null;
   /** Confirmed bookings with a token who have not checked in yet. */
   booked?: QueueEntryView[];
-  /** In token order: the order they will be called in. */
+  /** Waiting call order: earliest check-in first (late arrivals join the end); token breaks ties. */
   waiting: QueueEntryView[];
   completed: QueueEntryView[];
   checkedOut: QueueEntryView[];
