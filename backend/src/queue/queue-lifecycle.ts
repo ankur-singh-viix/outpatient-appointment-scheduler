@@ -8,11 +8,11 @@ import type { QueueEventName, QueueStatus } from '../database/entities/queue-ent
  *   WAITING      -> SERVING (the doctor calls the patient), SKIPPED (not here), CANCELLED
  *   SERVING      -> COMPLETED (the doctor finishes), SKIPPED (called but absent), CANCELLED
  *   COMPLETED    -> CHECKED_OUT (the receptionist checks the patient out)
- *   SKIPPED      -> WAITING (the receptionist returns the patient to the queue, keeping their token)
+ *   SKIPPED      -> WAITING (return to queue), CANCELLED (manual no-show at the desk)
  *   CHECKED_OUT, CANCELLED -> nothing: they are final
  *
- * CANCELLED is only ever written when a cancelled appointment would otherwise block the queue (a patient being "served" whose
- * appointment was cancelled). Everywhere else a cancelled appointment is recognised from the appointment's own status.
+ * CANCELLED is written when a cancelled or no-show appointment must leave the active queue (including a patient being "served"
+ * whose appointment was cancelled). Elsewhere a cancelled appointment is still recognised from the appointment's own status.
  */
 export const QUEUE_TRANSITIONS: Record<QueueStatus, readonly QueueStatus[]> = {
   BOOKED: ['WAITING', 'CANCELLED'],
@@ -20,7 +20,7 @@ export const QUEUE_TRANSITIONS: Record<QueueStatus, readonly QueueStatus[]> = {
   SERVING: ['COMPLETED', 'SKIPPED', 'CANCELLED'],
   COMPLETED: ['CHECKED_OUT'],
   CHECKED_OUT: [],
-  SKIPPED: ['WAITING'],
+  SKIPPED: ['WAITING', 'CANCELLED'],
   CANCELLED: [],
 };
 

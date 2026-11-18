@@ -611,11 +611,17 @@ export class DoctorPortalService {
   private async queueTokensFor(appointmentIds: string[]): Promise<Map<string, number>> {
     const tokens = new Map<string, number>();
     if (appointmentIds.length === 0) return tokens;
-    const rows: { appointment_id: string; token_number: number }[] = await this.dataSource.query(
-      'SELECT appointment_id, token_number FROM queue_entries WHERE appointment_id = ANY($1::uuid[])',
-      [appointmentIds],
-    );
-    for (const row of rows) tokens.set(row.appointment_id, Number(row.token_number));
+    try {
+      const rows: { appointment_id: string; token_number: number }[] = await this.dataSource.query(
+        'SELECT appointment_id, token_number FROM queue_entries WHERE appointment_id = ANY($1::uuid[])',
+        [appointmentIds],
+      );
+      for (const row of rows) tokens.set(row.appointment_id, Number(row.token_number));
+    } catch (error) {
+      // Before migration 015 the queue table is absent: doctor appointments still list; tokens stay null.
+      const code = (error as { code?: unknown; driverError?: { code?: unknown } }).code ?? (error as { driverError?: { code?: unknown } }).driverError?.code;
+      if (code !== '42P01') throw error;
+    }
     return tokens;
   }
 }
