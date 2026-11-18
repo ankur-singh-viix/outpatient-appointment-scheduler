@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import { Geist } from "next/font/google";
 import type { ReactNode } from "react";
 import { Suspense } from "react";
+import { CareAssistantLauncher } from "@/components/care-assistant-launcher";
 import { ClerkAuthBridge } from "@/components/clerk-auth-bridge";
 import { Sidebar } from "@/components/sidebar";
 import { SiteHeader, SiteHeaderFallback } from "@/components/site-header";
@@ -41,6 +42,7 @@ function Shell({ children }: { children: ReactNode }) {
           <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:py-8">{children}</div>
         </main>
       </div>
+      <CareAssistantLauncher />
       <footer className="border-t bg-card py-6 text-center text-xs text-muted-foreground">
         <p className="font-medium text-foreground/80">CareSlot</p>
         <p className="mt-1">Outpatient appointment scheduling · demo environment, not for real medical use</p>
