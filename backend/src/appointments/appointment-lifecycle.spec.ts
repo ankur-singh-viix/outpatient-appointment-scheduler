@@ -1,5 +1,5 @@
-import { APPOINTMENT_TRANSITIONS, assertTransition, canTransition } from './appointment-lifecycle.js';
 import { APPOINTMENT_STATUSES, type AppointmentStatus } from '../database/entities/appointment.entity.js';
+import { APPOINTMENT_TRANSITIONS, assertTransition, canTransition, QUEUE_STATUSES_BLOCKING_AUTO_COMPLETE } from './appointment-lifecycle.js';
 
 describe('appointment lifecycle', () => {
   it('has an entry for every status, and the final ones lead nowhere', () => {
@@ -32,5 +32,10 @@ describe('appointment lifecycle', () => {
     expect(() => assertTransition('COMPLETED', 'CANCELLED')).toThrow('This appointment is completed and cannot become cancelled.');
     expect(() => assertTransition('NO_SHOW', 'COMPLETED')).toThrow('This appointment is no show and cannot become completed.');
     expect(() => assertTransition('PENDING', 'CONFIRMED')).not.toThrow();
+  });
+
+  it('blocks auto-complete for BOOKED so late arrival stays available after grace', () => {
+    expect(QUEUE_STATUSES_BLOCKING_AUTO_COMPLETE).toContain('BOOKED');
+    expect(QUEUE_STATUSES_BLOCKING_AUTO_COMPLETE).toEqual(['BOOKED', 'WAITING', 'SERVING', 'SKIPPED']);
   });
 });

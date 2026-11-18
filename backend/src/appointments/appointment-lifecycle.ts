@@ -38,35 +38,73 @@ export function assertTransition(from: AppointmentStatus, to: AppointmentStatus)
 const COMPLETE_BATCH = 500;
 
 /**
+ * Queue statuses that mean the visit is still open for the front desk / doctor today. A BOOKED token must stay CONFIRMED so
+ * Late Arrival can run after the slot and grace end — even when later tokens have already checked in. Never auto-complete these.
+ */
+export const QUEUE_STATUSES_BLOCKING_AUTO_COMPLETE = ['BOOKED', 'WAITING', 'SERVING', 'SKIPPED'] as const;
+
+/**
  * Marks CONFIRMED appointments whose end time has passed as COMPLETED, in the clinic's time zone. Nothing else is touched:
  * CANCELLED and NO_SHOW are final, an unpaid PENDING hold is released by its own job, and payments, refunds and the appointment's
- * history are not read or written. Repeating it changes nothing (a COMPLETED appointment is no longer CONFIRMED). Rows are taken
- * with SKIP LOCKED, so one being cancelled at this moment is left for the next pass instead of making this wait.
- * Returns how many were completed.
+ * history are not read or written. Repeating it changes nothing (a COMPLETED appointment is no longer CONFIRMED).
+ *
+ * Never auto-completes (or auto no-shows) a visit that still has a live queue place today (BOOKED / WAITING / SERVING / SKIPPED).
+ * The receptionist marks no-show; the doctor (or desk) completes the consultation. Entries from earlier days no longer hold anyone back.
+ *
+ * Selection runs once in a MATERIALIZED CTE with FOR UPDATE SKIP LOCKED. A plain `UPDATE … WHERE id IN (SELECT … FOR UPDATE
+ * LIMIT)` can re-execute the subquery per outer row in Postgres and incorrectly complete rows the NOT EXISTS guard should protect
+ * (e.g. Ankur still BOOKED while Rahul has already checked in).
  */
 export async function completeFinishedAppointments(dataSource: DataSource, now: Date, timeZone: string): Promise<number> {
   const clock = clinicNow(timeZone, now);
   let total = 0;
-  // A patient who is checked in and still waiting or being served today is not "finished", however late the clinic is running: the
-  // queue completes their appointment when the doctor completes the consultation. Entries from earlier days no longer hold anyone back.
   // Before migration 015 there is no queue table, and the original statement runs unchanged.
   let respectQueue = true;
+  const live = QUEUE_STATUSES_BLOCKING_AUTO_COMPLETE.map((status) => `'${status}'`).join(', ');
   for (;;) {
-    const guard = respectQueue
-      ? `AND NOT EXISTS (SELECT 1 FROM queue_entries q WHERE q.appointment_id = appointments.id AND q.status IN ('WAITING', 'SERVING') AND q.queue_date >= $1::date)`
-      : '';
     let result: unknown;
     try {
-      result = await dataSource.query(
-        `UPDATE appointments SET status = 'COMPLETED', updated_at = now()
-          WHERE id IN (SELECT id FROM appointments
-                        WHERE status = 'CONFIRMED' AND (appointment_date < $1::date OR (appointment_date = $1::date AND end_time <= $2::time)) ${guard}
-                        ORDER BY appointment_date, id LIMIT $3
-                          FOR UPDATE SKIP LOCKED)
-            AND status = 'CONFIRMED'
-          RETURNING id`,
-        [clock.date, clock.time, COMPLETE_BATCH],
-      );
+      result = respectQueue
+        ? await dataSource.query(
+            `WITH due AS MATERIALIZED (
+               SELECT a.id
+                 FROM appointments a
+                WHERE a.status = 'CONFIRMED'
+                  AND (a.appointment_date < $1::date OR (a.appointment_date = $1::date AND a.end_time <= $2::time))
+                  AND NOT EXISTS (
+                        SELECT 1 FROM queue_entries q
+                         WHERE q.appointment_id = a.id
+                           AND q.status IN (${live})
+                           AND q.queue_date >= $1::date
+                      )
+                ORDER BY a.appointment_date, a.id
+                LIMIT $3
+                  FOR UPDATE OF a SKIP LOCKED
+             )
+             UPDATE appointments AS target
+                SET status = 'COMPLETED', updated_at = now()
+               FROM due
+              WHERE target.id = due.id AND target.status = 'CONFIRMED'
+           RETURNING target.id`,
+            [clock.date, clock.time, COMPLETE_BATCH],
+          )
+        : await dataSource.query(
+            `WITH due AS MATERIALIZED (
+               SELECT a.id
+                 FROM appointments a
+                WHERE a.status = 'CONFIRMED'
+                  AND (a.appointment_date < $1::date OR (a.appointment_date = $1::date AND a.end_time <= $2::time))
+                ORDER BY a.appointment_date, a.id
+                LIMIT $3
+                  FOR UPDATE OF a SKIP LOCKED
+             )
+             UPDATE appointments AS target
+                SET status = 'COMPLETED', updated_at = now()
+               FROM due
+              WHERE target.id = due.id AND target.status = 'CONFIRMED'
+           RETURNING target.id`,
+            [clock.date, clock.time, COMPLETE_BATCH],
+          );
     } catch (error) {
       const code = (error as { code?: unknown; driverError?: { code?: unknown } }).code ?? (error as { driverError?: { code?: unknown } }).driverError?.code;
       if (respectQueue && code === '42P01') {

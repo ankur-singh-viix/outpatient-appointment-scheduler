@@ -63,7 +63,8 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
               ['tell patients when new times open up', () => this.scheduleChanges.recover()],
             ] as const)
           : []),
-        // Appointments whose time has passed become COMPLETED (never CANCELLED or NO_SHOW), so past visits sit under Past everywhere.
+        // Slot-ended CONFIRMED visits with no live queue place today become COMPLETED (never CANCELLED or NO_SHOW). BOOKED / waiting /
+        // serving / skipped entries for today are left alone so late arrival and manual no-show stay available.
         // One bounded statement, repeatable and safe on two servers at once; it runs on the first pass and then every 2 minutes.
         ...(pass % 4 === 0 ? ([['complete finished appointments', () => completeFinishedAppointments(this.dataSource, new Date(), loadConfig().clinicTimezone)]] as const) : []),
       ] as const) {

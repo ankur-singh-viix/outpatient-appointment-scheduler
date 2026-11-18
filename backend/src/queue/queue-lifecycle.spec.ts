@@ -19,6 +19,7 @@ describe('queue lifecycle', () => {
       ['SERVING', 'CANCELLED'],
       ['COMPLETED', 'CHECKED_OUT'],
       ['SKIPPED', 'WAITING'],
+      ['SKIPPED', 'CANCELLED'],
     ];
     for (const from of QUEUE_STATUSES) {
       for (const to of QUEUE_STATUSES) {
