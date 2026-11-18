@@ -62,6 +62,7 @@ describe('Queue management (e2e)', () => {
 
   const checkIn = (apptId: string, token = tokens.reception1) => http().post(`/api/queue/reception/appointments/${apptId}/check-in`).set(as(token)).send({});
   const markNoShow = (apptId: string, token = tokens.reception1) => http().post(`/api/queue/reception/appointments/${apptId}/no-show`).set(as(token)).send({});
+  const reopenLate = (apptId: string, token = tokens.reception1) => http().post(`/api/queue/reception/appointments/${apptId}/reopen-late-check-in`).set(as(token)).send({});
   const checkOut = (entryId: string, token = tokens.reception1) => http().post(`/api/queue/reception/entries/${entryId}/check-out`).set(as(token)).send({});
   const shiftTime = (time: string, minutes: number) => {
     const [hours, mins] = time.split(':').map(Number);
@@ -210,7 +211,8 @@ describe('Queue management (e2e)', () => {
       expect([a.token, b.token, c.token]).toEqual([3, 1, 2]);
       expect(a).toMatchObject({ appointmentId: third, status: 'WAITING', queueDate: today, doctor: { name: 'Dr. Alpha' }, patient: { name: 'Patient 3' } });
       expect(a.checkedInAt).toBeTruthy();
-      expect((await doctorQueue().expect(200)).body.waiting.map((entry: { token: number }) => entry.token)).toEqual([1, 2, 3]);
+      // Waiting order follows check-in time (third, first, second), not token number.
+      expect((await doctorQueue().expect(200)).body.waiting.map((entry: { token: number }) => entry.token)).toEqual([3, 1, 2]);
       const after = await rows<{ token_number: number; status: string; checked_in_at: Date | null; checked_in_by_user_id: string }>(
         'SELECT token_number, status, checked_in_at, checked_in_by_user_id FROM queue_entries ORDER BY token_number',
       );
@@ -293,7 +295,7 @@ describe('Queue management (e2e)', () => {
         ['PAYMENT_PENDING', 'waiting for payment', 'PENDING'],
         ['NOT_ELIGIBLE', 'cancelled', 'CANCELLED'],
         ['NOT_ELIGIBLE', 'completed', 'COMPLETED'],
-        ['NOT_ELIGIBLE', 'no show', 'NO_SHOW'],
+        ['NO_SHOW', 'no show', 'NO_SHOW'],
         ['NOT_TODAY', 'not today', 'CONFIRMED', addDays(today, 1)],
         ['NOT_TODAY', 'earlier day', 'CONFIRMED', addDays(today, -1)],
       ];
@@ -331,16 +333,16 @@ describe('Queue management (e2e)', () => {
   });
 
   describe('calling and completing (the doctor)', () => {
-    it('calls the lowest token next, one patient at a time', async () => {
+    it('calls the earliest check-in next, one patient at a time (tokens stay booking-time numbers)', async () => {
       const ids = [await appt({ patient: 0 }), await appt({ patient: 1 }), await appt({ patient: 2 })];
-      await arrive(ids[1]);
+      const firstArrived = await arrive(ids[1]); // token 2 checks in first
       await arrive(ids[2]);
-      const firstToken = await arrive(ids[0]); // token 1 was issued at booking for ids[0]
+      await arrive(ids[0]); // token 1 checks in last — must not jump the line
       const called = (await callNext().expect(200)).body;
-      expect(called).toMatchObject({ id: firstToken, token: 1, status: 'SERVING', ahead: 0, behind: 2, currentlyServingToken: 1 });
+      expect(called).toMatchObject({ id: firstArrived, token: 2, status: 'SERVING', ahead: 0, behind: 2, currentlyServingToken: 2 });
       const again = await callNext().expect(409);
-      expect(again.body).toMatchObject({ code: 'CURRENT_NOT_COMPLETED', token: 1 });
-      expect(await rows("SELECT token_number FROM queue_entries WHERE status = 'SERVING'")).toEqual([{ token_number: 1 }]);
+      expect(again.body).toMatchObject({ code: 'CURRENT_NOT_COMPLETED', token: 2 });
+      expect(await rows("SELECT token_number FROM queue_entries WHERE status = 'SERVING'")).toEqual([{ token_number: 2 }]);
     });
 
     it('five doctors\' calls at the same moment serve exactly one patient', async () => {
@@ -541,23 +543,44 @@ describe('Queue management (e2e)', () => {
       expect(await apptStatus(rahul)).toBe('CONFIRMED');
       expect(await rows<{ id: string }>("SELECT id FROM appointments WHERE status = 'COMPLETED' AND id = ANY($1::uuid[])", [[ankur, rahul]])).toEqual([]);
 
-      // Receptionist Late Arrival anytime before manual No Show / cancel: original token 3 → WAITING, visible to the doctor.
+      // Receptionist Late Arrival anytime before manual No Show / cancel: original token 3 → WAITING at the END (Rahul already waiting).
       const late = (await checkIn(ankur).expect(200)).body;
       expect(late).toMatchObject({ status: 'WAITING', token: 3, appointmentId: ankur });
       expect(await entryOf(ankur)).toMatchObject({ status: 'WAITING', token_number: 3 });
       expect(await apptStatus(ankur)).toBe('CONFIRMED');
 
       const doctor = (await doctorQueue().expect(200)).body;
-      expect(doctor.waiting.map((row: { appointmentId: string; token: number }) => [row.token, row.appointmentId]).sort((a: [number, string], b: [number, string]) => a[0] - b[0])).toEqual([
-        [3, ankur],
+      // Call order is check-in time, not token: Rahul (4) checked in first, Ankur (3) late joins the end.
+      expect(doctor.waiting.map((row: { appointmentId: string; token: number }) => [row.token, row.appointmentId])).toEqual([
         [4, rahul],
+        [3, ankur],
       ]);
       expect(doctor.counts.waiting).toBe(2);
+      expect(late.ahead).toBe(1); // Rahul (and not serving) ahead of late Ankur
 
       // Desk still lists Ankur as an arrival until check-in (already waiting) — board booked is empty for him; waiting has him.
       const desk = (await board().expect(200)).body.doctors.find((row: { doctor: { id: string } }) => row.doctor.id === doctorA);
       expect((desk.booked ?? []).some((row: { appointmentId: string }) => row.appointmentId === ankur)).toBe(false);
-      expect(desk.waiting.some((row: { appointmentId: string; token: number }) => row.appointmentId === ankur && row.token === 3)).toBe(true);
+      expect(desk.waiting.map((row: { appointmentId: string; token: number }) => [row.token, row.appointmentId])).toEqual([
+        [4, rahul],
+        [3, ankur],
+      ]);
+    });
+
+    it('late arrival after 30+ minutes joins the end of the waiting queue with the original token', async () => {
+      const first = await appt({ patient: 0 });
+      const late = await appt({ patient: 1 });
+      expect(await entryOf(first)).toMatchObject({ token_number: 1 });
+      expect(await entryOf(late)).toMatchObject({ token_number: 2 });
+      await db.query("UPDATE appointments SET start_time = '00:00'::time, end_time = '00:05'::time WHERE id = $1", [late]);
+      await checkIn(first).expect(200);
+      const arrived = (await checkIn(late).expect(200)).body;
+      expect(arrived).toMatchObject({ status: 'WAITING', token: 2, appointmentId: late });
+      expect(arrived.ahead).toBe(1);
+      const desk = (await board().expect(200)).body.doctors.find((row: { doctor: { id: string } }) => row.doctor.id === doctorA);
+      expect(desk.waiting.map((row: { token: number }) => row.token)).toEqual([1, 2]);
+      const called = (await callNext().expect(200)).body;
+      expect(called.token).toBe(1); // first check-in is called first, not the lower late token jumping ahead
     });
 
     it('marks a never-arrived patient no-show after grace, leaves history, and clears the active queue', async () => {
@@ -578,7 +601,64 @@ describe('Queue management (e2e)', () => {
       expect(boardDay.cancelled.some((row: { appointmentId: string }) => row.appointmentId === id)).toBe(true);
       expect(boardDay.counts.cancelled).toBeGreaterThanOrEqual(1);
       await markNoShow(id).expect(409);
-      await checkIn(id).expect(409); // no-show is final; late arrival no longer applies
+      expect((await checkIn(id).expect(409)).body.code).toBe('NO_SHOW'); // plain late arrival refused; reopen is required
+    });
+
+    it('reopens a manual no-show for late check-in with the same token, and refuses cancelled / completed visits', async () => {
+      const id = await appt({ patient: 0 });
+      const tokenBefore = (await entryOf(id)).token_number;
+      const clock = clinicNow(TIME_ZONE);
+      await setStart(id, shiftTime(clock.time, -20));
+      await markNoShow(id).expect(200);
+      expect(await apptStatus(id)).toBe('NO_SHOW');
+
+      const reopened = (await reopenLate(id).expect(200)).body;
+      expect(reopened).toMatchObject({ status: 'WAITING', token: tokenBefore, appointmentId: id });
+      expect(await apptStatus(id)).toBe('CONFIRMED');
+      expect(await entryOf(id)).toMatchObject({ status: 'WAITING', token_number: tokenBefore });
+      expect((await doctorQueue().expect(200)).body.waiting.some((row: { appointmentId: string; token: number }) => row.appointmentId === id && row.token === tokenBefore)).toBe(true);
+
+      // Cancelled appointments cannot reopen.
+      const cancelled = await appt({ patient: 1 });
+      await cancelAppt(cancelled);
+      expect((await reopenLate(cancelled).expect(409)).body.code).toBe('NOT_ELIGIBLE');
+
+      // Real completed consultations cannot reopen (finish the reopened patient first so call-next targets the new visit).
+      await callNext().expect(200);
+      await complete((await entryOf(id)).id).expect(200);
+      const done = await appt({ patient: 2 });
+      const doneEntry = await arrive(done);
+      await callNext().expect(200);
+      await complete(doneEntry).expect(200);
+      expect(await apptStatus(done)).toBe('COMPLETED');
+      expect((await reopenLate(done).expect(409)).body.code).toBe('NOT_ELIGIBLE');
+    });
+
+    it('Token 3 past grace: mistaken COMPLETED+BOOKED can still Late Arrival or No Show without a new token', async () => {
+      await appt({ patient: 0 });
+      await appt({ patient: 1 });
+      const ankur = await appt({ patient: 2 });
+      expect(await entryOf(ankur)).toMatchObject({ status: 'BOOKED', token_number: 3 });
+      await db.query("UPDATE appointments SET start_time = '00:00'::time, end_time = '00:05'::time WHERE id = $1", [ankur]);
+      // Simulate the historical auto-complete bug: appointment COMPLETED while queue stayed BOOKED.
+      await db.query("UPDATE appointments SET status = 'COMPLETED' WHERE id = $1", [ankur]);
+      expect(await apptStatus(ankur)).toBe('COMPLETED');
+      expect(await entryOf(ankur)).toMatchObject({ status: 'BOOKED', token_number: 3 });
+
+      const late = (await checkIn(ankur).expect(200)).body;
+      expect(late).toMatchObject({ status: 'WAITING', token: 3, appointmentId: ankur });
+      expect(await apptStatus(ankur)).toBe('CONFIRMED');
+      expect(await entryOf(ankur)).toMatchObject({ status: 'WAITING', token_number: 3 });
+
+      // Same stuck state can take the No Show path instead of late arrival (distinct slot so restore does not collide).
+      const stuck = await appt({ patient: 3 });
+      expect(await entryOf(stuck)).toMatchObject({ token_number: 4 });
+      await db.query("UPDATE appointments SET start_time = '00:20'::time, end_time = '00:25'::time, status = 'COMPLETED' WHERE id = $1", [stuck]);
+      await db.query("UPDATE queue_entries SET status = 'BOOKED', checked_in_at = NULL, checked_in_by_user_id = NULL WHERE appointment_id = $1", [stuck]);
+      const noShow = (await markNoShow(stuck).expect(200)).body;
+      expect(noShow.status).toBe('CANCELLED');
+      expect(await apptStatus(stuck)).toBe('NO_SHOW');
+      expect(await entryOf(stuck)).toMatchObject({ status: 'BOOKED', token_number: 4 });
     });
   });
 
@@ -646,14 +726,21 @@ describe('Queue management (e2e)', () => {
       await skipDoctor(entryA, tokens.doctorB).expect(404);
     });
 
-    it('only the receptionist returns a skipped patient, who keeps their token and is called in token order again', async () => {
+    it('only the receptionist returns a skipped patient, who keeps their token and joins the end of the wait line', async () => {
       const entryA = await arrive(await appt({ patient: 0 }));
       await arrive(await appt({ patient: 1 }));
       await arrive(await appt({ patient: 2 }));
       await skipDesk(entryA).expect(200);
       await returnDesk(entryA, tokens.doctorA).expect(403);
       const back = (await returnDesk(entryA).expect(200)).body;
-      expect(back).toMatchObject({ status: 'WAITING', token: 1, ahead: 0, behind: 2 });
+      // Same token 1, but a fresh check-in time puts them behind the people already waiting.
+      expect(back).toMatchObject({ status: 'WAITING', token: 1, ahead: 2, behind: 0 });
+      const second = (await callNext().expect(200)).body;
+      expect(second).toMatchObject({ token: 2 });
+      await complete(second.id).expect(200);
+      const third = (await callNext().expect(200)).body;
+      expect(third).toMatchObject({ token: 3 });
+      await complete(third.id).expect(200);
       expect((await callNext().expect(200)).body).toMatchObject({ id: entryA, token: 1 });
       expect(await rows('SELECT called_by_user_id FROM queue_entries WHERE id = $1', [entryA])).toEqual([{ called_by_user_id: doctorUserA }]);
     });
@@ -754,6 +841,7 @@ describe('Queue management (e2e)', () => {
         ['GET', '/api/queue/reception', ['doctorA', 'admin']],
         ['POST', `/api/queue/reception/appointments/${id}/check-in`, ['doctorA', 'admin']],
         ['POST', `/api/queue/reception/appointments/${id}/no-show`, ['doctorA', 'admin']],
+        ['POST', `/api/queue/reception/appointments/${id}/reopen-late-check-in`, ['doctorA', 'admin']],
         ['POST', `/api/queue/reception/entries/${entry}/check-out`, ['doctorA', 'admin']],
         ['POST', `/api/queue/reception/entries/${entry}/skip`, ['doctorA', 'admin']],
         ['POST', `/api/queue/reception/entries/${entry}/return`, ['doctorA', 'admin']],

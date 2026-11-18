@@ -62,6 +62,17 @@ export class QueueController {
     return this.queue.markNoShow(user, params.id);
   }
 
+  /**
+   * After a manual no-show, if the patient arrives later the same day: reopen the appointment and late-check them in with the
+   * original token. Refused for cancelled, completed, or checked-out visits.
+   */
+  @Post('reception/appointments/:id/reopen-late-check-in')
+  @HttpCode(200)
+  @Roles('RECEPTIONIST')
+  reopenLateCheckIn(@CurrentUser() user: AuthUser, @Param(new ZodValidationPipe(idParam)) params: z.infer<typeof idParam>, @Body(new ZodValidationPipe(noBody)) _body: z.infer<typeof noBody>) {
+    return this.queue.reopenLateCheckIn(user, params.id);
+  }
+
   /** Skips a patient who is not there. */
   @Post('reception/entries/:id/skip')
   @HttpCode(200)

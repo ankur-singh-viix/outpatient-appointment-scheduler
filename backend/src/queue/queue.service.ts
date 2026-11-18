@@ -76,6 +76,8 @@ export class QueueService {
    * Checks a patient in for a CONFIRMED appointment on its day, reusing the booking-time token (never allocating a new one).
    * Allowed any time today while the entry is still BOOKED — including after the appointment start and after the arrival grace
    * (late arrival). Grace only gates the separate manual no-show action; this never auto-marks NO_SHOW or COMPLETED.
+   * If a background job incorrectly marked the appointment COMPLETED while the queue row stayed BOOKED (never consulted), restores
+   * CONFIRMED first so Late Arrival / No Show still work.
    */
   async checkIn(user: AuthUser, appointmentId: string) {
     return this.guard(async () => {
@@ -87,13 +89,18 @@ export class QueueService {
         // Doctor first, then the appointment: the order booking uses, so the two can never wait on each other.
         await this.lockDoctor(manager, found.doctorId);
         const appointment = await manager.findOneOrFail(Appointment, { where: { id: appointmentId }, lock: { mode: 'pessimistic_write' } });
-
         if (appointment.status === 'PENDING') throw conflict('PAYMENT_PENDING', 'This booking is still waiting for payment, so the patient cannot be checked in yet.');
+
+        const existing = await manager.findOne(QueueEntry, { where: { appointmentId }, lock: { mode: 'pessimistic_write' } });
+        if (existing) await this.restoreMistakenCompletionIfNeverArrived(manager, appointment, existing, user);
+
+        if (appointment.status === 'NO_SHOW') {
+          throw conflict('NO_SHOW', 'This appointment was marked no show. Use Reopen & Late Check-in if the patient has now arrived.');
+        }
         if (appointment.status !== 'CONFIRMED') throw conflict('NOT_ELIGIBLE', `This appointment is ${appointment.status.replace('_', ' ').toLowerCase()}, so the patient cannot be checked in.`);
         if (appointment.appointmentDate !== today) {
           throw conflict('NOT_TODAY', appointment.appointmentDate > today ? 'This appointment is not today, so the patient cannot be checked in yet.' : 'This appointment was on an earlier day, so the patient cannot be checked in.');
         }
-        const existing = await manager.findOne(QueueEntry, { where: { appointmentId }, lock: { mode: 'pessimistic_write' } });
         if (!existing) {
           throw conflict('TOKEN_MISSING', 'This appointment has no queue token yet. It must be issued when the booking is confirmed.');
         }
@@ -139,6 +146,9 @@ export class QueueService {
         if (!found || !doctorIds.includes(found.doctorId)) throw new NotFoundException('Appointment not found.');
         await this.lockDoctor(manager, found.doctorId);
         const appointment = await manager.findOneOrFail(Appointment, { where: { id: appointmentId }, lock: { mode: 'pessimistic_write' } });
+        const existing = await manager.findOne(QueueEntry, { where: { appointmentId }, lock: { mode: 'pessimistic_write' } });
+        if (!existing) throw conflict('TOKEN_MISSING', 'This appointment has no queue token.');
+        await this.restoreMistakenCompletionIfNeverArrived(manager, appointment, existing, user);
 
         if (appointment.status !== 'CONFIRMED') {
           throw conflict('NOT_ELIGIBLE', `This appointment is ${appointment.status.replace('_', ' ').toLowerCase()}, so it cannot be marked no-show.`);
@@ -162,8 +172,6 @@ export class QueueService {
           );
         }
 
-        const existing = await manager.findOne(QueueEntry, { where: { appointmentId }, lock: { mode: 'pessimistic_write' } });
-        if (!existing) throw conflict('TOKEN_MISSING', 'This appointment has no queue token.');
         if (existing.status !== 'BOOKED' && existing.status !== 'SKIPPED') {
           throw conflict(
             'NOT_ELIGIBLE',
@@ -192,6 +200,69 @@ export class QueueService {
     });
   }
 
+  /**
+   * After a manual no-show, if the patient arrives later the same day: restore CONFIRMED, check them in late with the original
+   * token (BOOKED or CANCELLED queue row → WAITING), and record the change. Refused for cancelled appointments, completed
+   * consultations, and checked-out visits.
+   */
+  async reopenLateCheckIn(user: AuthUser, appointmentId: string) {
+    return this.guard(async () => {
+      const doctorIds = await this.assignedDoctorIds(user);
+      const today = this.today();
+      const entryId = await this.dataSource.transaction(async (manager) => {
+        const found = await manager.findOne(Appointment, { where: { id: appointmentId }, relations: { doctor: true } });
+        if (!found || !doctorIds.includes(found.doctorId)) throw new NotFoundException('Appointment not found.');
+        await this.lockDoctor(manager, found.doctorId);
+        const appointment = await manager.findOneOrFail(Appointment, { where: { id: appointmentId }, lock: { mode: 'pessimistic_write' } });
+        const existing = await manager.findOne(QueueEntry, { where: { appointmentId }, lock: { mode: 'pessimistic_write' } });
+        if (!existing) throw conflict('TOKEN_MISSING', 'This appointment has no queue token.');
+
+        if (appointment.status === 'CANCELLED') {
+          throw conflict('NOT_ELIGIBLE', 'This appointment was cancelled and cannot be reopened for check-in.');
+        }
+        if (existing.status === 'COMPLETED' || existing.status === 'CHECKED_OUT' || appointment.status === 'COMPLETED') {
+          throw conflict('NOT_ELIGIBLE', 'This consultation is already completed or checked out and cannot be reopened for late check-in.');
+        }
+        if (appointment.status !== 'NO_SHOW') {
+          throw conflict('NOT_ELIGIBLE', 'Only a manually marked no-show can be reopened for late check-in.');
+        }
+        if (appointment.appointmentDate !== today) {
+          throw conflict('NOT_TODAY', 'Only today\'s no-show appointments can be reopened for late check-in.');
+        }
+        if (existing.status !== 'BOOKED' && existing.status !== 'CANCELLED') {
+          throw conflict('NOT_ELIGIBLE', `This patient is ${existing.status.replace('_', ' ').toLowerCase()} and cannot be reopened for late check-in.`);
+        }
+
+        assertTransition('NO_SHOW', 'CONFIRMED');
+        appointment.status = 'CONFIRMED';
+        appointment.cancelReason = null;
+        appointment.cancelledAt = null;
+        appointment.cancelledByUserId = null;
+        await manager.save(appointment);
+
+        // Fresh check-in time so reopen joins the end of the waiting line (token unchanged).
+        const checkInPatch = {
+          checkedInAt: new Date(),
+          checkedInByUserId: user.id,
+          skippedAt: null,
+          calledAt: null,
+          calledByUserId: null,
+          completedAt: null,
+          completedByUserId: null,
+          checkedOutAt: null,
+          checkedOutByUserId: null,
+        };
+        await this.move(manager, existing, 'WAITING', user, checkInPatch);
+
+        const position = positionOf(buildDay(await this.dayRows(manager, appointment.doctorId, today)), existing.id);
+        await this.notifications.queueCheckedIn(manager, appointmentId, { entryId: existing.id, token: existing.tokenNumber, ahead: position?.ahead ?? 0 });
+        return existing.id;
+      });
+      this.notifications.kick();
+      return this.describe(entryId);
+    });
+  }
+
   /** Puts a skipped patient back in the queue with the token they had. Only for a patient whose appointment is still confirmed and today's. */
   async returnToQueue(user: AuthUser, entryId: string) {
     return this.guard(async () => {
@@ -205,7 +276,14 @@ export class QueueService {
         if (entry.queueDate !== today) throw conflict('NOT_TODAY', 'Only a patient from today can be returned to the queue.');
         const appointment = await manager.findOneOrFail(Appointment, { where: { id: entry.appointmentId }, lock: { mode: 'pessimistic_write' } });
         if (appointment.status !== 'CONFIRMED') throw conflict('APPOINTMENT_NOT_ACTIVE', `This appointment is ${appointment.status.replace('_', ' ').toLowerCase()}, so the patient cannot be returned to the queue.`);
-        await this.move(manager, entry, 'WAITING', user, { skippedAt: null, calledAt: null, calledByUserId: null });
+        // New check-in instant so Return joins the end of the wait line; original token is kept.
+        await this.move(manager, entry, 'WAITING', user, {
+          skippedAt: null,
+          calledAt: null,
+          calledByUserId: null,
+          checkedInAt: new Date(),
+          checkedInByUserId: user.id,
+        });
       });
       return this.describe(entryId);
     });
@@ -236,7 +314,21 @@ export class QueueService {
     return this.guard(async () => {
       const doctor = await this.doctorOf(user);
       const day = date ?? this.today();
-      return { doctor: { id: doctor.id, name: doctor.name }, ...this.dayView(buildDay(await this.dayRows(this.dataSource.manager, doctor.id, day)), day) };
+      const view = this.dayView(buildDay(await this.dayRows(this.dataSource.manager, doctor.id, day)), day);
+      // Doctors never receive patient phone numbers (front desk only).
+      const scrub = <T extends { patient: { name: string; phone?: string | null } }>(entry: T | null) =>
+        entry ? { ...entry, patient: { name: entry.patient.name } } : null;
+      return {
+        doctor: { id: doctor.id, name: doctor.name },
+        ...view,
+        serving: scrub(view.serving),
+        booked: view.booked.map((entry) => scrub(entry)!),
+        waiting: view.waiting.map((entry) => scrub(entry)!),
+        completed: view.completed.map((entry) => scrub(entry)!),
+        checkedOut: view.checkedOut.map((entry) => scrub(entry)!),
+        skipped: view.skipped.map((entry) => scrub(entry)!),
+        cancelled: view.cancelled.map((entry) => scrub(entry)!),
+      };
     });
   }
 
@@ -258,10 +350,11 @@ export class QueueService {
           await this.move(manager, current, 'CANCELLED', user, {}); // its appointment was cancelled: it must not block the queue
           cleared = true;
         }
+        // Earliest check-in first so late arrivals (and returns/reopens) never cut ahead of people already waiting.
         const [next]: { id: string }[] = await manager.query(
           `SELECT q.id FROM queue_entries q JOIN appointments a ON a.id = q.appointment_id
             WHERE q.doctor_id = $1 AND q.queue_date = $2 AND q.status = 'WAITING' AND a.status = 'CONFIRMED'
-            ORDER BY q.token_number LIMIT 1 FOR UPDATE OF q`,
+            ORDER BY q.checked_in_at ASC NULLS LAST, q.token_number ASC LIMIT 1 FOR UPDATE OF q`,
           [doctor.id, today],
         );
         if (!next) return { kind: 'empty' as const, cleared };
@@ -456,6 +549,37 @@ export class QueueService {
     return entry;
   }
 
+  /**
+   * Repairs a visit that background auto-complete wrongly marked COMPLETED while the queue token stayed BOOKED (never checked in,
+   * never consulted). Restores CONFIRMED so Late Arrival and manual No Show can proceed with the original token. Does not reopen
+   * real completed consultations (queue already COMPLETED / CHECKED_OUT / checked in).
+   */
+  private async restoreMistakenCompletionIfNeverArrived(
+    manager: EntityManager,
+    appointment: Appointment,
+    entry: QueueEntry,
+    _actor: AuthUser,
+  ): Promise<void> {
+    if (appointment.status !== 'COMPLETED') return;
+    if (entry.status !== 'BOOKED' || entry.checkedInAt != null || entry.completedAt != null) {
+      throw conflict('NOT_ELIGIBLE', 'This appointment is completed, so the patient cannot be checked in or marked no-show.');
+    }
+    // Appointment-only repair: queue row never left BOOKED, so there is no status transition to audit here.
+    appointment.status = 'CONFIRMED';
+    try {
+      await manager.save(appointment);
+    } catch (error) {
+      const code = (error as { code?: unknown; driverError?: { code?: unknown } }).code ?? (error as { driverError?: { code?: unknown } }).driverError?.code;
+      if (code === '23505') {
+        throw conflict(
+          'SLOT_TAKEN',
+          'This visit was marked completed earlier and its original slot is now taken by another booking. Reschedule the patient, then check them in with their existing token.',
+        );
+      }
+      throw error;
+    }
+  }
+
   /** One checked, recorded change of status. */
   private async move(manager: EntityManager, entry: QueueEntry, to: QueueStatus, actor: AuthUser, patch: Partial<QueueEntry>): Promise<void> {
     const from = entry.status;
@@ -511,6 +635,7 @@ export class QueueService {
       appointmentId: row.appointmentId,
       token: row.token,
       status: row.status,
+      appointmentStatus: row.appointmentStatus,
       appointment: { startTime: row.startTime, endTime: row.endTime },
       patient: { name: row.patientName, phone: row.patientPhone },
       checkedInAt: row.checkedInAt?.toISOString() ?? null,

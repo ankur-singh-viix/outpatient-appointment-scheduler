@@ -9,7 +9,8 @@ import type { QueueEventName, QueueStatus } from '../database/entities/queue-ent
  *   SERVING      -> COMPLETED (the doctor finishes), SKIPPED (called but absent), CANCELLED
  *   COMPLETED    -> CHECKED_OUT (the receptionist checks the patient out)
  *   SKIPPED      -> WAITING (return to queue), CANCELLED (manual no-show at the desk)
- *   CHECKED_OUT, CANCELLED -> nothing: they are final
+ *   CANCELLED    -> WAITING (controlled reopen & late check-in after a manual no-show only)
+ *   CHECKED_OUT  -> nothing: final
  *
  * CANCELLED is written when a cancelled or no-show appointment must leave the active queue (including a patient being "served"
  * whose appointment was cancelled). Elsewhere a cancelled appointment is still recognised from the appointment's own status.
@@ -21,7 +22,7 @@ export const QUEUE_TRANSITIONS: Record<QueueStatus, readonly QueueStatus[]> = {
   COMPLETED: ['CHECKED_OUT'],
   CHECKED_OUT: [],
   SKIPPED: ['WAITING', 'CANCELLED'],
-  CANCELLED: [],
+  CANCELLED: ['WAITING'],
 };
 
 /** The patients still to be seen or being seen. BOOKED means token reserved but not yet at the clinic. */
@@ -56,7 +57,7 @@ export function assertQueueTransition(from: QueueStatus, to: QueueStatus): void 
 /** The audit event name for a move. */
 export function eventFor(from: QueueStatus | null, to: QueueStatus): QueueEventName {
   if (from === null && to === 'BOOKED') return 'BOOKED';
-  if (from === null || (from === 'BOOKED' && to === 'WAITING')) return 'CHECKED_IN';
+  if (from === null || (from === 'BOOKED' && to === 'WAITING') || (from === 'CANCELLED' && to === 'WAITING')) return 'CHECKED_IN';
   if (to === 'SERVING') return 'CALLED';
   if (to === 'COMPLETED') return 'COMPLETED';
   if (to === 'CHECKED_OUT') return 'CHECKED_OUT';

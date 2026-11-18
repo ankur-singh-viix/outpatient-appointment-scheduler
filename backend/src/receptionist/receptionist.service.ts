@@ -67,38 +67,49 @@ export class ReceptionistService {
   }
 
   /**
-   * Appointments for the doctors who assigned this receptionist: active bookings (pending/confirmed) on one date or from today on,
-   * plus completed visits still waiting for front-desk check-out (queue status COMPLETED). Checked-out rows stay in history and
-   * are not listed here again.
+   * Appointments for the doctors who assigned this receptionist.
+   * - active (default): pending/confirmed, ready-to-checkout COMPLETED queue rows, stuck COMPLETED+BOOKED, today's reopenable NO_SHOW.
+   * - history: checked-out, no-show, cancelled and completed records for the date filter (never deleted).
    */
-  async listAppointments(user: AuthUser, query: { date?: string; doctorId?: string }) {
+  async listAppointments(user: AuthUser, query: { date?: string; doctorId?: string; view?: 'active' | 'history' }) {
     const doctorIds = await this.assignedDoctorIds(user);
     if (doctorIds.length === 0) return [];
     const today = clinicNow(this.config.clinicTimezone).date;
-    const params: unknown[] = [doctorIds, ACTIVE_STATUSES, query.date ?? today];
-    const onDate = query.date ? 'a.appointment_date = $3::date' : 'a.appointment_date >= $3::date';
+    const view = query.view ?? 'active';
+    const params: unknown[] = [doctorIds, query.date ?? today];
+    const onDate = query.date ? 'a.appointment_date = $2::date' : 'a.appointment_date >= $2::date';
+    const historyFilter = `
+           a.status IN ('CANCELLED', 'NO_SHOW', 'COMPLETED')
+           OR q.status IN ('CHECKED_OUT', 'COMPLETED')`;
+    const activeFilter = `
+           a.status::text = ANY($3::text[])
+           OR (a.status = 'COMPLETED' AND q.status = 'COMPLETED')
+           OR (a.status = 'COMPLETED' AND q.status = 'BOOKED' AND q.checked_in_at IS NULL)
+           OR (a.status = 'NO_SHOW' AND a.appointment_date = $2::date AND q.status IN ('BOOKED', 'CANCELLED'))`;
+    if (view === 'active') params.push(ACTIVE_STATUSES);
     let sql = `
       SELECT a.id, a.appointment_date::text AS date, a.start_time::text AS start_time, a.end_time::text AS end_time,
              a.status::text AS status, a.slot_number, a.slot_capacity,
              p.id AS patient_id, pu.name AS patient_name, p.phone AS patient_phone,
              d.id AS doctor_id, du.name AS doctor_name,
-             q.id AS queue_entry_id, q.token_number, q.status::text AS queue_status
+             q.id AS queue_entry_id, q.token_number, q.status::text AS queue_status,
+             q.checked_in_at, q.checked_out_at
         FROM appointments a
         JOIN doctors d ON d.id = a.doctor_id JOIN users du ON du.id = d.user_id
         JOIN patients p ON p.id = a.patient_id JOIN users pu ON pu.id = p.user_id
         LEFT JOIN queue_entries q ON q.appointment_id = a.id
        WHERE a.doctor_id = ANY($1::uuid[])
          AND ${onDate}
-         AND (
-           a.status::text = ANY($2::text[])
-           OR (a.status = 'COMPLETED' AND q.status = 'COMPLETED')
-         )`;
+         AND (${view === 'history' ? historyFilter : activeFilter})`;
     if (query.doctorId) {
       if (!doctorIds.includes(query.doctorId)) return [];
       params.push(query.doctorId);
       sql += ` AND a.doctor_id = $${params.length}`;
     }
-    sql += ' ORDER BY a.appointment_date ASC, a.start_time ASC, a.slot_number ASC LIMIT 200';
+    sql +=
+      view === 'history'
+        ? ' ORDER BY a.appointment_date DESC, a.start_time DESC, a.slot_number ASC LIMIT 200'
+        : ' ORDER BY a.appointment_date ASC, a.start_time ASC, a.slot_number ASC LIMIT 200';
     const rows: Record<string, unknown>[] = await this.appointments.manager.query(sql, params);
     return rows.map((row) => ({
       id: row.id as string,
@@ -111,6 +122,8 @@ export class ReceptionistService {
       queueToken: row.token_number == null ? null : Number(row.token_number),
       queueEntryId: (row.queue_entry_id as string | null) ?? null,
       queueStatus: (row.queue_status as string | null) ?? null,
+      checkedInAt: row.checked_in_at ? new Date(row.checked_in_at as string | Date).toISOString() : null,
+      checkedOutAt: row.checked_out_at ? new Date(row.checked_out_at as string | Date).toISOString() : null,
       patient: { id: row.patient_id as string, name: row.patient_name as string, phone: (row.patient_phone as string | null) ?? null },
       doctor: { id: row.doctor_id as string, name: row.doctor_name as string },
     }));
