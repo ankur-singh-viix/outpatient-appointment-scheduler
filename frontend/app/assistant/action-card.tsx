@@ -30,6 +30,15 @@ function useSecondsUntil(iso: string, active: boolean): number {
   return Math.max(0, Math.floor((Date.parse(iso) - now) / 1000));
 }
 
+/** Where each doctor card is confirmed. The patient's cards are stored rows, confirmed by reference. */
+const DOCTOR_CONFIRM: Partial<Record<ActionCard['kind'], string>> = {
+  SCHEDULE_CHANGE: '/assistant/schedule-changes/confirm',
+  DOCTOR_CANCEL: '/assistant/doctor-actions/confirm',
+  DOCTOR_RESCHEDULE: '/assistant/doctor-actions/confirm',
+  ADD_HOURS: '/assistant/doctor-actions/confirm',
+  BLOCK_DAY: '/assistant/doctor-actions/confirm',
+};
+
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
 /**
@@ -44,8 +53,9 @@ export function ActionCardView({ card, session, onOutcome }: { card: ActionCard;
   const open = stage.name === 'ready';
   const secondsLeft = useSecondsUntil(card.expiresAt, open);
   const lapsed = open && secondsLeft === 0;
-  /** A doctor's schedule change: confirmed with its signed token, and safe to ask again (the server answers a repeat; it never re-runs it). */
-  const isSchedule = card.kind === 'SCHEDULE_CHANGE';
+  /** A doctor's card: confirmed with its signed token, and safe to ask again (the server answers a repeat; it never re-runs it). */
+  const doctorPath = DOCTOR_CONFIRM[card.kind];
+  const isSchedule = doctorPath !== undefined;
 
   const finish = (next: Stage, say?: string) => {
     setStage(next);
@@ -58,7 +68,7 @@ export function ActionCardView({ card, session, onOutcome }: { card: ActionCard;
     setStage({ name: 'working', what: 'confirm' });
     try {
       if (isSchedule) {
-        const done = await api<{ message: string }>('/assistant/schedule-changes/confirm', { method: 'POST', token: session.accessToken, body: { token: card.ref } });
+        const done = await api<{ message: string }>(doctorPath, { method: 'POST', token: session.accessToken, body: { token: card.ref } });
         finish({ name: 'done', message: done.message }, done.message);
         return;
       }
