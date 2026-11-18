@@ -1,0 +1,443 @@
+import { ConflictException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { DataSource, EntityManager } from 'typeorm';
+import { assertTransition } from '../appointments/appointment-lifecycle.js';
+import type { AuthUser } from '../auth/auth.types.js';
+import { loadConfig } from '../config.js';
+import { Appointment, Doctor, Patient, QueueEntry, QueueEvent, ReceptionistAssignment, type QueueStatus } from '../database/entities/index.js';
+import { clinicNow } from '../scheduling/calendar.js';
+import { hhmm } from '../scheduling/slots.js';
+import { assertQueueTransition, eventFor } from './queue-lifecycle.js';
+import { buildDay, positionOf, type Day, type DayRow } from './queue-position.js';
+
+/** True when a query failed because a table does not exist (the database has not been migrated to 015 yet). */
+export function isMissingQueueTable(error: unknown): boolean {
+  const e = (error as { code?: unknown; driverError?: { code?: unknown } } | null) ?? {};
+  return e.code === '42P01' || e.driverError?.code === '42P01';
+}
+
+/** One entry of a doctor's day, with what the screens need. No phone number, no medical information. */
+interface QueueRow extends DayRow {
+  appointmentId: string;
+  doctorId: string;
+  doctorName: string;
+  queueDate: string;
+  startTime: string;
+  endTime: string;
+  patientName: string;
+  checkedInAt: Date;
+  calledAt: Date | null;
+  completedAt: Date | null;
+  checkedOutAt: Date | null;
+  updatedAt: Date;
+}
+
+const conflict = (code: string, message: string, extra: Record<string, unknown> = {}) => new ConflictException({ statusCode: 409, error: 'Conflict', code, message, ...extra });
+
+/**
+ * The queue: doctor-wise tokens, check-in and checkout by the receptionist, calling and completing by the doctor.
+ *
+ *  - A token belongs to one doctor and one day. It is the next number in that doctor's queue for that clinic-local day, taken while
+ *    the doctor's row is locked (the same lock bookings take, in the same order: doctor, then appointment), and the database refuses
+ *    a repeated token as well as a second entry for the same appointment and a second patient being served at once.
+ *  - The appointment keeps its own status. A cancelled appointment is recognised from that status (never copied here), so the
+ *    existing cancel and reschedule code needs no knowledge of the queue. When the doctor completes a consultation the appointment
+ *    becomes COMPLETED through the transition the appointment lifecycle already allows.
+ *  - Positions are worked out from the real entries on every request, never from stored counts.
+ *  - Every change is written to queue_events with who made it.
+ */
+@Injectable()
+export class QueueService {
+  private readonly config = loadConfig();
+
+  constructor(private readonly dataSource: DataSource) {}
+
+  // ---- Receptionist ----
+
+  /** Checks a patient in for a CONFIRMED appointment on its day, giving them the next token in that doctor's queue. */
+  async checkIn(user: AuthUser, appointmentId: string) {
+    return this.guard(async () => {
+      const clinicIds = await this.clinicIds(user);
+      const today = this.today();
+      const entryId = await this.dataSource.transaction(async (manager) => {
+        const found = await manager.findOne(Appointment, { where: { id: appointmentId }, relations: { doctor: true } });
+        if (!found || !clinicIds.includes(found.doctor.clinicId)) throw new NotFoundException('Appointment not found.');
+        // Doctor first, then the appointment: the order booking uses, so the two can never wait on each other.
+        await this.lockDoctor(manager, found.doctorId);
+        const appointment = await manager.findOneOrFail(Appointment, { where: { id: appointmentId }, lock: { mode: 'pessimistic_write' } });
+
+        if (appointment.status === 'PENDING') throw conflict('PAYMENT_PENDING', 'This booking is still waiting for payment, so the patient cannot be checked in yet.');
+        if (appointment.status !== 'CONFIRMED') throw conflict('NOT_ELIGIBLE', `This appointment is ${appointment.status.replace('_', ' ').toLowerCase()}, so the patient cannot be checked in.`);
+        if (appointment.appointmentDate !== today) {
+          throw conflict('NOT_TODAY', appointment.appointmentDate > today ? 'This appointment is not today, so the patient cannot be checked in yet.' : 'This appointment was on an earlier day, so the patient cannot be checked in.');
+        }
+        const existing = await manager.findOneBy(QueueEntry, { appointmentId });
+        if (existing) throw conflict('ALREADY_CHECKED_IN', `This patient is already checked in with token ${existing.tokenNumber}.`, { token: existing.tokenNumber });
+
+        const [{ next }]: { next: number }[] = await manager.query('SELECT COALESCE(MAX(token_number), 0) + 1 AS next FROM queue_entries WHERE doctor_id = $1 AND queue_date = $2', [appointment.doctorId, today]);
+        const entry = await manager.save(
+          manager.create(QueueEntry, { appointmentId, doctorId: appointment.doctorId, patientId: appointment.patientId, queueDate: today, tokenNumber: Number(next), status: 'WAITING', checkedInByUserId: user.id }),
+        );
+        await this.record(manager, entry.id, null, 'WAITING', user);
+        return entry.id;
+      });
+      return this.describe(entryId);
+    });
+  }
+
+  /** Checks a patient out after their consultation was completed, and only then. */
+  async checkOut(user: AuthUser, entryId: string) {
+    return this.guard(async () => {
+      const clinicIds = await this.clinicIds(user);
+      await this.dataSource.transaction(async (manager) => {
+        const entry = await this.entryInClinics(manager, entryId, clinicIds);
+        await this.move(manager, entry, 'CHECKED_OUT', user, { checkedOutAt: new Date(), checkedOutByUserId: user.id });
+      });
+      return this.describe(entryId);
+    });
+  }
+
+  /** Puts a skipped patient back in the queue with the token they had. Only for a patient whose appointment is still confirmed and today's. */
+  async returnToQueue(user: AuthUser, entryId: string) {
+    return this.guard(async () => {
+      const clinicIds = await this.clinicIds(user);
+      const today = this.today();
+      await this.dataSource.transaction(async (manager) => {
+        const probe = await this.entryInClinics(manager, entryId, clinicIds, false);
+        await this.lockDoctor(manager, probe.doctorId);
+        const entry = await this.lockEntry(manager, entryId);
+        assertQueueTransition(entry.status, 'WAITING');
+        if (entry.queueDate !== today) throw conflict('NOT_TODAY', 'Only a patient from today can be returned to the queue.');
+        const appointment = await manager.findOneOrFail(Appointment, { where: { id: entry.appointmentId }, lock: { mode: 'pessimistic_write' } });
+        if (appointment.status !== 'CONFIRMED') throw conflict('APPOINTMENT_NOT_ACTIVE', `This appointment is ${appointment.status.replace('_', ' ').toLowerCase()}, so the patient cannot be returned to the queue.`);
+        await this.move(manager, entry, 'WAITING', user, { skippedAt: null, calledAt: null, calledByUserId: null });
+      });
+      return this.describe(entryId);
+    });
+  }
+
+  /** The doctor's queue for a day, as the front desk sees it: every doctor at the receptionist's clinics (or one of them). */
+  async receptionBoard(user: AuthUser, query: { doctorId?: string; date?: string }) {
+    return this.guard(async () => {
+      const clinicIds = await this.clinicIds(user);
+      if (clinicIds.length === 0) return { date: query.date ?? this.today(), doctors: [] };
+      const date = query.date ?? this.today();
+      const doctors: { id: string; name: string; clinic_name: string }[] = await this.dataSource.query(
+        `SELECT d.id, u.name, c.name AS clinic_name FROM doctors d JOIN users u ON u.id = d.user_id JOIN clinics c ON c.id = d.clinic_id
+          WHERE d.clinic_id = ANY($1::uuid[]) ${query.doctorId ? 'AND d.id = $2' : ''} ORDER BY u.name`,
+        query.doctorId ? [clinicIds, query.doctorId] : [clinicIds],
+      );
+      if (query.doctorId && doctors.length === 0) throw new NotFoundException('Doctor not found.');
+      const boards = [];
+      for (const doctor of doctors) boards.push({ doctor: { id: doctor.id, name: doctor.name, clinic: doctor.clinic_name }, ...this.dayView(buildDay(await this.dayRows(this.dataSource.manager, doctor.id, date)), date) });
+      return { date, doctors: boards };
+    });
+  }
+
+  // ---- Doctor ----
+
+  /** The signed-in doctor's own queue for a day (today by default). */
+  async doctorQueue(user: AuthUser, date?: string) {
+    return this.guard(async () => {
+      const doctor = await this.doctorOf(user);
+      const day = date ?? this.today();
+      return { doctor: { id: doctor.id, name: doctor.name }, ...this.dayView(buildDay(await this.dayRows(this.dataSource.manager, doctor.id, day)), day) };
+    });
+  }
+
+  /**
+   * Calls the next waiting patient (the lowest token) as the one being served. Refused while a patient is still being served, so a
+   * doctor can never have two current patients; a patient whose appointment was cancelled while being served is cleared away first.
+   */
+  async callNext(user: AuthUser) {
+    return this.guard(async () => {
+      const doctor = await this.doctorOf(user);
+      const today = this.today();
+      const outcome = await this.dataSource.transaction(async (manager) => {
+        await this.lockDoctor(manager, doctor.id);
+        const current = await manager.findOne(QueueEntry, { where: { doctorId: doctor.id, queueDate: today, status: 'SERVING' }, lock: { mode: 'pessimistic_write' } });
+        let cleared = false;
+        if (current) {
+          const appointment = await manager.findOneOrFail(Appointment, { where: { id: current.appointmentId } });
+          if (appointment.status === 'CONFIRMED') return { kind: 'busy' as const, token: current.tokenNumber };
+          await this.move(manager, current, 'CANCELLED', user, {}); // its appointment was cancelled: it must not block the queue
+          cleared = true;
+        }
+        const [next]: { id: string }[] = await manager.query(
+          `SELECT q.id FROM queue_entries q JOIN appointments a ON a.id = q.appointment_id
+            WHERE q.doctor_id = $1 AND q.queue_date = $2 AND q.status = 'WAITING' AND a.status = 'CONFIRMED'
+            ORDER BY q.token_number LIMIT 1 FOR UPDATE OF q`,
+          [doctor.id, today],
+        );
+        if (!next) return { kind: 'empty' as const, cleared };
+        const entry = await this.lockEntry(manager, next.id);
+        await this.move(manager, entry, 'SERVING', user, { calledAt: new Date(), calledByUserId: user.id });
+        return { kind: 'called' as const, id: entry.id };
+      });
+      if (outcome.kind === 'busy') throw conflict('CURRENT_NOT_COMPLETED', `Complete the consultation for token ${outcome.token} before calling the next patient.`, { token: outcome.token });
+      if (outcome.kind === 'empty') throw conflict('QUEUE_EMPTY', 'No patients are waiting.');
+      return this.describe(outcome.id);
+    });
+  }
+
+  /** Completes the consultation of the patient being served; their appointment becomes COMPLETED. */
+  async complete(user: AuthUser, entryId: string) {
+    return this.guard(async () => {
+      const doctor = await this.doctorOf(user);
+      const outcome = await this.dataSource.transaction(async (manager) => {
+        await this.lockDoctor(manager, doctor.id);
+        const entry = await this.lockEntry(manager, entryId);
+        if (entry.doctorId !== doctor.id) throw new NotFoundException('Queue entry not found.');
+        assertQueueTransition(entry.status, 'COMPLETED');
+        const appointment = await manager.findOneOrFail(Appointment, { where: { id: entry.appointmentId }, lock: { mode: 'pessimistic_write' } });
+        if (appointment.status === 'CANCELLED' || appointment.status === 'NO_SHOW') {
+          await this.move(manager, entry, 'CANCELLED', user, {});
+          return 'cancelled' as const;
+        }
+        await this.move(manager, entry, 'COMPLETED', user, { completedAt: new Date(), completedByUserId: user.id });
+        if (appointment.status === 'CONFIRMED') {
+          assertTransition('CONFIRMED', 'COMPLETED');
+          await manager.update(Appointment, { id: appointment.id }, { status: 'COMPLETED' });
+        }
+        return 'completed' as const;
+      });
+      if (outcome === 'cancelled') throw conflict('APPOINTMENT_CANCELLED', 'This appointment was cancelled, so the consultation cannot be completed. The patient has been removed from the queue.');
+      return this.describe(entryId);
+    });
+  }
+
+  // ---- Receptionist or doctor ----
+
+  /** Skips a waiting patient, or one who was called but is not there. The appointment itself is left as it is. */
+  async skip(user: AuthUser, entryId: string) {
+    return this.guard(async () => {
+      const clinicIds = user.role === 'RECEPTIONIST' ? await this.clinicIds(user) : [];
+      const doctor = user.role === 'DOCTOR' ? await this.doctorOf(user) : null;
+      await this.dataSource.transaction(async (manager) => {
+        const probe = await manager.findOneBy(QueueEntry, { id: entryId });
+        if (!probe) throw new NotFoundException('Queue entry not found.');
+        if (doctor) {
+          if (probe.doctorId !== doctor.id) throw new NotFoundException('Queue entry not found.');
+        } else {
+          await this.entryInClinics(manager, entryId, clinicIds, false);
+        }
+        await this.lockDoctor(manager, probe.doctorId);
+        const entry = await this.lockEntry(manager, entryId);
+        await this.move(manager, entry, 'SKIPPED', user, { skippedAt: new Date() });
+      });
+      return this.describe(entryId);
+    });
+  }
+
+  // ---- Patient ----
+
+  /** The signed-in patient's own place in today's queue (an empty list when they have not been checked in). Nobody else's details are included. */
+  async myQueue(user: AuthUser) {
+    return this.guard(async () => {
+      const patient = await this.dataSource.getRepository(Patient).findOne({ where: { userId: user.id }, select: { id: true } });
+      if (!patient) throw new ForbiddenException('Only patients have a queue position.');
+      const today = this.today();
+      const mine: { id: string; doctor_id: string }[] = await this.dataSource.query('SELECT id, doctor_id FROM queue_entries WHERE patient_id = $1 AND queue_date = $2 ORDER BY token_number', [patient.id, today]);
+      const days = new Map<string, Day<QueueRow>>();
+      const result = [];
+      for (const entry of mine) {
+        if (!days.has(entry.doctor_id)) days.set(entry.doctor_id, buildDay(await this.dayRows(this.dataSource.manager, entry.doctor_id, today)));
+        const day = days.get(entry.doctor_id)!;
+        const all = [day.serving, ...day.waiting, ...day.completed, ...day.checkedOut, ...day.skipped, ...day.cancelled];
+        const row = all.find((candidate) => candidate?.id === entry.id);
+        const position = positionOf(day, entry.id);
+        if (!row || !position) continue;
+        // Only this patient's own entry: the others in the queue appear only as counts.
+        result.push({
+          id: row.id,
+          appointmentId: row.appointmentId,
+          queueDate: row.queueDate,
+          token: row.token,
+          status: position.status,
+          doctor: { id: row.doctorId, name: row.doctorName },
+          appointment: { startTime: row.startTime, endTime: row.endTime },
+          currentlyServingToken: position.currentlyServingToken,
+          ahead: position.ahead,
+          behind: position.behind,
+          checkedInAt: row.checkedInAt.toISOString(),
+          calledAt: row.calledAt?.toISOString() ?? null,
+          completedAt: row.completedAt?.toISOString() ?? null,
+          checkedOutAt: row.checkedOutAt?.toISOString() ?? null,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      return result;
+    });
+  }
+
+  // ---- Admin ----
+
+  /** Every doctor's queue for a day as counts and tokens only: no patient names. */
+  async adminBoard(date?: string) {
+    return this.guard(async () => {
+      const day = date ?? this.today();
+      const rows: {
+        doctor_id: string; doctor_name: string; clinic_name: string; waiting: number; serving: number; completed: number; checked_out: number; skipped: number; cancelled: number; serving_token: number | null; last_token: number;
+      }[] = await this.dataSource.query(
+        `SELECT d.id AS doctor_id, du.name AS doctor_name, c.name AS clinic_name,
+                count(*) FILTER (WHERE q.status = 'WAITING' AND a.status = 'CONFIRMED')::int AS waiting,
+                count(*) FILTER (WHERE q.status = 'SERVING' AND a.status = 'CONFIRMED')::int AS serving,
+                count(*) FILTER (WHERE q.status = 'COMPLETED')::int AS completed,
+                count(*) FILTER (WHERE q.status = 'CHECKED_OUT')::int AS checked_out,
+                count(*) FILTER (WHERE q.status = 'SKIPPED')::int AS skipped,
+                count(*) FILTER (WHERE q.status = 'CANCELLED' OR (q.status IN ('WAITING', 'SERVING') AND a.status IN ('CANCELLED', 'NO_SHOW')))::int AS cancelled,
+                min(q.token_number) FILTER (WHERE q.status = 'SERVING' AND a.status = 'CONFIRMED') AS serving_token,
+                max(q.token_number)::int AS last_token
+           FROM queue_entries q JOIN appointments a ON a.id = q.appointment_id JOIN doctors d ON d.id = q.doctor_id
+           JOIN users du ON du.id = d.user_id JOIN clinics c ON c.id = d.clinic_id
+          WHERE q.queue_date = $1 GROUP BY d.id, du.name, c.name ORDER BY c.name, du.name`,
+        [day],
+      );
+      return {
+        date: day,
+        doctors: rows.map((row) => ({
+          doctor: { id: row.doctor_id, name: row.doctor_name },
+          clinic: row.clinic_name,
+          currentlyServingToken: row.serving_token === null ? null : Number(row.serving_token),
+          lastTokenIssued: Number(row.last_token),
+          counts: { waiting: row.waiting, serving: row.serving, completed: row.completed, checkedOut: row.checked_out, skipped: row.skipped, cancelled: row.cancelled },
+          status: row.serving > 0 ? 'SERVING' : row.waiting > 0 ? 'WAITING' : 'IDLE',
+        })),
+      };
+    });
+  }
+
+  // ---- internals ----
+
+  private today(): string {
+    return clinicNow(this.config.clinicTimezone).date;
+  }
+
+  /** Turns "the queue tables do not exist yet" into a clear 503, so a database that has not been migrated fails plainly and only here. */
+  private async guard<T>(work: () => Promise<T>): Promise<T> {
+    try {
+      return await work();
+    } catch (error) {
+      if (isMissingQueueTable(error)) throw new ServiceUnavailableException('Queue management is not available yet: the database has not been updated (migration 015).');
+      throw error;
+    }
+  }
+
+  private async clinicIds(user: AuthUser): Promise<string[]> {
+    const rows = await this.dataSource.getRepository(ReceptionistAssignment).find({ where: { receptionistUserId: user.id } });
+    return rows.map((row) => row.clinicId);
+  }
+
+  private async doctorOf(user: AuthUser): Promise<{ id: string; name: string }> {
+    const doctor = await this.dataSource.getRepository(Doctor).findOne({ where: { userId: user.id }, relations: { user: true } });
+    if (!doctor) throw new ForbiddenException('No doctor profile is linked to this account.');
+    return { id: doctor.id, name: doctor.user.name };
+  }
+
+  private async lockDoctor(manager: EntityManager, doctorId: string): Promise<void> {
+    await manager.findOne(Doctor, { where: { id: doctorId }, lock: { mode: 'pessimistic_write' } });
+  }
+
+  private async lockEntry(manager: EntityManager, id: string): Promise<QueueEntry> {
+    const entry = await manager.findOne(QueueEntry, { where: { id }, lock: { mode: 'pessimistic_write' } });
+    if (!entry) throw new NotFoundException('Queue entry not found.');
+    return entry;
+  }
+
+  /** The entry, if its doctor is at one of these clinics; someone else's looks like a missing one. */
+  private async entryInClinics(manager: EntityManager, id: string, clinicIds: string[], lock = true): Promise<QueueEntry> {
+    const entry = lock ? await this.lockEntry(manager, id) : await manager.findOneBy(QueueEntry, { id });
+    if (!entry) throw new NotFoundException('Queue entry not found.');
+    const doctor = await manager.findOneBy(Doctor, { id: entry.doctorId });
+    if (!doctor || !clinicIds.includes(doctor.clinicId)) throw new NotFoundException('Queue entry not found.');
+    return entry;
+  }
+
+  /** One checked, recorded change of status. */
+  private async move(manager: EntityManager, entry: QueueEntry, to: QueueStatus, actor: AuthUser, patch: Partial<QueueEntry>): Promise<void> {
+    const from = entry.status;
+    assertQueueTransition(from, to);
+    Object.assign(entry, patch, { status: to });
+    await manager.save(entry);
+    await this.record(manager, entry.id, from, to, actor);
+  }
+
+  private async record(manager: EntityManager, entryId: string, from: QueueStatus | null, to: QueueStatus, actor: AuthUser): Promise<void> {
+    await manager.insert(QueueEvent, { entryId, event: eventFor(from, to), fromStatus: from, toStatus: to, actorUserId: actor.id });
+  }
+
+  /** Every entry of one doctor's day with its appointment's own status, read fresh each time. */
+  private async dayRows(manager: EntityManager, doctorId: string, date: string): Promise<QueueRow[]> {
+    const rows: Record<string, unknown>[] = await manager.query(
+      `SELECT q.id, q.appointment_id, q.doctor_id, du.name AS doctor_name, q.queue_date::text AS queue_date, q.token_number, q.status,
+              q.checked_in_at, q.called_at, q.completed_at, q.checked_out_at, q.updated_at,
+              a.status::text AS appointment_status, a.start_time::text AS start_time, a.end_time::text AS end_time, pu.name AS patient_name
+         FROM queue_entries q
+         JOIN appointments a ON a.id = q.appointment_id
+         JOIN doctors d ON d.id = q.doctor_id JOIN users du ON du.id = d.user_id
+         JOIN patients p ON p.id = q.patient_id JOIN users pu ON pu.id = p.user_id
+        WHERE q.doctor_id = $1 AND q.queue_date = $2
+        ORDER BY q.token_number`,
+      [doctorId, date],
+    );
+    return rows.map((row) => ({
+      id: row.id as string,
+      token: Number(row.token_number),
+      status: row.status as QueueStatus,
+      appointmentStatus: row.appointment_status as string,
+      appointmentId: row.appointment_id as string,
+      doctorId: row.doctor_id as string,
+      doctorName: row.doctor_name as string,
+      queueDate: row.queue_date as string,
+      startTime: hhmm(row.start_time as string),
+      endTime: hhmm(row.end_time as string),
+      patientName: row.patient_name as string,
+      checkedInAt: row.checked_in_at as Date,
+      calledAt: row.called_at as Date | null,
+      completedAt: row.completed_at as Date | null,
+      checkedOutAt: row.checked_out_at as Date | null,
+      updatedAt: row.updated_at as Date,
+    }));
+  }
+
+  private entryView(row: QueueRow) {
+    return {
+      id: row.id,
+      appointmentId: row.appointmentId,
+      token: row.token,
+      status: row.status,
+      appointment: { startTime: row.startTime, endTime: row.endTime },
+      patient: { name: row.patientName },
+      checkedInAt: row.checkedInAt.toISOString(),
+      calledAt: row.calledAt?.toISOString() ?? null,
+      completedAt: row.completedAt?.toISOString() ?? null,
+      checkedOutAt: row.checkedOutAt?.toISOString() ?? null,
+    };
+  }
+
+  /** A whole day for the doctor's and the front desk's screens. */
+  private dayView(day: Day<QueueRow>, date: string) {
+    return {
+      date,
+      currentlyServingToken: day.currentlyServingToken,
+      serving: day.serving ? this.entryView(day.serving) : null,
+      waiting: day.waiting.map((row, index) => ({ ...this.entryView(row), position: index + 1 })),
+      completed: day.completed.map((row) => this.entryView(row)),
+      checkedOut: day.checkedOut.map((row) => this.entryView(row)),
+      skipped: day.skipped.map((row) => this.entryView(row)),
+      cancelled: day.cancelled.map((row) => this.entryView(row)),
+      counts: { waiting: day.waiting.length, serving: day.serving ? 1 : 0, completed: day.completed.length, checkedOut: day.checkedOut.length, skipped: day.skipped.length, cancelled: day.cancelled.length },
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  /** One entry after a change: its status and its place in the line, from the live entries. */
+  private async describe(entryId: string) {
+    const [located]: { doctor_id: string; queue_date: string }[] = await this.dataSource.query('SELECT doctor_id, queue_date::text AS queue_date FROM queue_entries WHERE id = $1', [entryId]);
+    if (!located) throw new NotFoundException('Queue entry not found.');
+    const day = buildDay(await this.dayRows(this.dataSource.manager, located.doctor_id, located.queue_date));
+    const all = [day.serving, ...day.waiting, ...day.completed, ...day.checkedOut, ...day.skipped, ...day.cancelled];
+    const row = all.find((candidate) => candidate?.id === entryId)!;
+    const position = positionOf(day, entryId)!;
+    return { ...this.entryView(row), queueDate: row.queueDate, doctor: { id: row.doctorId, name: row.doctorName }, currentlyServingToken: position.currentlyServingToken, ahead: position.ahead, behind: position.behind };
+  }
+}

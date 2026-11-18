@@ -37,6 +37,11 @@ const REQUIRED_TABLES = [
     migration: '013_assistant_history.sql',
     consequence: 'the assistant still answers, but chat history is not saved and the history list is unavailable',
   },
+  {
+    name: 'queue_entries',
+    migration: '015_queue_management.sql',
+    consequence: 'queue management is unavailable (check-in, tokens, calling patients); appointments, booking and everything else keep working',
+  },
 ];
 
 export interface MissingTable {

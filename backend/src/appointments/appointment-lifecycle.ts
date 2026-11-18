@@ -47,17 +47,34 @@ const COMPLETE_BATCH = 500;
 export async function completeFinishedAppointments(dataSource: DataSource, now: Date, timeZone: string): Promise<number> {
   const clock = clinicNow(timeZone, now);
   let total = 0;
+  // A patient who is checked in and still waiting or being served today is not "finished", however late the clinic is running: the
+  // queue completes their appointment when the doctor completes the consultation. Entries from earlier days no longer hold anyone back.
+  // Before migration 015 there is no queue table, and the original statement runs unchanged.
+  let respectQueue = true;
   for (;;) {
-    const result: unknown = await dataSource.query(
-      `UPDATE appointments SET status = 'COMPLETED', updated_at = now()
-        WHERE id IN (SELECT id FROM appointments
-                      WHERE status = 'CONFIRMED' AND (appointment_date < $1::date OR (appointment_date = $1::date AND end_time <= $2::time))
-                      ORDER BY appointment_date, id LIMIT $3
-                        FOR UPDATE SKIP LOCKED)
-          AND status = 'CONFIRMED'
-        RETURNING id`,
-      [clock.date, clock.time, COMPLETE_BATCH],
-    );
+    const guard = respectQueue
+      ? `AND NOT EXISTS (SELECT 1 FROM queue_entries q WHERE q.appointment_id = appointments.id AND q.status IN ('WAITING', 'SERVING') AND q.queue_date >= $1::date)`
+      : '';
+    let result: unknown;
+    try {
+      result = await dataSource.query(
+        `UPDATE appointments SET status = 'COMPLETED', updated_at = now()
+          WHERE id IN (SELECT id FROM appointments
+                        WHERE status = 'CONFIRMED' AND (appointment_date < $1::date OR (appointment_date = $1::date AND end_time <= $2::time)) ${guard}
+                        ORDER BY appointment_date, id LIMIT $3
+                          FOR UPDATE SKIP LOCKED)
+            AND status = 'CONFIRMED'
+          RETURNING id`,
+        [clock.date, clock.time, COMPLETE_BATCH],
+      );
+    } catch (error) {
+      const code = (error as { code?: unknown; driverError?: { code?: unknown } }).code ?? (error as { driverError?: { code?: unknown } }).driverError?.code;
+      if (respectQueue && code === '42P01') {
+        respectQueue = false;
+        continue;
+      }
+      throw error;
+    }
     // The driver returns [rows, count] for an UPDATE ... RETURNING.
     const done = Array.isArray(result) && Array.isArray(result[0]) ? result[0].length : Array.isArray(result) ? result.length : 0;
     total += done;
