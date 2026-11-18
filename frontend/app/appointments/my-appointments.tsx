@@ -12,7 +12,9 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api, errorMessage } from '@/lib/api';
+import { canRemoveFromHistory, removableCancelled } from '@/lib/past-history';
 import { ChooseNewTime } from './choose-new-time';
+import { RemoveAllCancelled, RemoveFromHistory } from './remove-from-history';
 import { formatDate, formatFee, formatTimeRange, relativeDay } from '@/lib/format';
 import { useClinicToday, useQuery } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
@@ -111,10 +113,26 @@ function AppointmentList({ session }: { session: Session }) {
           />
         </TabsContent>
         <TabsContent value="past">
+          {removableCancelled(past).length > 1 && (
+            <div className="mb-3 flex justify-end">
+              <RemoveAllCancelled
+                ids={removableCancelled(past)}
+                session={session}
+                onDone={(message) => {
+                  setNotice(message);
+                  appointments.reload();
+                }}
+              />
+            </div>
+          )}
           <AppointmentGroup
             items={past}
             today={today}
             session={session}
+            onRemoved={(message) => {
+              setNotice(message);
+              appointments.reload();
+            }}
             empty={<EmptyState title="No past appointments" icon={ClockIcon} />}
           />
         </TabsContent>
@@ -131,6 +149,7 @@ function AppointmentGroup({
   onCancelled,
   onPaid,
   onMoved,
+  onRemoved,
   empty,
 }: {
   items: PatientAppointment[];
@@ -140,6 +159,7 @@ function AppointmentGroup({
   onCancelled?: () => void;
   onPaid?: () => void;
   onMoved?: () => void;
+  onRemoved?: (message: string) => void;
   empty: React.ReactNode;
 }) {
   if (items.length === 0) return <>{empty}</>;
@@ -151,7 +171,7 @@ function AppointmentGroup({
           className="animate-in fade-in-0 slide-in-from-bottom-1 duration-300 fill-mode-backwards"
           style={{ animationDelay: `${Math.min(index, 5) * 40}ms` }}
         >
-          <AppointmentCard appointment={a} today={today} session={session} policy={policy} onCancelled={onCancelled} onPaid={onPaid} onMoved={onMoved} />
+          <AppointmentCard appointment={a} today={today} session={session} policy={policy} onCancelled={onCancelled} onPaid={onPaid} onMoved={onMoved} onRemoved={onRemoved} />
         </li>
       ))}
     </ul>
@@ -166,6 +186,7 @@ function AppointmentCard({
   onCancelled,
   onPaid,
   onMoved,
+  onRemoved,
 }: {
   appointment: PatientAppointment;
   today: string | null;
@@ -174,6 +195,7 @@ function AppointmentCard({
   onCancelled?: () => void;
   onPaid?: () => void;
   onMoved?: () => void;
+  onRemoved?: (message: string) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -256,6 +278,12 @@ function AppointmentCard({
             <Link href={`/doctors/${a.doctor.id}`} className={buttonVariants({ variant: 'outline', size: 'lg', className: 'h-9' })}>
               Book another time
             </Link>
+          </div>
+        )}
+
+        {onRemoved && canRemoveFromHistory(a) && (
+          <div className="border-t pt-4">
+            <RemoveFromHistory appointment={a} session={session} onRemoved={onRemoved} />
           </div>
         )}
 
