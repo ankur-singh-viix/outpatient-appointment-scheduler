@@ -5,13 +5,16 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { Alert, PageHeader } from '@/components/common';
 import { RequireRole } from '@/components/require-role';
 import { Button } from '@/components/ui/button';
-import { api, errorMessage } from '@/lib/api';
-import type { ActionCard, AssistantReply, Role, Session } from '@/lib/types';
+import { ApiError, api, errorMessage } from '@/lib/api';
+import { CARD_EXPIRED_TEXT, turnsFromStored } from '@/lib/assistant-history';
+import { assistantFooterText } from '@/lib/care-assistant';
+import type { ActionCard, AssistantReply, ConversationSummary, Role, Session, StoredMessage } from '@/lib/types';
 import { LANGUAGES } from '@/lib/voice/languages';
 import type { VoiceLanguage } from '@/lib/voice/types';
 import type { VoiceSubmit } from '@/lib/voice/voice-session';
 import { cn } from '@/lib/utils';
 import { ActionCardView } from './action-card';
+import { HistoryPanel } from './history-panel';
 import { useAssistantVoice } from './use-voice';
 
 const MAX_LENGTH = 2000;
@@ -29,6 +32,8 @@ interface Turn {
   looked?: string[];
   /** A confirmation card the server attached to this reply: nothing has happened until the patient presses its button. */
   cards?: ActionCard[];
+  /** A saved reply that once had a card: shown as plain "Card expired" text, never as a button. */
+  cardExpired?: boolean;
 }
 
 const LOOKED: Record<string, string> = {
@@ -79,6 +84,9 @@ function Conversation({ session }: { session: Session }) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastAsked, setLastAsked] = useState<string | null>(null);
+  // The saved conversation these turns belong to (null until the first reply is saved), and a counter that tells the history list to refresh.
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [historyVersion, setHistoryVersion] = useState(0);
   // Only mounted in the browser (after sign-in), so the stored choice can be read straight away.
   const [language, setLanguageState] = useState<VoiceLanguage>(() => (typeof window === 'undefined' ? 'en' : readLanguage()));
   const [speakReplies, setSpeakReplies] = useState(false);
@@ -141,14 +149,20 @@ function Conversation({ session }: { session: Session }) {
         method: 'POST',
         token: session.accessToken,
         timeoutMs: CHAT_TIMEOUT_MS,
-        body: { messages: history.slice(-HISTORY_SENT).map(({ role: from, content: said }) => ({ role: from, content: said })), ...hints },
+        body: { messages: history.slice(-HISTORY_SENT).map(({ role: from, content: said }) => ({ role: from, content: said })), ...(conversationId ? { conversationId } : {}), ...hints },
       });
+      if (reply.conversationId) {
+        setConversationId(reply.conversationId);
+        setHistoryVersion((version) => version + 1);
+      }
       const id = newId();
       setTurns((current) => [...current, { id, role: 'assistant', content: reply.reply, looked: [...new Set(reply.toolsUsed.map((name) => LOOKED[name] ?? name))], cards: reply.actions }]);
       // A voice conversation reads the reply itself; in text mode it is read only if the person turned spoken replies on.
       if (options.via !== 'voice' && speakReplies) voice.speakMessage(id, reply.reply);
       return { reply: reply.reply };
     } catch (err) {
+      // The saved conversation is gone (deleted elsewhere): the next try starts a new one instead of failing again.
+      if (err instanceof ApiError && err.status === 404 && conversationId) setConversationId(null);
       const message = errorMessage(err);
       setError(message);
       return { error: message };
@@ -176,10 +190,38 @@ function Conversation({ session }: { session: Session }) {
     if (busy.current) return;
     voice.stopSpeech();
     setTurns([]);
+    setConversationId(null);
     setError(null);
     setLastAsked(null);
     setText('');
     inputRef.current?.focus();
+  };
+
+  /** Loads a saved conversation. Only text comes back: replies that had a card show "Card expired", and nothing in it can be pressed. */
+  const openConversation = async (id: string) => {
+    if (busy.current) return;
+    busy.current = true;
+    voice.stopSpeech();
+    setError(null);
+    try {
+      const saved = await api<ConversationSummary & { messages: StoredMessage[] }>(`/assistant/conversations/${id}`, { token: session.accessToken });
+      setTurns(
+        turnsFromStored(saved.messages).map((turn) => ({
+          id: turn.id,
+          role: turn.role,
+          content: turn.content,
+          looked: turn.toolNames.length > 0 ? [...new Set(turn.toolNames.map((name) => LOOKED[name] ?? name))] : undefined,
+          cardExpired: turn.cardExpired,
+        })),
+      );
+      setConversationId(saved.id);
+      setLastAsked(null);
+      setText('');
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      busy.current = false;
+    }
   };
 
   const support = voice.support;
@@ -188,7 +230,9 @@ function Conversation({ session }: { session: Session }) {
   const unsupportedReason = support && !canListen ? (!support.secure ? 'Voice needs a secure (https) page.' : "Voice input isn't supported in this browser. Chrome or Edge works best; you can still type.") : null;
 
   return (
-    <div className="mx-auto flex max-w-3xl flex-col animate-in fade-in-0 duration-300">
+    <div className="mx-auto grid max-w-5xl gap-4 animate-in fade-in-0 duration-300 lg:grid-cols-[16rem_minmax(0,1fr)]">
+      <HistoryPanel session={session} activeId={conversationId} version={historyVersion} disabled={sending || voiceOn} onOpen={(id) => void openConversation(id)} onNew={reset} onDeleted={(id) => id === conversationId && reset()} />
+      <div className="flex min-w-0 flex-col">
       <PageHeader
         title="Assistant"
         description={role === 'DOCTOR' ? 'Ask about your schedule, appointments and availability.' : 'Ask about your appointments, doctors and open times.'}
@@ -230,6 +274,7 @@ function Conversation({ session }: { session: Session }) {
                 <p className="sr-only">{turn.role === 'user' ? 'You said' : 'Assistant said'}</p>
                 {/* Plain text only: the reply is never interpreted as HTML. */}
                 <p className={cn('inline-block rounded-2xl px-4 py-2 text-left text-sm whitespace-pre-wrap', turn.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground')}>{turn.content}</p>
+                {turn.cardExpired && <p className="text-xs text-muted-foreground">{CARD_EXPIRED_TEXT}</p>}
                 {turn.looked && turn.looked.length > 0 && <p className="text-xs text-muted-foreground">Looked up: {turn.looked.join(', ')}</p>}
                 {turn.role === 'assistant' && support?.speak && <ListenControls id={turn.id} text={turn.content} voice={voice} />}
                 {turn.cards?.map((card) => (
@@ -406,8 +451,9 @@ function Conversation({ session }: { session: Session }) {
 
           {unsupportedReason && <p className="text-xs text-muted-foreground">{unsupportedReason}</p>}
           {canListen && <p className="text-xs text-muted-foreground">Voice uses your browser&apos;s speech service: in Chrome and Edge your audio may be processed by Google or Microsoft. CareSlot does not record or store audio, and the microphone is on only while you see “Listening”.</p>}
-          <p className="text-xs text-muted-foreground">{role === 'DOCTOR' ? 'It can look things up but cannot book, cancel or change anything. ' : 'It can prepare a booking, move or cancellation, but nothing happens until you press Confirm on the card; saying “yes” does not confirm. '}It is not medical advice.</p>
+          <p className="text-xs text-muted-foreground">{assistantFooterText(role)}</p>
         </form>
+      </div>
       </div>
     </div>
   );

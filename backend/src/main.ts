@@ -5,7 +5,7 @@ import { AppModule } from './app.module.js';
 import { configureApp } from './app.setup.js';
 import { announceEmailMode } from './auth/email-sender.js';
 import { loadConfig, loadEnvFileIfPresent } from './config.js';
-import { missingSchemaGuards, missingTables } from './database/schema-guards.js';
+import { missingColumns, missingSchemaGuards, missingTables } from './database/schema-guards.js';
 
 async function bootstrap() {
   loadEnvFileIfPresent();
@@ -18,6 +18,7 @@ async function bootstrap() {
   try {
     for (const guard of await missingSchemaGuards(app.get(DataSource))) new Logger('Schema').warn(`Database guard ${guard.name} is missing: ${guard.consequence}.`);
     for (const table of await missingTables(app.get(DataSource))) new Logger('Schema').warn(`Table ${table.name} is missing (migration ${table.migration} has not been applied): ${table.consequence}. Run "npm run db:migrate".`);
+    for (const column of await missingColumns(app.get(DataSource))) new Logger('Schema').warn(`Column ${column.table}.${column.column} is missing (migration ${column.migration} has not been applied): ${column.consequence}. Run "npm run db:migrate".`);
   } catch {
     // The check is advisory; never stop the server for it.
   }

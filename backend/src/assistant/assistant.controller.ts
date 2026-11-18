@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { z } from 'zod';
 import { CurrentUser, Roles } from '../auth/auth.decorators.js';
 import { AuthGuard } from '../auth/auth.guard.js';
@@ -8,6 +8,7 @@ import { AssistantActionsService } from './actions/assistant-actions.service.js'
 import { DoctorActionsService } from './actions/doctor-actions.service.js';
 import { ScheduleChangeActionsService } from './actions/schedule-change-actions.service.js';
 import { AssistantService } from './assistant.service.js';
+import { AssistantHistoryService } from './history/assistant-history.service.js';
 
 /** The recent conversation. Strict: the client can send nothing but turns of text (no ids, no roles to act as, no tool results). */
 const chatSchema = z
@@ -24,10 +25,13 @@ const chatSchema = z
     // How the person is talking, as hints for the model's wording only. They change no permission and no tool.
     voice: z.boolean().optional(),
     language: z.enum(['en', 'hi', 'hinglish']).optional(),
+    // The saved conversation this message belongs to. Optional: without it a new conversation is started.
+    conversationId: z.uuid().optional(),
   })
   .refine((body) => body.messages.at(-1)?.role === 'user', { message: 'The last message must be from the user.', path: ['messages'] });
 
 const refParam = z.strictObject({ id: z.uuid() });
+const listQuery = z.strictObject({ limit: z.coerce.number().int().min(1).max(50).optional(), cursor: z.string().max(300).optional() });
 // The confirm and dismiss calls carry NO body: what runs is what was stored when the card was made, never what the browser sends.
 const noBody = z.strictObject({}).optional();
 // A doctor's schedule-change card is confirmed with its signed token (the token is the whole request; nothing else is accepted).
@@ -43,12 +47,36 @@ export class AssistantController {
     private readonly actions: AssistantActionsService,
     private readonly scheduleChanges: ScheduleChangeActionsService,
     private readonly doctorActions: DoctorActionsService,
+    private readonly history: AssistantHistoryService,
   ) {}
 
   @Post('chat')
   @HttpCode(200)
-  chat(@CurrentUser() user: AuthUser, @Body(new ZodValidationPipe(chatSchema)) body: z.infer<typeof chatSchema>) {
-    return this.assistant.chat(user, body.messages, { voice: body.voice, language: body.language });
+  async chat(@CurrentUser() user: AuthUser, @Body(new ZodValidationPipe(chatSchema)) body: z.infer<typeof chatSchema>) {
+    // A conversation id that is not this user's is "not found" before anything is asked. If history cannot be read at all, the chat goes on without it.
+    const historyWorks = body.conversationId ? await this.history.check(user, body.conversationId) : true;
+    const result = await this.assistant.chat(user, body.messages, { voice: body.voice, language: body.language });
+    // Saving is best effort: the answer above is returned whatever happens here.
+    const conversationId = historyWorks ? await this.history.record(user, body.conversationId, body.messages.at(-1)?.content ?? '', result) : null;
+    return conversationId ? { ...result, conversationId } : result;
+  }
+
+  /** The signed-in user's earlier conversations, newest first. */
+  @Get('conversations')
+  conversations(@CurrentUser() user: AuthUser, @Query(new ZodValidationPipe(listQuery)) query: z.infer<typeof listQuery>) {
+    return this.history.list(user, query);
+  }
+
+  /** One of the signed-in user's conversations with its messages. Anyone else's is "not found". */
+  @Get('conversations/:id')
+  conversation(@CurrentUser() user: AuthUser, @Param(new ZodValidationPipe(refParam)) params: z.infer<typeof refParam>) {
+    return this.history.get(user, params.id);
+  }
+
+  /** Deletes one of the signed-in user's conversations for good. */
+  @Delete('conversations/:id')
+  deleteConversation(@CurrentUser() user: AuthUser, @Param(new ZodValidationPipe(refParam)) params: z.infer<typeof refParam>) {
+    return this.history.remove(user, params.id);
   }
 
   /**

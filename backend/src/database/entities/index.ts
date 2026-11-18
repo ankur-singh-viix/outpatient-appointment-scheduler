@@ -1,4 +1,5 @@
 import { AssistantAction } from './assistant-action.entity.js';
+import { AssistantConversation, AssistantMessage } from './assistant-conversation.entity.js';
 import { ACTIVE_STATUSES, Appointment } from './appointment.entity.js';
 import { Availability } from './availability.entity.js';
 import { Clinic } from './clinic.entity.js';
@@ -21,6 +22,8 @@ export {
   ACTIVE_STATUSES,
   Appointment,
   AssistantAction,
+  AssistantConversation,
+  AssistantMessage,
   Availability,
   Clinic,
   Doctor,
@@ -64,4 +67,6 @@ export const ENTITIES = [
   ScheduleChange,
   ScheduleChangeAppointment,
   AssistantAction,
+  AssistantConversation,
+  AssistantMessage,
 ];
