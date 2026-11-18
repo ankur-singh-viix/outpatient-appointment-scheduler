@@ -61,7 +61,15 @@ describe('Queue management (e2e)', () => {
   const login = async (email: string) => (await http().post('/api/auth/login').send({ email, password: PASSWORD }).expect(200)).body.accessToken as string;
 
   const checkIn = (apptId: string, token = tokens.reception1) => http().post(`/api/queue/reception/appointments/${apptId}/check-in`).set(as(token)).send({});
+  const markNoShow = (apptId: string, token = tokens.reception1) => http().post(`/api/queue/reception/appointments/${apptId}/no-show`).set(as(token)).send({});
   const checkOut = (entryId: string, token = tokens.reception1) => http().post(`/api/queue/reception/entries/${entryId}/check-out`).set(as(token)).send({});
+  const shiftTime = (time: string, minutes: number) => {
+    const [hours, mins] = time.split(':').map(Number);
+    const total = (((hours * 60 + mins + minutes) % (24 * 60)) + 24 * 60) % (24 * 60);
+    return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+  };
+  const setStart = (id: string, start: string) =>
+    db.query(`UPDATE appointments SET start_time = $2::time, end_time = ($2::time + interval '30 minutes') WHERE id = $1`, [id, start]);
   const completeDesk = (entryId: string, token = tokens.reception1) => http().post(`/api/queue/reception/entries/${entryId}/complete`).set(as(token)).send({});
   const skipDesk = (entryId: string, token = tokens.reception1) => http().post(`/api/queue/reception/entries/${entryId}/skip`).set(as(token)).send({});
   const returnDesk = (entryId: string, token = tokens.reception1) => http().post(`/api/queue/reception/entries/${entryId}/return`).set(as(token)).send({});
@@ -441,6 +449,139 @@ describe('Queue management (e2e)', () => {
     });
   });
 
+  describe('late arrival and manual no-show', () => {
+    it('still checks in after the start (late arrival), and only allows no-show after the grace window', async () => {
+      const id = await appt({ patient: 0 });
+      const clock = clinicNow(TIME_ZONE);
+      await setStart(id, clock.time); // just starting: still inside grace
+      expect((await markNoShow(id).expect(409)).body.code).toBe('GRACE_NOT_ELAPSED');
+
+      await setStart(id, shiftTime(clock.time, -20)); // past the 15-minute grace
+      const late = (await checkIn(id).expect(200)).body;
+      expect(late).toMatchObject({ status: 'WAITING', token: 1 });
+      expect(late.checkedInAt).toEqual(expect.any(String));
+      expect(Date.parse(late.checkedInAt)).toBeGreaterThan(0);
+      expect((await markNoShow(id).expect(409)).body.code).toBe('NOT_ELIGIBLE'); // already in the active queue
+    });
+
+    it('persists the server check-in timestamp through waiting, completion and checkout (normal and late)', async () => {
+      const onTime = await appt({ patient: 0 });
+      const late = await appt({ patient: 1 });
+      await db.query("UPDATE appointments SET start_time = '00:00'::time, end_time = '00:05'::time WHERE id = $1", [late]);
+
+      const onTimeIn = (await checkIn(onTime).expect(200)).body;
+      const lateIn = (await checkIn(late).expect(200)).body;
+      expect(onTimeIn.checkedInAt).toEqual(expect.any(String));
+      expect(lateIn.checkedInAt).toEqual(expect.any(String));
+      expect(onTimeIn.token).toBe(1);
+      expect(lateIn.token).toBe(2);
+
+      const doctor = (await doctorQueue().expect(200)).body;
+      expect(doctor.waiting).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ appointmentId: onTime, token: 1, checkedInAt: onTimeIn.checkedInAt, status: 'WAITING' }),
+          expect.objectContaining({ appointmentId: late, token: 2, checkedInAt: lateIn.checkedInAt, status: 'WAITING' }),
+        ]),
+      );
+
+      await callNext().expect(200);
+      await complete((await entryOf(onTime)).id).expect(200);
+      await checkOut((await entryOf(onTime)).id).expect(200);
+
+      // Timestamp survives completion and checkout in queue history.
+      expect(await rows('SELECT status, checked_in_at FROM queue_entries WHERE appointment_id = $1', [onTime])).toEqual([
+        expect.objectContaining({ status: 'CHECKED_OUT', checked_in_at: expect.any(Date) }),
+      ]);
+      const desk = (await board().expect(200)).body.doctors.find((row: { doctor: { id: string } }) => row.doctor.id === doctorA);
+      expect(desk.checkedOut).toEqual(
+        expect.arrayContaining([expect.objectContaining({ appointmentId: onTime, checkedInAt: expect.any(String), status: 'CHECKED_OUT' })]),
+      );
+      expect(desk.waiting).toEqual(expect.arrayContaining([expect.objectContaining({ appointmentId: late, checkedInAt: lateIn.checkedInAt })]));
+    });
+
+    it('accepts late arrival after the grace and after the slot end: same token, WAITING, visible to the doctor; never auto NO_SHOW/COMPLETED', async () => {
+      const id = await appt({ patient: 0 });
+      const before = await entryOf(id);
+      expect(before).toMatchObject({ status: 'BOOKED', token_number: 1 });
+      // Slot ended long ago and grace has elapsed — receptionist can still Late Arrival.
+      await db.query("UPDATE appointments SET start_time = '00:00'::time, end_time = '00:05'::time WHERE id = $1", [id]);
+      expect(await apptStatus(id)).toBe('CONFIRMED');
+
+      const late = (await checkIn(id).expect(200)).body;
+      expect(late).toMatchObject({ status: 'WAITING', token: before.token_number, appointmentId: id });
+      expect(await entryOf(id)).toMatchObject({ status: 'WAITING', token_number: before.token_number });
+      expect(await apptStatus(id)).toBe('CONFIRMED'); // not COMPLETED, not NO_SHOW
+
+      const doctor = (await doctorQueue().expect(200)).body;
+      expect(doctor.waiting.map((row: { appointmentId: string; token: number; status: string }) => [row.appointmentId, row.token, row.status])).toEqual([
+        [id, before.token_number, 'WAITING'],
+      ]);
+      expect(doctor.counts.waiting).toBe(1);
+    });
+
+    it('Ankur (token 3) stays BOOKED after grace while Rahul (token 4) checks in; late arrival reuses token 3 after the auto-complete job', async () => {
+      // Fill tokens 1–2 so the scenario matches production numbering (Ankur=3, Rahul=4).
+      await appt({ patient: 0 });
+      await appt({ patient: 1 });
+      const ankur = await appt({ patient: 2 });
+      const rahul = await appt({ patient: 3 });
+      expect(await entryOf(ankur)).toMatchObject({ status: 'BOOKED', token_number: 3 });
+      expect(await entryOf(rahul)).toMatchObject({ status: 'BOOKED', token_number: 4 });
+
+      // Both slots ended long ago (distinct seats so the active-slot unique index stays happy). Ankur missed the 15-minute grace.
+      await db.query("UPDATE appointments SET start_time = '00:00'::time, end_time = '00:05'::time WHERE id = $1", [ankur]);
+      await db.query("UPDATE appointments SET start_time = '00:10'::time, end_time = '00:15'::time WHERE id = $1", [rahul]);
+      await checkIn(rahul).expect(200);
+      expect(await entryOf(rahul)).toMatchObject({ status: 'WAITING', token_number: 4 });
+
+      // Background auto-complete must not mark Ankur COMPLETED (or NO_SHOW) while his BOOKED token is still live today.
+      await completeFinishedAppointments(app.get(DataSource), new Date(), TIME_ZONE);
+      expect(await apptStatus(ankur)).toBe('CONFIRMED');
+      expect(await entryOf(ankur)).toMatchObject({ status: 'BOOKED', token_number: 3 });
+      expect(await apptStatus(rahul)).toBe('CONFIRMED');
+      expect(await rows<{ id: string }>("SELECT id FROM appointments WHERE status = 'COMPLETED' AND id = ANY($1::uuid[])", [[ankur, rahul]])).toEqual([]);
+
+      // Receptionist Late Arrival anytime before manual No Show / cancel: original token 3 → WAITING, visible to the doctor.
+      const late = (await checkIn(ankur).expect(200)).body;
+      expect(late).toMatchObject({ status: 'WAITING', token: 3, appointmentId: ankur });
+      expect(await entryOf(ankur)).toMatchObject({ status: 'WAITING', token_number: 3 });
+      expect(await apptStatus(ankur)).toBe('CONFIRMED');
+
+      const doctor = (await doctorQueue().expect(200)).body;
+      expect(doctor.waiting.map((row: { appointmentId: string; token: number }) => [row.token, row.appointmentId]).sort((a: [number, string], b: [number, string]) => a[0] - b[0])).toEqual([
+        [3, ankur],
+        [4, rahul],
+      ]);
+      expect(doctor.counts.waiting).toBe(2);
+
+      // Desk still lists Ankur as an arrival until check-in (already waiting) — board booked is empty for him; waiting has him.
+      const desk = (await board().expect(200)).body.doctors.find((row: { doctor: { id: string } }) => row.doctor.id === doctorA);
+      expect((desk.booked ?? []).some((row: { appointmentId: string }) => row.appointmentId === ankur)).toBe(false);
+      expect(desk.waiting.some((row: { appointmentId: string; token: number }) => row.appointmentId === ankur && row.token === 3)).toBe(true);
+    });
+
+    it('marks a never-arrived patient no-show after grace, leaves history, and clears the active queue', async () => {
+      const id = await appt({ patient: 0 });
+      const clock = clinicNow(TIME_ZONE);
+      await setStart(id, shiftTime(clock.time, -20));
+      const out = (await markNoShow(id).expect(200)).body;
+      expect(out).toMatchObject({ status: 'CANCELLED', ahead: null, behind: null });
+      expect(await apptStatus(id)).toBe('NO_SHOW');
+      // Never checked in: stored status stays BOOKED (check-in columns must stay null); the board reads it as cancelled.
+      expect(await entryOf(id)).toMatchObject({ status: 'BOOKED' });
+      expect(await rows('SELECT id, cancel_reason FROM appointments WHERE id = $1', [id])).toEqual([
+        { id, cancel_reason: 'Marked no show at front desk' },
+      ]);
+      const boardDay = (await board().expect(200)).body.doctors.find((row: { doctor: { id: string } }) => row.doctor.id === doctorA);
+      expect(boardDay.booked ?? []).toEqual([]);
+      expect(boardDay.waiting).toEqual([]);
+      expect(boardDay.cancelled.some((row: { appointmentId: string }) => row.appointmentId === id)).toBe(true);
+      expect(boardDay.counts.cancelled).toBeGreaterThanOrEqual(1);
+      await markNoShow(id).expect(409);
+      await checkIn(id).expect(409); // no-show is final; late arrival no longer applies
+    });
+  });
+
   describe('checkout (the receptionist)', () => {
     it('only after the consultation is completed, once, and the patient is out of the active queue', async () => {
       const id = await appt({ patient: 0 });
@@ -449,14 +590,28 @@ describe('Queue management (e2e)', () => {
       await callNext().expect(200);
       await checkOut(entry).expect(409); // being served
       await complete(entry).expect(200);
+      // Appointments list keeps the completed visit until check-out, with the queue entry id the desk needs.
+      const awaiting = (await http().get('/api/receptionist/appointments').query({ date: today }).set(as(tokens.reception1)).expect(200)).body as {
+        id: string;
+        status: string;
+        queueEntryId: string | null;
+        queueStatus: string | null;
+      }[];
+      expect(awaiting.find((row) => row.id === id)).toMatchObject({ status: 'COMPLETED', queueEntryId: entry, queueStatus: 'COMPLETED' });
       const out = (await checkOut(entry).expect(200)).body;
       expect(out).toMatchObject({ status: 'CHECKED_OUT', ahead: null, behind: null });
       expect(out.checkedOutAt).toEqual(expect.any(String));
       await checkOut(entry).expect(409); // not twice
+      // After check-out the visit leaves the appointments list, but appointment + queue rows remain in history.
+      const after = (await http().get('/api/receptionist/appointments').query({ date: today }).set(as(tokens.reception1)).expect(200)).body as { id: string }[];
+      expect(after.find((row) => row.id === id)).toBeUndefined();
+      expect(await apptStatus(id)).toBe('COMPLETED');
+      expect(await entryOf(id)).toMatchObject({ status: 'CHECKED_OUT' });
       const queue = (await doctorQueue().expect(200)).body;
       expect(queue.serving).toBeNull();
       expect(queue.waiting).toEqual([]);
       expect(queue.checkedOut).toHaveLength(1);
+      expect(queue.counts).toMatchObject({ completed: 0, checkedOut: 1, waiting: 0, serving: 0 });
       expect(await rows('SELECT checked_out_by_user_id FROM queue_entries')).toEqual([{ checked_out_by_user_id: receptionistUser1 }]);
     });
 
@@ -598,6 +753,7 @@ describe('Queue management (e2e)', () => {
       const routes: [string, string, string[]][] = [
         ['GET', '/api/queue/reception', ['doctorA', 'admin']],
         ['POST', `/api/queue/reception/appointments/${id}/check-in`, ['doctorA', 'admin']],
+        ['POST', `/api/queue/reception/appointments/${id}/no-show`, ['doctorA', 'admin']],
         ['POST', `/api/queue/reception/entries/${entry}/check-out`, ['doctorA', 'admin']],
         ['POST', `/api/queue/reception/entries/${entry}/skip`, ['doctorA', 'admin']],
         ['POST', `/api/queue/reception/entries/${entry}/return`, ['doctorA', 'admin']],
@@ -664,20 +820,27 @@ describe('Queue management (e2e)', () => {
     };
     const runJob = () => completeFinishedAppointments(app.get(DataSource), new Date(), TIME_ZONE);
 
-    it.skipIf(!pastEnough)('leaves the appointment of a waiting or served patient alone, and completes it once they have been skipped or seen', async () => {
+    it.skipIf(!pastEnough)('leaves BOOKED, waiting, served and skipped appointments alone so late arrival and manual no-show stay available', async () => {
       const waiting = await finished(0);
       const served = await finished(1);
-      const none = await finished(2);
+      const bookedOnly = await finished(2); // token reserved, never checked in
+      const noToken = await finished(3);
+      await db.query('DELETE FROM queue_entries WHERE appointment_id = $1', [noToken]); // no live queue place → job may complete
       const e1 = await arrive(waiting);
       await arrive(served);
       await callNext().expect(200); // token 1 (the first to arrive) is served
       await runJob();
       expect(await apptStatus(waiting)).toBe('CONFIRMED');
       expect(await apptStatus(served)).toBe('CONFIRMED');
-      expect(await apptStatus(none)).toBe('COMPLETED'); // nobody queued: completed as before
+      expect(await apptStatus(bookedOnly)).toBe('CONFIRMED'); // late arrival still allowed
+      expect(await apptStatus(noToken)).toBe('COMPLETED');
+      // Late arrival after the slot ended: same booking token → WAITING on the doctor's queue.
+      const late = (await checkIn(bookedOnly).expect(200)).body;
+      expect(late).toMatchObject({ status: 'WAITING', token: 3, appointmentId: bookedOnly });
+      expect(await apptStatus(bookedOnly)).toBe('CONFIRMED');
       await skipDoctor(e1).expect(200);
       await runJob();
-      expect(await apptStatus(waiting)).toBe('COMPLETED'); // a skipped patient no longer holds it back
+      expect(await apptStatus(waiting)).toBe('CONFIRMED'); // skipped: receptionist may return or mark no-show; job does not auto-complete
       expect(await apptStatus(served)).toBe('CONFIRMED');
     });
 

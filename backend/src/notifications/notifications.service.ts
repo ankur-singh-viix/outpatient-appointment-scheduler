@@ -106,8 +106,8 @@ export class NotificationsService {
   async bookingConfirmed(manager: EntityManager, appointmentId: string, now = new Date()): Promise<void> {
     await this.safely(manager, `booking confirmation for ${appointmentId}`, async (inner) => {
       const loaded = await this.load(inner, appointmentId);
-      const tokenRows: { token_number: number }[] = await inner.query('SELECT token_number FROM queue_entries WHERE appointment_id = $1', [appointmentId]);
-      const token = tokenRows[0] ? Number(tokenRows[0].token_number) : null;
+      // Always the token already stored for this appointment — never allocate a second number for the email.
+      const token = await this.queueTokenFor(inner, appointmentId);
       await this.enqueue(inner, [
         ...this.toPatient(loaded, templates.bookingConfirmed(loaded.facts, 'patient', { token }), `booking-confirmed:${appointmentId}`),
         ...this.toDoctor(loaded, templates.bookingConfirmed(loaded.facts, 'doctor', { token }), `booking-confirmed:${appointmentId}`),
@@ -138,9 +138,11 @@ export class NotificationsService {
       await this.cancelReminders(inner, oldAppointmentId);
       const previous = await this.load(inner, oldAppointmentId);
       const loaded = await this.load(inner, newAppointmentId);
+      // Token for the new booking row (issued in the same transaction before this notice) — never invent a different one for email.
+      const token = await this.queueTokenFor(inner, newAppointmentId);
       await this.enqueue(inner, [
-        ...this.toPatient(loaded, templates.bookingRescheduled(loaded.facts, previous.facts), `booking-rescheduled:${newAppointmentId}`),
-        ...this.toDoctor(loaded, templates.bookingRescheduled(loaded.facts, previous.facts, 'doctor'), `booking-rescheduled:${newAppointmentId}`),
+        ...this.toPatient(loaded, templates.bookingRescheduled(loaded.facts, previous.facts, 'patient', { token }), `booking-rescheduled:${newAppointmentId}`),
+        ...this.toDoctor(loaded, templates.bookingRescheduled(loaded.facts, previous.facts, 'doctor', { token }), `booking-rescheduled:${newAppointmentId}`),
         ...this.reminders(loaded, now),
       ]);
     });
@@ -739,6 +741,15 @@ export class NotificationsService {
         specialty: appointment.doctor.specialty?.name,
       },
     };
+  }
+
+  /** Reads the queue token already saved for this appointment. Returns null when none exists yet (e.g. unpaid hold). */
+  private async queueTokenFor(manager: EntityManager, appointmentId: string): Promise<number | null> {
+    const rows: { token_number: number }[] = await manager.query(
+      'SELECT token_number FROM queue_entries WHERE appointment_id = $1',
+      [appointmentId],
+    );
+    return rows[0] ? Number(rows[0].token_number) : null;
   }
 }
 

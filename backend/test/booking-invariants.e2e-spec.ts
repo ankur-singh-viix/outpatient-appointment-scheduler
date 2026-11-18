@@ -396,12 +396,14 @@ describe('Booking, capacity and lifecycle invariants (e2e)', () => {
     };
     const at = (date: string, time: string) => new Date(`${date}T${time}:00+05:30`); // the test clinic is in India
 
-    it('a CONFIRMED appointment becomes COMPLETED exactly when its end time passes, in the clinic\'s time zone', async () => {
+    it('a CONFIRMED appointment becomes COMPLETED when its end time passes, after the booking day if a BOOKED token still allows late arrival', async () => {
       await addRow(FAR);
-      const booked = (await book(0, FAR, '09:00').expect(201)).body; // 09:00-09:30
+      const booked = (await book(0, FAR, '09:00').expect(201)).body; // 09:00-09:30 — booking issues a BOOKED queue token
       expect(await complete(at(FAR, '09:29'))).toBe(0);
       expect(await statusOf(booked.id)).toBe('CONFIRMED');
-      expect(await complete(at(FAR, '09:30'))).toBe(1);
+      expect(await complete(at(FAR, '09:30'))).toBe(0); // same day + BOOKED: late arrival must still be possible
+      expect(await statusOf(booked.id)).toBe('CONFIRMED');
+      expect(await complete(at(addDays(FAR, 1), '00:00'))).toBe(1); // next day: auto-complete
       expect(await statusOf(booked.id)).toBe('COMPLETED');
     });
 
@@ -455,7 +457,7 @@ describe('Booking, capacity and lifecycle invariants (e2e)', () => {
       await addRow(FAR);
       await addRow(FAR2);
       const booked = (await book(0, FAR, '09:00').expect(201)).body;
-      await complete(at(FAR, '12:00'));
+      await complete(at(addDays(FAR, 1), '00:00')); // after the booking day (BOOKED token no longer blocks)
       await http().post(`/api/appointments/${booked.id}/cancel`).set(as(patientTokens[0])).send({}).expect(409);
       await reschedule(0, booked.id, FAR2, '09:00').expect(409);
       const mine = (await http().get('/api/appointments/mine').set(as(patientTokens[0])).expect(200)).body as { id: string; status: string }[];
@@ -467,7 +469,7 @@ describe('Booking, capacity and lifecycle invariants (e2e)', () => {
       const booked = (await book(0, FAR, '09:30').expect(201)).body;
       await http().post(`/api/doctor-portal/availability/${row}/change`).set(as(doctorToken)).send({ startTime: '09:00', endTime: '09:30', from: { startTime: '09:00', endTime: '10:00' }, acknowledge: true }).expect(200);
       expect(await rows('SELECT resolution FROM schedule_change_appointments')).toEqual([{ resolution: null }]);
-      await complete(at(FAR, '12:00'));
+      await complete(at(addDays(FAR, 1), '00:00'));
       await app.get(ScheduleChangeNotifier).drain();
       expect(await rows('SELECT resolution FROM schedule_change_appointments WHERE appointment_id = $1', [booked.id])).toEqual([{ resolution: 'CLOSED' }]);
     });

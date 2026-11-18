@@ -261,25 +261,36 @@ describe('Appointment notifications (e2e)', () => {
       const toPatient = pick(list, 'PATIENT', 'email');
       expect(toPatient.to_address).toBe('patient1@test.local');
       expect(toPatient.subject).toContain('Appointment confirmed: Dr. Free Doctor');
+      expect(toPatient.body).toContain('Patient: Pat One');
+      expect(toPatient.body).toContain('Doctor: Dr. Free Doctor');
       expect(toPatient.body).toContain('10:15 AM – 10:30 AM');
       expect(toPatient.body).toContain('Test Clinic, 1 Test St');
       expect(toPatient.body).toMatch(/Queue token: \d+/);
+      expect(toPatient.body).toContain('assigned when you booked');
+      expect(toPatient.body).toContain('check you in with the same number');
       const mine = (await http().get('/api/appointments/mine').set(as(tokens.patient1)).expect(200)).body as { id: string; queueToken: number | null }[];
       const listed = mine.find((row) => row.id === booked.id);
       expect(listed?.queueToken).toEqual(expect.any(Number));
       expect(toPatient.body).toContain(`Queue token: ${listed!.queueToken}`);
+      const [{ token_number: storedToken }] = await rows<{ token_number: number }>(
+        'SELECT token_number FROM queue_entries WHERE appointment_id = $1',
+        [booked.id],
+      );
+      expect(Number(storedToken)).toBe(listed!.queueToken);
+      expect(toPatient.body).toContain(`Queue token: ${storedToken}`);
 
       const toDoctor = pick(list, 'DOCTOR', 'email');
       expect(toDoctor.to_address).toBe('free.doctor@test.local');
       expect(toDoctor.subject).toMatch(/^New booking: Pat One/);
       expect(toDoctor.body).toContain('Hello Dr. Free Doctor');
       expect(toDoctor.body).toContain('10:15 AM – 10:30 AM');
-      expect(toDoctor.body).toMatch(/Queue token: \d+/);
+      expect(toDoctor.body).toContain(`Queue token: ${storedToken}`);
 
       const text = pick(list, 'PATIENT', 'sms');
       expect(text.to_address).toBe('+919876543210');
       expect(text.body).toMatch(/^CareSlot: appointment confirmed with Dr\. Free Doctor/);
-      expect(text.body).toMatch(/Your queue token is \d+/);
+      expect(text.body).toContain(`Your queue token is ${storedToken}`);
+      expect(text.body).toContain('Keep it for check-in');
       expect(text.body.length).toBeLessThanOrEqual(160);
       expect(sms.sent.map((m) => m.to)).toEqual(['+919876543210']);
 
@@ -354,6 +365,25 @@ describe('Appointment notifications (e2e)', () => {
       // The reminders follow the appointment: the old ones are withdrawn, new ones exist.
       expect((await forAppointment(booked.id, 'reminder')).every((row) => row.status === 'CANCELLED')).toBe(true);
       expect((await forAppointment(moved.id, 'reminder')).filter((row) => row.status === 'SENT' || row.status === 'PENDING')).toHaveLength(4); // two intervals, by email and by text
+    });
+
+    it('puts the new appointment’s saved queue token on the reschedule email (not a separately generated number)', async () => {
+      const date = nextDay();
+      const booked = (await book(tokens.patient1, date, '10:00').expect(201)).body;
+      const moved = (await http().post(`/api/appointments/${booked.id}/reschedule`).set(as(tokens.patient1)).send({ date, startTime: '10:30' }).expect(201)).body;
+      await dispatch();
+      const [{ token_number: newToken }] = await rows<{ token_number: number }>(
+        'SELECT token_number FROM queue_entries WHERE appointment_id = $1',
+        [moved.id],
+      );
+      expect(newToken).toEqual(expect.any(Number));
+      const patientEmail = pick(await forAppointment(moved.id, 'booking-rescheduled'), 'PATIENT', 'email');
+      expect(patientEmail.body).toContain(`Queue token: ${newToken}`);
+      expect(patientEmail.body).toContain('assigned when you booked');
+      expect(patientEmail.body).toContain('Patient: Pat One');
+      expect(patientEmail.body).toContain('Doctor: Dr. Free Doctor');
+      expect(pick(await forAppointment(moved.id, 'booking-rescheduled'), 'DOCTOR', 'email').body).toContain(`Queue token: ${newToken}`);
+      expect(pick(await forAppointment(moved.id, 'booking-rescheduled'), 'PATIENT', 'sms').body).toContain(`Your queue token is ${newToken}`);
     });
   });
 
@@ -672,6 +702,13 @@ describe('Appointment notifications (e2e)', () => {
       expect(spy).toHaveBeenCalled();
       expect(response.body.status).toBe('CONFIRMED');
       expect(await forAppointment(response.body.id)).toHaveLength(0);
+      // Token was still issued and stored even though the confirmation email never left the outbox.
+      const tokensForBooking = await rows<{ token_number: number }>(
+        'SELECT token_number FROM queue_entries WHERE appointment_id = $1',
+        [response.body.id],
+      );
+      expect(tokensForBooking).toHaveLength(1);
+      expect(Number(tokensForBooking[0].token_number)).toBeGreaterThan(0);
       // ...and the next booking is notified normally.
       const next = (await book(tokens.patient1, nextDay(), '10:15').expect(201)).body;
       expect((await forAppointment(next.id, 'booking-confirmed')).length).toBe(3);

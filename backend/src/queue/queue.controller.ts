@@ -51,6 +51,17 @@ export class QueueController {
     return this.queue.checkOut(user, params.id);
   }
 
+  /**
+   * Manual no-show after the arrival grace: the patient never checked in (or was skipped and will not return). Appointment becomes
+   * NO_SHOW; the queue entry leaves the active board. History is kept.
+   */
+  @Post('reception/appointments/:id/no-show')
+  @HttpCode(200)
+  @Roles('RECEPTIONIST')
+  markNoShow(@CurrentUser() user: AuthUser, @Param(new ZodValidationPipe(idParam)) params: z.infer<typeof idParam>, @Body(new ZodValidationPipe(noBody)) _body: z.infer<typeof noBody>) {
+    return this.queue.markNoShow(user, params.id);
+  }
+
   /** Skips a patient who is not there. */
   @Post('reception/entries/:id/skip')
   @HttpCode(200)
