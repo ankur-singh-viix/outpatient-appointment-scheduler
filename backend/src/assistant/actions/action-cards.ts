@@ -1,5 +1,8 @@
 import type { AssistantActionKind } from '../../database/entities/assistant-action.entity.js';
 
+/** The doctor's confirmation cards. Each `ref` is a signed token (not a stored row), confirmed by the doctor's own button press. */
+export type DoctorCardKind = 'SCHEDULE_CHANGE' | 'DOCTOR_CANCEL' | 'DOCTOR_RESCHEDULE' | 'ADD_HOURS' | 'BLOCK_DAY';
+
 /**
  * What the patient is shown before pressing Confirm. The server writes it from real data (the model never does), so what the card
  * says is what the confirmation will do.
@@ -8,7 +11,7 @@ export interface ActionCard {
   /** The confirmation reference. Honoured only for the patient it was made for, once, before it expires. */
   ref: string;
   /** A patient's BOOK / RESCHEDULE / CANCEL, or a doctor's SCHEDULE_CHANGE (whose `ref` is a signed token, not a stored row). */
-  kind: AssistantActionKind | 'SCHEDULE_CHANGE';
+  kind: AssistantActionKind | DoctorCardKind;
   title: string;
   lines: { label: string; value: string }[];
   /** One short extra sentence, such as what happens to a payment. */
