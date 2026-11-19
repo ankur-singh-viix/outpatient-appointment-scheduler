@@ -157,7 +157,7 @@ describe('Prescriptions (e2e)', () => {
     await http().get(`/api/prescriptions/reception/${other.id}`).set(as(tokens.reception)).expect(404);
   });
 
-  it('refuses a prescription before the consultation is completed, and blocks patients', async () => {
+  it('refuses a prescription before the consultation is completed, and blocks patients from doctor routes', async () => {
     const pending = (
       await db.query(
         `INSERT INTO appointments (patient_id, doctor_id, appointment_date, start_time, end_time, status, slot_number, slot_capacity, booked_by_user_id)
@@ -171,5 +171,79 @@ describe('Prescriptions (e2e)', () => {
       .send({ appointmentId: pending, medications: [{ name: 'Too soon' }] })
       .expect(409);
     await http().get('/api/prescriptions/doctor').set(as(tokens.patient)).expect(403);
+  });
+
+  it('lets a patient list and read only their own FINALIZED prescriptions', async () => {
+    const mine = (await http().get('/api/prescriptions/mine').set(as(tokens.patient)).expect(200)).body as {
+      id: string;
+      appointmentId: string;
+      status: string;
+      diagnosis: string | null;
+      medications: { name: string }[];
+      doctor: { name: string };
+    }[];
+    // Both doctors finalized prescriptions for this patient earlier in the suite.
+    expect(mine).toHaveLength(2);
+    expect(mine.every((row) => row.status === 'FINALIZED')).toBe(true);
+    expect(mine.map((row) => row.appointmentId).sort()).toEqual([appointmentId, otherApptId].sort());
+    expect(mine.some((row) => row.medications.some((m) => m.name === 'Cetirizine'))).toBe(true);
+
+    const detail = (await http().get(`/api/prescriptions/mine/${mine[0].id}`).set(as(tokens.patient)).expect(200)).body;
+    expect(detail.status).toBe('FINALIZED');
+    expect(detail.doctor.name).toBeTruthy();
+
+    // Drafts stay invisible to the patient.
+    const draftAppt = (
+      await db.query(
+        `INSERT INTO appointments (patient_id, doctor_id, appointment_date, start_time, end_time, status, slot_number, slot_capacity, booked_by_user_id)
+         VALUES ($1, $2, $3, '12:00', '12:30', 'COMPLETED', 1, 1, $4) RETURNING id`,
+        [patientId, doctorId, today, patientUserId],
+      )
+    ).rows[0].id as string;
+    const draft = (
+      await http()
+        .post('/api/prescriptions/doctor')
+        .set(as(tokens.doctor))
+        .send({ appointmentId: draftAppt, diagnosis: 'Draft only', medications: [{ name: 'Hidden draft med' }] })
+        .expect(201)
+    ).body;
+    expect(draft.status).toBe('DRAFT');
+    const afterDraft = (await http().get('/api/prescriptions/mine').set(as(tokens.patient)).expect(200)).body as { id: string }[];
+    expect(afterDraft.map((row) => row.id)).not.toContain(draft.id);
+    await http().get(`/api/prescriptions/mine/${draft.id}`).set(as(tokens.patient)).expect(404);
+
+    // Another patient's finalized prescription is never returned (session-derived patient id).
+    const otherUser = (
+      await db.query('INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id', [
+        'Other Patient',
+        'rx-other-pat@test.local',
+        await hashPassword(PASSWORD),
+        'PATIENT',
+      ])
+    ).rows[0].id as string;
+    const otherPatient = (
+      await db.query('INSERT INTO patients (user_id, phone) VALUES ($1, $2) RETURNING id', [otherUser, '+91900008888'])
+    ).rows[0].id as string;
+    const foreignAppt = (
+      await db.query(
+        `INSERT INTO appointments (patient_id, doctor_id, appointment_date, start_time, end_time, status, slot_number, slot_capacity, booked_by_user_id)
+         VALUES ($1, $2, $3, '13:00', '13:30', 'COMPLETED', 1, 1, $4) RETURNING id`,
+        [otherPatient, doctorId, today, otherUser],
+      )
+    ).rows[0].id as string;
+    const foreign = (
+      await http()
+        .post('/api/prescriptions/doctor')
+        .set(as(tokens.doctor))
+        .send({ appointmentId: foreignAppt, diagnosis: 'Foreign', medications: [{ name: 'Secret' }] })
+        .expect(201)
+    ).body;
+    await http().post(`/api/prescriptions/doctor/${foreign.id}/finalize`).set(as(tokens.doctor)).send({}).expect(200);
+    const stillMine = (await http().get('/api/prescriptions/mine').set(as(tokens.patient)).expect(200)).body as { id: string }[];
+    expect(stillMine.map((row) => row.id)).not.toContain(foreign.id);
+    await http().get(`/api/prescriptions/mine/${foreign.id}`).set(as(tokens.patient)).expect(404);
+
+    await http().get('/api/prescriptions/mine').set(as(tokens.doctor)).expect(403);
+    await http().get('/api/prescriptions/mine').set(as(tokens.reception)).expect(403);
   });
 });

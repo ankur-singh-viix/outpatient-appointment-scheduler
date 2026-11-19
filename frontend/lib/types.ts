@@ -797,3 +797,6 @@ export interface PrescriptionDetail extends PrescriptionSummary {
     clinic: { name: string; address: string };
   };
 }
+
+/** Patient view of a finalized prescription from GET /prescriptions/mine (same shape as PrescriptionDetail). */
+export type PatientPrescription = PrescriptionDetail;

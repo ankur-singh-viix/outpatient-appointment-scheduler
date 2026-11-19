@@ -85,4 +85,18 @@ export class PrescriptionsController {
   getReception(@CurrentUser() user: AuthUser, @Param(new ZodValidationPipe(idParam)) params: z.infer<typeof idParam>) {
     return this.prescriptions.getForReception(user, params.id);
   }
+
+  // ---- Patient (own finalized only; patient identity from the session) ----
+
+  @Get('mine')
+  @Roles('PATIENT')
+  listMine(@CurrentUser() user: AuthUser) {
+    return this.prescriptions.listForPatient(user);
+  }
+
+  @Get('mine/:id')
+  @Roles('PATIENT')
+  getMine(@CurrentUser() user: AuthUser, @Param(new ZodValidationPipe(idParam)) params: z.infer<typeof idParam>) {
+    return this.prescriptions.getForPatient(user, params.id);
+  }
 }

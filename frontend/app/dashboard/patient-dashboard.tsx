@@ -39,9 +39,10 @@ function Dashboard({ session }: { session: Session }) {
 
   const all = appointments.data ?? [];
   const upcoming = all.filter((a) => isActive(a) && today && a.date >= today).sort(byWhen);
-  const next = upcoming[0];
-  const visits = all.filter((a) => isActive(a) && today && a.date < today).length;
+  const completed = all.filter((a) => a.status === 'COMPLETED').sort((a, b) => byWhen(b, a));
   const cancelled = all.filter((a) => a.status === 'CANCELLED').length;
+  const next = upcoming[0];
+  const recentCompleted = completed.slice(0, 3);
   // Visits the doctor cancelled that would still have been ahead: the patient needs to know and rebook.
   const doctorCancelled = all
     .filter((a) => a.status === 'CANCELLED' && a.cancelledBy === 'DOCTOR' && today && a.date >= today)
@@ -52,7 +53,7 @@ function Dashboard({ session }: { session: Session }) {
     <div className="space-y-6 animate-in fade-in-0 duration-300">
       <PageHeader
         title={`Welcome back, ${firstName}`}
-        description="Your upcoming care and quick ways to book the next visit."
+        description="Your upcoming care and completed visits."
       />
 
       <PatientQueueCard session={session} />
@@ -103,22 +104,28 @@ function Dashboard({ session }: { session: Session }) {
         </Alert>
       ))}
 
-      <section aria-labelledby="next-heading" className="space-y-3">
-        <h2 id="next-heading" className="text-lg font-semibold text-foreground">
-          Next appointment
-        </h2>
+      {appointments.error && (
+        <Alert
+          action={
+            <Button size="sm" variant="outline" onClick={appointments.reload}>
+              Try again
+            </Button>
+          }
+        >
+          Could not load your appointments. {appointments.error}
+        </Alert>
+      )}
 
-        {appointments.error && (
-          <Alert
-            action={
-              <Button size="sm" variant="outline" onClick={appointments.reload}>
-                Try again
-              </Button>
-            }
-          >
-            Could not load your appointments. {appointments.error}
-          </Alert>
-        )}
+      <section aria-labelledby="upcoming-heading" className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 id="upcoming-heading" className="text-lg font-semibold text-foreground">
+            Upcoming appointments
+          </h2>
+          <Link href="/appointments" className={buttonVariants({ variant: 'ghost', size: 'sm', className: 'gap-1.5' })}>
+            All appointments
+            <ArrowRightIcon aria-hidden />
+          </Link>
+        </div>
 
         {appointments.loading && !appointments.data && (
           <Card aria-hidden>
@@ -130,7 +137,7 @@ function Dashboard({ session }: { session: Session }) {
           </Card>
         )}
 
-        {appointments.data && !next && (
+        {appointments.data && upcoming.length === 0 && (
           <EmptyState title="No upcoming appointments" icon={CalendarPlusIcon}>
             <p>When you book a visit, it will appear here with quick ways to change it.</p>
             <Link href="/" className={buttonVariants({ size: 'lg', className: 'h-10' })}>
@@ -184,13 +191,59 @@ function Dashboard({ session }: { session: Session }) {
                     Reschedule
                   </Link>
                 )}
-                <Link href="/appointments" className={buttonVariants({ variant: 'ghost', size: 'lg', className: 'h-9 gap-1.5' })}>
-                  All appointments
-                  <ArrowRightIcon aria-hidden />
-                </Link>
+                {upcoming.length > 1 && (
+                  <Link href="/appointments" className={buttonVariants({ variant: 'ghost', size: 'lg', className: 'h-9 gap-1.5' })}>
+                    {upcoming.length - 1} more upcoming
+                    <ArrowRightIcon aria-hidden />
+                  </Link>
+                )}
               </div>
             </CardContent>
           </Card>
+        )}
+      </section>
+
+      <section aria-labelledby="completed-heading" className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 id="completed-heading" className="text-lg font-semibold text-foreground">
+            Completed appointments
+          </h2>
+          <Link href="/appointments" className={buttonVariants({ variant: 'ghost', size: 'sm', className: 'gap-1.5' })}>
+            Visit history
+            <ArrowRightIcon aria-hidden />
+          </Link>
+        </div>
+
+        {appointments.data && recentCompleted.length === 0 && (
+          <EmptyState title="No completed visits yet" icon={ClockIcon}>
+            <p>Finished consultations appear here. Cancelled and missed appointments stay in your appointment history.</p>
+          </EmptyState>
+        )}
+
+        {recentCompleted.length > 0 && (
+          <ul className="space-y-3">
+            {recentCompleted.map((a) => (
+              <li key={a.id}>
+                <Card className="[--card-spacing:--spacing(4)]">
+                  <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <p className="font-semibold text-foreground">
+                        {formatDate(a.date, { weekday: 'long' })} · {formatTimeRange(a.startTime, a.endTime)}
+                      </p>
+                      <p className="text-sm text-foreground/80">
+                        {a.doctor.name} · {a.doctor.specialty}
+                        {a.queueToken != null ? ` · Token ${a.queueToken}` : ''}
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        {a.clinic.name}, {a.clinic.address}
+                      </p>
+                    </div>
+                    <StatusBadge status={a.status} />
+                  </CardContent>
+                </Card>
+              </li>
+            ))}
+          </ul>
         )}
       </section>
 
@@ -200,7 +253,7 @@ function Dashboard({ session }: { session: Session }) {
         </h2>
         <div className="grid gap-3 sm:grid-cols-3">
           <Stat icon={<CalendarCheckIcon className="size-4" aria-hidden />} label="Upcoming" value={appointments.data ? upcoming.length : '–'} />
-          <Stat icon={<ClockIcon className="size-4" aria-hidden />} label="Past visits" value={appointments.data ? visits : '–'} />
+          <Stat icon={<ClockIcon className="size-4" aria-hidden />} label="Completed" value={appointments.data ? completed.length : '–'} />
           <Stat icon={<CalendarPlusIcon className="size-4" aria-hidden />} label="Cancelled" value={appointments.data ? cancelled : '–'} />
         </div>
       </section>

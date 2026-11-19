@@ -15,12 +15,13 @@ import { api, errorMessage } from '@/lib/api';
 import { canRemoveFromHistory, removableCancelled } from '@/lib/past-history';
 import { ChooseNewTime } from './choose-new-time';
 import { RemoveAllCancelled, RemoveFromHistory } from './remove-from-history';
+import { VisitPrescriptionBlock } from './visit-prescription-block';
 import { formatDate, formatFee, formatTimeRange, relativeDay } from '@/lib/format';
 import { useClinicToday, useQuery } from '@/lib/hooks';
 import { queueApi } from '@/lib/queue-client';
 import { appointmentQueueSummary } from '@/lib/queue-view';
 import { cn } from '@/lib/utils';
-import type { MyQueueEntry, PatientAppointment, PaymentsConfig, Session } from '@/lib/types';
+import type { MyQueueEntry, PatientAppointment, PatientPrescription, PaymentsConfig, Session } from '@/lib/types';
 import { Freshness, TokenBadge } from '../queue/queue-ui';
 import { useQueuePolling } from '../queue/use-queue-polling';
 
@@ -43,6 +44,9 @@ function AppointmentList({ session }: { session: Session }) {
   const appointments = useQuery(`mine:${session.user.id}`, () =>
     api<PatientAppointment[]>('/appointments/mine', { token: session.accessToken }),
   );
+  const prescriptions = useQuery(`prescriptions-mine:${session.user.id}`, () =>
+    api<PatientPrescription[]>('/prescriptions/mine', { token: session.accessToken }),
+  );
   const config = useQuery('payments-config', () => api<PaymentsConfig>('/payments/config'));
   // Live queue for today's visits only (own entries). Polls faster while waiting/serving.
   const queue = useQueuePolling<MyQueueEntry[]>(
@@ -59,6 +63,11 @@ function AppointmentList({ session }: { session: Session }) {
     for (const entry of queue.data ?? []) map.set(entry.appointmentId, entry);
     return map;
   }, [queue.data]);
+  const prescriptionByAppointment = useMemo(() => {
+    const map = new Map<string, PatientPrescription>();
+    for (const row of prescriptions.data ?? []) map.set(row.appointmentId, row);
+    return map;
+  }, [prescriptions.data]);
 
   // Keep showing the list while it refreshes after a cancellation.
   const data = appointments.data ?? appointments.previous;
@@ -88,9 +97,11 @@ function AppointmentList({ session }: { session: Session }) {
     );
   }
 
-  // Cancelled appointments (including ones replaced by a reschedule) live under Past as a record.
+  // Upcoming = still-active future bookings. Completed = genuine COMPLETED visits only.
+  // Other = cancelled, no-show, and any leftover non-upcoming rows (never mixed into Completed).
   const upcoming = all.filter((a) => isActive(a) && (!today || a.date >= today)).sort(byWhen);
-  const past = all.filter((a) => !upcoming.includes(a)).sort((a, b) => byWhen(b, a));
+  const completed = all.filter((a) => a.status === 'COMPLETED').sort((a, b) => byWhen(b, a));
+  const other = all.filter((a) => !upcoming.includes(a) && a.status !== 'COMPLETED').sort((a, b) => byWhen(b, a));
 
   return (
     <div className="space-y-4">
@@ -103,8 +114,11 @@ function AppointmentList({ session }: { session: Session }) {
           <TabsTrigger value="upcoming" className="flex-none px-4">
             Upcoming ({upcoming.length})
           </TabsTrigger>
-          <TabsTrigger value="past" className="flex-none px-4">
-            Past ({past.length})
+          <TabsTrigger value="completed" className="flex-none px-4">
+            Completed ({completed.length})
+          </TabsTrigger>
+          <TabsTrigger value="other" className="flex-none px-4">
+            Cancelled & other ({other.length})
           </TabsTrigger>
         </TabsList>
         <TabsContent value="upcoming">
@@ -138,11 +152,43 @@ function AppointmentList({ session }: { session: Session }) {
             }
           />
         </TabsContent>
-        <TabsContent value="past">
-          {removableCancelled(past).length > 1 && (
+        <TabsContent value="completed">
+          {prescriptions.error && (
+            <div className="mb-3">
+              <Alert
+                action={
+                  <Button size="sm" variant="outline" onClick={prescriptions.reload}>
+                    Try again
+                  </Button>
+                }
+              >
+                Could not load prescriptions. {prescriptions.error}
+              </Alert>
+            </div>
+          )}
+          <AppointmentGroup
+            items={completed}
+            today={today}
+            session={session}
+            queueByAppointment={queueByAppointment}
+            prescriptionByAppointment={prescriptionByAppointment}
+            showPrescription
+            onRemoved={(message) => {
+              setNotice(message);
+              appointments.reload();
+            }}
+            empty={
+              <EmptyState title="No completed visits yet" icon={ClockIcon}>
+                <p>After a consultation finishes, the visit and any finalized prescription appear here.</p>
+              </EmptyState>
+            }
+          />
+        </TabsContent>
+        <TabsContent value="other">
+          {removableCancelled(other).length > 1 && (
             <div className="mb-3 flex justify-end">
               <RemoveAllCancelled
-                ids={removableCancelled(past)}
+                ids={removableCancelled(other)}
                 session={session}
                 onDone={(message) => {
                   setNotice(message);
@@ -152,7 +198,7 @@ function AppointmentList({ session }: { session: Session }) {
             </div>
           )}
           <AppointmentGroup
-            items={past}
+            items={other}
             today={today}
             session={session}
             queueByAppointment={queueByAppointment}
@@ -160,7 +206,7 @@ function AppointmentList({ session }: { session: Session }) {
               setNotice(message);
               appointments.reload();
             }}
-            empty={<EmptyState title="No past appointments" icon={ClockIcon} />}
+            empty={<EmptyState title="No cancelled or other past appointments" icon={ClockIcon} />}
           />
         </TabsContent>
       </Tabs>
@@ -174,6 +220,8 @@ function AppointmentGroup({
   session,
   policy = null,
   queueByAppointment,
+  prescriptionByAppointment,
+  showPrescription = false,
   onCancelled,
   onPaid,
   onMoved,
@@ -185,6 +233,8 @@ function AppointmentGroup({
   session: Session;
   policy?: PaymentsConfig | null;
   queueByAppointment: Map<string, MyQueueEntry>;
+  prescriptionByAppointment?: Map<string, PatientPrescription>;
+  showPrescription?: boolean;
   onCancelled?: () => void;
   onPaid?: () => void;
   onMoved?: () => void;
@@ -206,6 +256,7 @@ function AppointmentGroup({
             session={session}
             policy={policy}
             queueEntry={queueByAppointment.get(a.id) ?? null}
+            prescription={showPrescription ? (prescriptionByAppointment?.get(a.id) ?? null) : undefined}
             onCancelled={onCancelled}
             onPaid={onPaid}
             onMoved={onMoved}
@@ -223,6 +274,7 @@ function AppointmentCard({
   session,
   policy,
   queueEntry,
+  prescription,
   onCancelled,
   onPaid,
   onMoved,
@@ -233,6 +285,8 @@ function AppointmentCard({
   session: Session;
   policy?: PaymentsConfig | null;
   queueEntry: MyQueueEntry | null;
+  /** When set (including null), show the visit prescription block for completed visits. */
+  prescription?: PatientPrescription | null;
   onCancelled?: () => void;
   onPaid?: () => void;
   onMoved?: () => void;
@@ -345,6 +399,8 @@ function AppointmentCard({
             <PaymentChip payment={a.payment} />
           </div>
         )}
+
+        {prescription !== undefined && <VisitPrescriptionBlock prescription={prescription} />}
 
         {cancelled && a.cancelledBy === 'DOCTOR' && today && a.date >= today && (
           <div className="border-t pt-4">
