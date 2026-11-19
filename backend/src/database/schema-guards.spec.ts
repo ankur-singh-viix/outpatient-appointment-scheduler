@@ -32,6 +32,7 @@ describe('missingTables', () => {
       'doctor_receptionist_assignments',
       'prescriptions',
       'patient_medical_profile_history',
+      'patient_medical_reports',
     ]);
     expect(missing[0]).toEqual(expect.objectContaining({ migration: '012_assistant_actions.sql' }));
     expect(missing[0].consequence).toMatch(/cannot prepare bookings/);
@@ -45,7 +46,8 @@ describe('missingTables', () => {
             sql.includes('queue_entries') ||
             sql.includes('doctor_receptionist') ||
             sql.includes('prescriptions') ||
-            sql.includes('patient_medical_profile_history')
+            sql.includes('patient_medical_profile_history') ||
+            sql.includes('patient_medical_reports')
               ? 'present'
               : null,
         },

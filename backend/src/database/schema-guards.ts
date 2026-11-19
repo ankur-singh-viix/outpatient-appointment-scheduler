@@ -57,6 +57,11 @@ const REQUIRED_TABLES = [
     migration: '018_patient_uhid_and_medical_profile.sql',
     consequence: 'patient medical profile updates cannot be audited; UHID/medical columns may also be missing',
   },
+  {
+    name: 'patient_medical_reports',
+    migration: '019_patient_medical_reports.sql',
+    consequence: 'medical report uploads and doctor report viewing are unavailable',
+  },
 ];
 
 export interface MissingTable {

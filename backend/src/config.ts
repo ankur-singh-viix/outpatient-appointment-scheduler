@@ -39,6 +39,26 @@ export interface AppConfig {
   /** Runs the background workers (expiring unpaid holds, sending due emails, settling refunds). Off in tests that call them directly. */
   backgroundJobs: boolean;
   assistant: AssistantConfig;
+  /**
+   * Private S3-compatible storage for medical report files (R2/S3).
+   * Off unless REPORTS_S3_ENDPOINT, REPORTS_S3_BUCKET, REPORTS_S3_ACCESS_KEY_ID and REPORTS_S3_SECRET_ACCESS_KEY are all set.
+   * There is no local-disk fallback: APIs return 503 when disabled.
+   */
+  reportsStorage: ReportsStorageConfig;
+}
+
+/** Medical report object storage (private bucket only). */
+export interface ReportsStorageConfig {
+  enabled: boolean;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  /** Max upload size in bytes (default 10 MiB). */
+  maxBytes: number;
+  /** Presigned download URL lifetime in seconds (default 120). */
+  downloadTtlSeconds: number;
 }
 
 /** The AI assistant (Google Gemini over plain HTTPS). It is off, with a clear message, until GEMINI_API_KEY is set. */
@@ -274,5 +294,23 @@ export function loadConfig(): AppConfig {
     },
     scheduleChangeNoticeHours: Math.min(numberFrom('SCHEDULE_CHANGE_MIN_NOTICE_HOURS', 2), 72),
     scheduleReminderCooldownHours: Math.min(numberFrom('SCHEDULE_REMINDER_COOLDOWN_HOURS', 24), 168),
+    reportsStorage: (() => {
+      const endpoint = (process.env.REPORTS_S3_ENDPOINT ?? '').trim();
+      const bucket = (process.env.REPORTS_S3_BUCKET ?? '').trim();
+      const accessKeyId = (process.env.REPORTS_S3_ACCESS_KEY_ID ?? '').trim();
+      const secretAccessKey = (process.env.REPORTS_S3_SECRET_ACCESS_KEY ?? '').trim();
+      const region = (process.env.REPORTS_S3_REGION ?? '').trim() || 'auto';
+      const enabled = Boolean(endpoint && bucket && accessKeyId && secretAccessKey);
+      return {
+        enabled,
+        endpoint,
+        region,
+        bucket,
+        accessKeyId,
+        secretAccessKey,
+        maxBytes: Math.min(20 * 1024 * 1024, Math.max(1024, Math.floor(numberFrom('REPORTS_MAX_BYTES', 10 * 1024 * 1024)))),
+        downloadTtlSeconds: Math.min(900, Math.max(30, Math.floor(numberFrom('REPORTS_DOWNLOAD_TTL_SECONDS', 120)))),
+      };
+    })(),
   };
 }

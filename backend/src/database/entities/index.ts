@@ -11,6 +11,12 @@ import { NotificationPreference } from './notification-preference.entity.js';
 import { Notification } from './notification.entity.js';
 import { Patient } from './patient.entity.js';
 import { PatientMedicalProfileHistory } from './patient-medical-profile-history.entity.js';
+import {
+  MEDICAL_REPORT_CATEGORIES,
+  PatientMedicalReport,
+  type MedicalReportCategory,
+  type MedicalReportUploaderRole,
+} from './patient-medical-report.entity.js';
 import { PaymentEvent } from './payment-event.entity.js';
 import { Payment } from './payment.entity.js';
 import { Prescription, PRESCRIPTION_STATUSES, type PrescriptionMedication, type PrescriptionStatus } from './prescription.entity.js';
@@ -38,6 +44,10 @@ export {
   NotificationPreference,
   Patient,
   PatientMedicalProfileHistory,
+  MEDICAL_REPORT_CATEGORIES,
+  PatientMedicalReport,
+  type MedicalReportCategory,
+  type MedicalReportUploaderRole,
   Payment,
   PaymentEvent,
   PRESCRIPTION_STATUSES,
@@ -65,6 +75,7 @@ export const ENTITIES = [
   User,
   Patient,
   PatientMedicalProfileHistory,
+  PatientMedicalReport,
   Doctor,
   Clinic,
   Specialty,
