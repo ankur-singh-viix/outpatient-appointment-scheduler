@@ -99,7 +99,10 @@ const dateOverrideSchema = z.discriminatedUnion('isAvailable', [
 const dateParam = z.strictObject({ date: dateSchema });
 // DELETE requests carry the doctor's agreement in the query string: ?acknowledge=true
 const acknowledgeQuery = z.object({ acknowledge: z.enum(['true', 'false']).optional() });
-const receptionistAssignSchema = z.strictObject({ receptionistUserId: z.uuid() });
+const receptionistAssignSchema = z.union([
+  z.strictObject({ email: z.string().trim().email().max(254) }),
+  z.strictObject({ receptionistUserId: z.uuid() }),
+]);
 
 const scheduleQuery = z.object({ days: z.coerce.number().int().min(1).max(60).optional() });
 const cancelTimeSchema = z.strictObject({ date: dateSchema, startTime: timeSchema, endTime: timeSchema, reason: z.string().trim().max(200).optional() });
@@ -295,13 +298,13 @@ export class DoctorPortalController {
     return res.status(200).type('application/json').send(JSON.stringify(assigned));
   }
 
-  /** Assigns or replaces the doctor's receptionist. */
+  /** Assigns or replaces the doctor's receptionist by registered email or by clinic shortlist id. */
   @Put('receptionist')
   assignReceptionist(
     @CurrentUser() user: AuthUser,
     @Body(new ZodValidationPipe(receptionistAssignSchema)) body: z.infer<typeof receptionistAssignSchema>,
   ) {
-    return this.portal.assignReceptionist(user, body.receptionistUserId);
+    return this.portal.assignReceptionist(user, body);
   }
 
   /** Removes the doctor's receptionist assignment. */

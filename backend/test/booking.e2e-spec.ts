@@ -905,6 +905,20 @@ describe('Appointment booking (e2e)', () => {
       expect((await pendingRow('picky@test.local')).verified_at).not.toBeNull(); // still able to finish correctly
     });
 
+    it('creates a receptionist who can sign in and open the front-desk API', async () => {
+      const email = 'desk.self@test.local';
+      const token = await registerAndVerify(email);
+      const created = await post('/complete-profile', { role: 'RECEPTIONIST', firstName: 'Desk', lastName: 'Self' }, token).expect(201);
+      expect(created.body.user).toMatchObject({ name: 'Desk Self', email, role: 'RECEPTIONIST' });
+      const session = created.body.accessToken as string;
+      await http().get('/api/auth/me').set('Authorization', `Bearer ${session}`).expect(200);
+      expect((await http().get('/api/receptionist/doctors').set('Authorization', `Bearer ${session}`).expect(200)).body).toEqual([]);
+      await http().get('/api/appointments/mine').set('Authorization', `Bearer ${session}`).expect(403);
+      await post('/login', { email, password: NEW_PASSWORD }).expect(200).expect((res) => {
+        expect(res.body.user.role).toBe('RECEPTIONIST');
+      });
+    });
+
     it('creates a doctor who is listed, can set sessions, and then gets bookable slots', async () => {
       const email = 'meera@test.local';
       const token = await registerAndVerify(email);
@@ -1387,9 +1401,9 @@ describe('Appointment booking (e2e)', () => {
       const email = 'fresh.patient@test.local';
       const { token } = clerkToken([email]);
 
-      // Nothing the browser sends can pick a privileged role, another email, or an id.
+      // Nothing the browser sends can pick an administrator role, another email, or an id.
       await postAs(token, COMPLETE, { ...patientProfile, role: 'ADMIN' }).expect(400);
-      await postAs(token, COMPLETE, { ...patientProfile, role: 'RECEPTIONIST' }).expect(400);
+      await postAs(token, COMPLETE, { ...patientProfile, role: 'RECEPTIONIST' }).expect(400); // receptionist body must not carry patient-only fields
       await postAs(token, COMPLETE, { ...patientProfile, userId: 'someone-else' }).expect(400);
       await postAs(token, COMPLETE, { ...patientProfile, email: 'other@test.local' }).expect(400);
       await postAs(token, COMPLETE, { role: 'PATIENT', firstName: '', lastName: 'X' }).expect(400);
@@ -1409,6 +1423,19 @@ describe('Appointment booking (e2e)', () => {
 
       expect((await status(token)).state).toBe('LINKED');
       await postAs(token, COMPLETE, patientProfile).expect(409);
+    });
+
+    it('creates a receptionist through Clerk with the role taken only from the validated form', async () => {
+      const email = 'fresh.desk@test.local';
+      const { token } = clerkToken([email]);
+      const created = await postAs(token, COMPLETE, { role: 'RECEPTIONIST', firstName: 'Clerk', lastName: 'Desk' }).expect(201);
+      expect(created.body.user).toMatchObject({ name: 'Clerk Desk', email, role: 'RECEPTIONIST' });
+      expect(await hashOf(email)).toBeNull();
+      const me = await getAs(token, '/api/auth/me').expect(200);
+      expect(me.body).toMatchObject({ role: 'RECEPTIONIST' });
+      await getAs(token, '/api/receptionist/doctors').expect(200);
+      await getAs(token, '/api/appointments/mine').expect(403);
+      await getAs(token, '/api/doctor-portal/appointments').expect(403);
     });
 
     it('creates a doctor through Clerk and takes the doctor role from our own table', async () => {

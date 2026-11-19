@@ -51,7 +51,7 @@ export function classifyMatches(matches: AccountMatch, ownClerkUserId: string): 
  * - the email must be one Clerk has VERIFIED;
  * - a new account is only created when no account uses that email (never a duplicate, never a silent merge);
  * - an existing account is only linked after the person proves they own it by entering its current password;
- * - roles come from the sign-up form's PATIENT/DOCTOR choice or the existing row, never from Clerk or a token.
+ * - roles come from the sign-up form's PATIENT/DOCTOR/RECEPTIONIST choice or the existing row, never from Clerk or a token.
  */
 const MAX_LINK_ATTEMPTS = 5;
 const LINK_LOCK_MS = 15 * 60_000;

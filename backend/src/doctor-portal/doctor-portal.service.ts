@@ -561,8 +561,8 @@ export class DoctorPortalService {
   }
 
   /**
-   * Receptionists an administrator has placed at this doctor's clinic. The doctor may assign one of them; someone from another
-   * clinic is never listed.
+   * Receptionists already linked to this doctor's clinic (admin placement or a prior email assignment). Useful as a shortlist;
+   * doctors may also assign any registered receptionist by email.
    */
   async receptionistCandidates(user: AuthUser) {
     const doctor = await this.profileFor(user);
@@ -577,17 +577,45 @@ export class DoctorPortalService {
     return rows;
   }
 
-  /** Assigns or replaces the doctor's receptionist. The person must already be a receptionist at the doctor's clinic. */
-  async assignReceptionist(user: AuthUser, receptionistUserId: string) {
+  /**
+   * Assigns or replaces the doctor's receptionist by registered email or by user id.
+   * Email path: account must exist with role RECEPTIONIST (patients/doctors are refused). Links them to the doctor's clinic
+   * when needed so desk scope and the clinic shortlist stay consistent. No new user or role is created here.
+   */
+  async assignReceptionist(user: AuthUser, input: { email?: string; receptionistUserId?: string }) {
     const doctor = await this.profileFor(user);
-    const candidate = await this.dataSource.getRepository(User).findOneBy({ id: receptionistUserId, role: 'RECEPTIONIST' });
-    if (!candidate) throw new NotFoundException('Receptionist not found.');
-    const atClinic = await this.dataSource.getRepository(ReceptionistAssignment).existsBy({
-      receptionistUserId: candidate.id,
-      clinicId: doctor.clinicId,
-    });
-    if (!atClinic) throw new BadRequestException('Choose a receptionist assigned to your clinic.');
+    const candidate = input.email
+      ? await this.dataSource
+          .getRepository(User)
+          .createQueryBuilder('user')
+          .where('lower(user.email) = :email', { email: input.email.trim().toLowerCase() })
+          .getOne()
+      : await this.dataSource.getRepository(User).findOneBy({ id: input.receptionistUserId! });
+
+    if (!candidate) {
+      throw new NotFoundException(input.email ? 'No account is registered with that email.' : 'Receptionist not found.');
+    }
+    if (candidate.role !== 'RECEPTIONIST') {
+      throw new BadRequestException('That account is not a receptionist. Ask them to register as a receptionist first.');
+    }
+
+    // Id-based assign still requires an existing clinic link (admin shortlist). Email assign may create that link.
+    if (input.receptionistUserId && !input.email) {
+      const atClinic = await this.dataSource.getRepository(ReceptionistAssignment).existsBy({
+        receptionistUserId: candidate.id,
+        clinicId: doctor.clinicId,
+      });
+      if (!atClinic) throw new BadRequestException('Choose a receptionist assigned to your clinic.');
+    }
+
     await this.dataSource.transaction(async (manager) => {
+      const atClinic = await manager.getRepository(ReceptionistAssignment).existsBy({
+        receptionistUserId: candidate.id,
+        clinicId: doctor.clinicId,
+      });
+      if (!atClinic) {
+        await manager.save(manager.create(ReceptionistAssignment, { receptionistUserId: candidate.id, clinicId: doctor.clinicId }));
+      }
       await manager.delete(DoctorReceptionistAssignment, { doctorId: doctor.id });
       await manager.save(manager.create(DoctorReceptionistAssignment, { doctorId: doctor.id, receptionistUserId: candidate.id }));
     });

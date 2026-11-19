@@ -4,8 +4,8 @@ import { clinicNow } from '../scheduling/calendar.js';
 import { dateSchema } from '../scheduling/schemas.js';
 
 // The profile a new account fills in. Shared by the legacy sign-up and the Clerk sign-in so both enforce the same rules.
-// Only PATIENT and DOCTOR exist here: a role is never taken from a token, from Clerk, or from anything but this form,
-// and receptionist and admin accounts cannot be created through it at all.
+// PATIENT, DOCTOR and RECEPTIONIST can self-register here. ADMIN cannot: administrators are created only from the terminal.
+// Role is never taken from a token, from Clerk, or from anything but this form.
 
 // 50 characters each keeps "Dr. <first> <last>" inside the 120-character users.name column.
 const nameSchema = z.string().trim().min(1, 'is required').max(50, 'must be at most 50 characters');
@@ -35,4 +35,10 @@ const doctorProfileSchema = z.strictObject({
   bio: z.string().trim().max(1000, 'must be at most 1000 characters').optional(),
 });
 
-export const profileSchema = z.discriminatedUnion('role', [patientProfileSchema, doctorProfileSchema]);
+const receptionistProfileSchema = z.strictObject({
+  role: z.literal('RECEPTIONIST'),
+  firstName: nameSchema,
+  lastName: nameSchema,
+});
+
+export const profileSchema = z.discriminatedUnion('role', [patientProfileSchema, doctorProfileSchema, receptionistProfileSchema]);

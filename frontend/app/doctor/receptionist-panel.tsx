@@ -1,16 +1,19 @@
 'use client';
 
 import { UserRoundCogIcon } from 'lucide-react';
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import { Alert, EmptyState, Spinner } from '@/components/common';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { api, errorMessage } from '@/lib/api';
 import { useQuery } from '@/lib/hooks';
 import type { DoctorReceptionist, Session } from '@/lib/types';
 
 /**
  * Lets the signed-in doctor assign, change or remove the receptionist who may manage their appointments and queue.
+ * Prefer assigning by the receptionist's registered email; clinic shortlist remains as a convenience when present.
  */
 export function ReceptionistPanel({ session }: { session: Session }) {
   const assigned = useQuery(`doctor-receptionist:${session.user.id}`, () =>
@@ -21,6 +24,7 @@ export function ReceptionistPanel({ session }: { session: Session }) {
   );
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
+  const [email, setEmail] = useState('');
   const [picked, setPicked] = useState('');
 
   const current = assigned.data === undefined ? assigned.previous : assigned.data;
@@ -33,6 +37,8 @@ export function ReceptionistPanel({ session }: { session: Session }) {
     try {
       await work();
       setNotice({ tone: 'success', text: success });
+      setEmail('');
+      setPicked('');
       assigned.reload();
       candidates.reload();
     } catch (error) {
@@ -40,6 +46,16 @@ export function ReceptionistPanel({ session }: { session: Session }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const assignByEmail = (event: FormEvent) => {
+    event.preventDefault();
+    const trimmed = email.trim();
+    if (!trimmed) return;
+    void run(
+      () => api('/doctor-portal/receptionist', { method: 'PUT', token: session.accessToken, body: { email: trimmed } }),
+      current ? 'Receptionist changed.' : 'Receptionist assigned.',
+    );
   };
 
   if ((!current && current !== null && assigned.loading) || (candidates.loading && !list)) {
@@ -52,7 +68,9 @@ export function ReceptionistPanel({ session }: { session: Session }) {
         <CardTitle as="h2" className="text-lg font-semibold">
           Receptionist
         </CardTitle>
-        <CardDescription>Choose who may book, check in and print prescriptions for your patients. They must already be a receptionist at your clinic.</CardDescription>
+        <CardDescription>
+          Assign a registered receptionist by email so they can book, check in and print prescriptions for your patients only.
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {notice && <Alert tone={notice.tone}>{notice.text}</Alert>}
@@ -75,15 +93,33 @@ export function ReceptionistPanel({ session }: { session: Session }) {
           </div>
         ) : (
           <EmptyState title="No receptionist assigned" icon={UserRoundCogIcon}>
-            <p>Assign someone from your clinic so they can manage only your appointments.</p>
+            <p>Enter the email they used when they registered as a receptionist.</p>
           </EmptyState>
         )}
 
-        {list.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No receptionists are assigned to your clinic yet. Ask an administrator to add one.</p>
-        ) : (
+        <form className="flex flex-wrap items-end gap-3" onSubmit={assignByEmail}>
+          <div className="min-w-[16rem] flex-1 space-y-1.5">
+            <Label htmlFor="receptionist-email">{current ? 'Change by email' : 'Receptionist email'}</Label>
+            <Input
+              id="receptionist-email"
+              type="email"
+              autoComplete="off"
+              placeholder="receptionist@clinic.com"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              disabled={busy}
+              className="h-9"
+              required
+            />
+          </div>
+          <Button type="submit" disabled={busy || !email.trim()}>
+            {current ? 'Change' : 'Assign'}
+          </Button>
+        </form>
+
+        {list.length > 0 && (
           <form
-            className="flex flex-wrap items-end gap-3"
+            className="flex flex-wrap items-end gap-3 border-t pt-4"
             onSubmit={(event) => {
               event.preventDefault();
               if (!picked) return;
@@ -94,7 +130,7 @@ export function ReceptionistPanel({ session }: { session: Session }) {
             }}
           >
             <label className="min-w-[16rem] flex-1 space-y-1.5 text-sm">
-              <span className="font-medium text-foreground">{current ? 'Change to' : 'Assign'}</span>
+              <span className="font-medium text-foreground">Or choose from your clinic</span>
               <select
                 className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
                 value={picked}
@@ -109,7 +145,7 @@ export function ReceptionistPanel({ session }: { session: Session }) {
                 ))}
               </select>
             </label>
-            <Button type="submit" disabled={busy || !picked}>
+            <Button type="submit" variant="outline" disabled={busy || !picked}>
               {current ? 'Change' : 'Assign'}
             </Button>
           </form>

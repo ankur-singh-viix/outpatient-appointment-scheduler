@@ -55,6 +55,10 @@ export function validateDoctor(values: {
   return errors;
 }
 
+export function validateReceptionist(values: { firstName: string; lastName: string }): Errors {
+  return validateNames(values);
+}
+
 /** The errors without one field, used to clear a message as soon as the person edits that field. */
 export function without(errors: Errors, key: string): Errors {
   return Object.fromEntries(Object.entries(errors).filter(([name]) => name !== key));

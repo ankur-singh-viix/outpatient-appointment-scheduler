@@ -4,22 +4,24 @@ import { withDoctorTitle } from '../common/names.js';
 import { Clinic, Doctor, Patient, Specialty, User } from '../database/entities/index.js';
 
 /**
- * What a visitor fills in to finish creating an account. Only PATIENT and DOCTOR can be chosen here: receptionist and
- * admin accounts are never self-service and never come from the browser.
+ * What a visitor fills in to finish creating an account. PATIENT, DOCTOR and RECEPTIONIST may self-register.
+ * ADMIN accounts are never created through this path.
  */
 export type ProfileInput =
   | { role: 'PATIENT'; firstName: string; lastName: string; phone?: string; dateOfBirth?: string; gender?: string }
-  | { role: 'DOCTOR'; firstName: string; lastName: string; specialtyId: string; clinicId: string; consultationFee: number; bio?: string };
+  | { role: 'DOCTOR'; firstName: string; lastName: string; specialtyId: string; clinicId: string; consultationFee: number; bio?: string }
+  | { role: 'RECEPTIONIST'; firstName: string; lastName: string };
 
-/** "Ananya Rao" for patients; doctors are listed as "Dr. Ananya Rao", like the rest of the directory. */
+/** "Ananya Rao" for patients and receptionists; doctors are listed as "Dr. Ananya Rao", like the rest of the directory. */
 export function displayName(input: ProfileInput): string {
   const full = `${input.firstName} ${input.lastName}`.replace(/\s+/g, ' ').trim();
-  return input.role === 'PATIENT' ? full : withDoctorTitle(full);
+  return input.role === 'DOCTOR' ? withDoctorTitle(full) : full;
 }
 
 /**
- * Creates the user and their patient or doctor row inside the caller's transaction. `passwordHash` is null for people who
- * sign in through an outside provider and so have no CareSlot password. The caller checks that the email is free.
+ * Creates the user and their patient or doctor row inside the caller's transaction. Receptionists only need a users row
+ * (doctors later assign them). `passwordHash` is null for people who sign in through an outside provider and so have no
+ * CareSlot password. The caller checks that the email is free.
  */
 export async function createAccount(
   manager: EntityManager,
@@ -49,7 +51,7 @@ export async function createAccount(
         address: null,
       }),
     );
-  } else {
+  } else if (input.role === 'DOCTOR') {
     await manager.save(
       manager.create(Doctor, {
         userId: created.id,
@@ -62,5 +64,6 @@ export async function createAccount(
       }),
     );
   }
+  // RECEPTIONIST: users row only. Clinic and doctor links are created when a doctor assigns them by email.
   return created;
 }

@@ -92,7 +92,7 @@ describe('Doctor receptionist assignment (e2e)', () => {
     expect(assigned).toMatchObject({ id: receptionistA, name: 'Rita A' });
     expect((await http().get('/api/receptionist/doctors').set(as(tokens.receptionA)).expect(200)).body.map((d: { id: string }) => d.id)).toEqual([doctorA]);
 
-    await http().put('/api/doctor-portal/receptionist').set(as(tokens.doctorA)).send({ receptionistUserId: receptionistB }).expect(400); // other clinic
+    await http().put('/api/doctor-portal/receptionist').set(as(tokens.doctorA)).send({ receptionistUserId: receptionistB }).expect(400); // other clinic via id
     await http().put('/api/doctor-portal/receptionist').set(as(tokens.doctorB)).send({ receptionistUserId: receptionistB }).expect(200);
     expect((await http().get('/api/receptionist/doctors').set(as(tokens.receptionB)).expect(200)).body.map((d: { id: string }) => d.id)).toEqual([doctorB]);
 
@@ -100,6 +100,45 @@ describe('Doctor receptionist assignment (e2e)', () => {
     expect((await http().get('/api/doctor-portal/receptionist').set(as(tokens.doctorA)).expect(200)).body).toBeNull();
     expect((await http().get('/api/receptionist/doctors').set(as(tokens.receptionA)).expect(200)).body).toEqual([]);
     await http().delete('/api/doctor-portal/receptionist').set(as(tokens.doctorA)).expect(404);
+  });
+
+  it('assigns a self-registered receptionist by email and refuses non-receptionist accounts', async () => {
+    const hash = await hashPassword(PASSWORD);
+    const selfRegistered = (
+      await db.query('INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id', [
+        'Self Desk',
+        'self-desk@test.local',
+        hash,
+        'RECEPTIONIST',
+      ])
+    ).rows[0].id as string;
+    const patientId = (
+      await db.query('INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id', [
+        'Pat Patient',
+        'pat-desk@test.local',
+        hash,
+        'PATIENT',
+      ])
+    ).rows[0].id as string;
+    void patientId;
+
+    await http().put('/api/doctor-portal/receptionist').set(as(tokens.doctorA)).send({ email: 'missing@test.local' }).expect(404);
+    await http().put('/api/doctor-portal/receptionist').set(as(tokens.doctorA)).send({ email: 'pat-desk@test.local' }).expect(400);
+
+    const assigned = (
+      await http().put('/api/doctor-portal/receptionist').set(as(tokens.doctorA)).send({ email: 'Self-Desk@test.local' }).expect(200)
+    ).body;
+    expect(assigned).toMatchObject({ id: selfRegistered, name: 'Self Desk', email: 'self-desk@test.local' });
+    expect((await http().get('/api/doctor-portal/receptionist').set(as(tokens.doctorA)).expect(200)).body).toMatchObject({
+      id: selfRegistered,
+      email: 'self-desk@test.local',
+    });
+    const selfToken = await login('self-desk@test.local');
+    expect((await http().get('/api/receptionist/doctors').set(as(selfToken)).expect(200)).body.map((d: { id: string }) => d.id)).toEqual([
+      doctorA,
+    ]);
+    const clinicLinks = (await db.query('SELECT clinic_id FROM receptionist_assignments WHERE receptionist_user_id = $1', [selfRegistered])).rows;
+    expect(clinicLinks).toHaveLength(1);
   });
 
   it('refuses receptionist routes to other roles', async () => {
