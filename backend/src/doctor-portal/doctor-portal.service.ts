@@ -595,7 +595,7 @@ export class DoctorPortalService {
          FROM appointments a
          LEFT JOIN queue_entries q ON q.appointment_id = a.id
          LEFT JOIN prescriptions p ON p.appointment_id = a.id AND p.status = 'FINALIZED'
-        WHERE a.doctor_id = $1 AND a.patient_id = $2
+        WHERE a.doctor_id = $1 AND a.patient_id = $2 AND a.status = 'COMPLETED'
         ORDER BY a.appointment_date DESC, a.start_time DESC
         LIMIT 100`,
       [doctor.id, patientId],

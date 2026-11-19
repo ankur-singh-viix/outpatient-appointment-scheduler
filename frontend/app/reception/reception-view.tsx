@@ -13,6 +13,7 @@ import { AppointmentsPanel } from './appointments-panel';
 import { BookPanel } from './book-panel';
 import { PrescriptionsPanel } from './prescriptions-panel';
 import { QueuePanel } from './queue-panel';
+import { ReportsPanel } from './reports-panel';
 
 export function ReceptionPage() {
   return (
@@ -22,7 +23,7 @@ export function ReceptionPage() {
   );
 }
 
-type DeskTab = 'queue' | 'appointments' | 'book' | 'prescriptions';
+type DeskTab = 'queue' | 'appointments' | 'book' | 'prescriptions' | 'reports';
 
 function FrontDesk({ session }: { session: Session }) {
   const doctors = useQuery(`reception-doctors:${session.user.id}`, () => api<ReceptionDoctor[]>('/receptionist/doctors', { token: session.accessToken }));
@@ -78,6 +79,9 @@ function FrontDesk({ session }: { session: Session }) {
               <TabsTrigger value="prescriptions" className="flex-none px-4">
                 Prescriptions
               </TabsTrigger>
+              <TabsTrigger value="reports" className="flex-none px-4">
+                Reports
+              </TabsTrigger>
             </TabsList>
             <TabsContent value="queue">
               <QueuePanel session={session} doctors={list} refreshKey={version} />
@@ -90,6 +94,9 @@ function FrontDesk({ session }: { session: Session }) {
             </TabsContent>
             <TabsContent value="prescriptions">
               <PrescriptionsPanel session={session} />
+            </TabsContent>
+            <TabsContent value="reports">
+              <ReportsPanel session={session} />
             </TabsContent>
           </Tabs>
         </>

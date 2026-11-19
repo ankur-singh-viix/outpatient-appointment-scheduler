@@ -800,3 +800,44 @@ export interface PrescriptionDetail extends PrescriptionSummary {
 
 /** Patient view of a finalized prescription from GET /prescriptions/mine (same shape as PrescriptionDetail). */
 export type PatientPrescription = PrescriptionDetail;
+
+export type MedicalReportCategory =
+  | 'BLOOD_TESTS'
+  | 'X_RAY'
+  | 'CT_SCAN'
+  | 'MRI'
+  | 'ULTRASOUND'
+  | 'ECG_CARDIAC'
+  | 'OTHER';
+
+export const MEDICAL_REPORT_CATEGORY_LABELS: Record<MedicalReportCategory, string> = {
+  BLOOD_TESTS: 'Blood Tests',
+  X_RAY: 'X-Ray',
+  CT_SCAN: 'CT Scan',
+  MRI: 'MRI',
+  ULTRASOUND: 'Ultrasound',
+  ECG_CARDIAC: 'ECG / Cardiac',
+  OTHER: 'Other Medical Documents',
+};
+
+/** Metadata for a patient medical report (binaries stay in private object storage). */
+export interface MedicalReport {
+  id: string;
+  patientId: string;
+  patientUhid: string;
+  category: MedicalReportCategory;
+  reportDate: string;
+  originalFilename: string;
+  contentType: string;
+  byteSize: number;
+  uploadedByRole: 'PATIENT' | 'RECEPTIONIST';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MedicalReportDownload {
+  url: string;
+  expiresAt: string;
+  contentType: string;
+  filename: string;
+}

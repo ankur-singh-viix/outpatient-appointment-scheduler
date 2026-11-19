@@ -72,3 +72,41 @@ export async function api<T>(path: string, { method = 'GET', body, token, timeou
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Something went wrong. Please try again.';
 }
+
+/** Multipart upload helper (medical reports). Does not set Content-Type so the browser can send the boundary. */
+export async function apiForm<T>(path: string, form: FormData, token?: string | TokenGetter | null): Promise<T> {
+  let bearer: string | null | undefined;
+  try {
+    bearer = typeof token === 'function' ? await token() : token;
+  } catch {
+    bearer = null;
+  }
+
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(fetch, `${API_URL}${path}`, {
+      method: 'POST',
+      headers: {
+        ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+      },
+      body: form,
+    });
+  } catch (error) {
+    if (error instanceof RequestTimeoutError) throw new ApiError(0, 'This is taking longer than expected, so I stopped waiting. Please try again.');
+    throw new ApiError(0, 'Could not reach the server. Check your connection and try again.');
+  }
+
+  const data: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    if (response.status === 401 && typeof token === 'string') saveSession(null);
+    const body = data as { message?: string | string[]; code?: string } | null;
+    const message = body?.message;
+    throw new ApiError(
+      response.status,
+      Array.isArray(message) ? message.join('. ') : (message ?? `Request failed (${response.status}).`),
+      Array.isArray(message) ? message : message ? [message] : [],
+      body?.code,
+    );
+  }
+  return data as T;
+}

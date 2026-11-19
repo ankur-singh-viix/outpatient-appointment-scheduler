@@ -1,13 +1,15 @@
 'use client';
 
-import { ClipboardListIcon, FileTextIcon, HeartPulseIcon } from 'lucide-react';
+import { ClipboardListIcon, FileTextIcon, FolderOpenIcon, HeartPulseIcon } from 'lucide-react';
+import { useState } from 'react';
 import { Alert, EmptyState, Spinner, StatusBadge } from '@/components/common';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
-import { api } from '@/lib/api';
+import { api, errorMessage } from '@/lib/api';
 import { formatDate, formatTimeRange } from '@/lib/format';
 import { useQuery } from '@/lib/hooks';
-import type { DoctorPatientClinicalHistory, Session } from '@/lib/types';
+import type { DoctorPatientClinicalHistory, MedicalReport, MedicalReportDownload, Session } from '@/lib/types';
+import { MEDICAL_REPORT_CATEGORY_LABELS } from '@/lib/types';
 
 const FIELD_LABELS: Record<string, string> = {
   bloodGroup: 'Blood group',
@@ -39,13 +41,16 @@ export function PatientHistoryPanel({
   const history = useQuery(open && patientId ? `clinical-history:${session.user.id}:${patientId}` : null, () =>
     api<DoctorPatientClinicalHistory>(`/doctor-portal/patients/${patientId}/clinical-history`, { token: session.accessToken }),
   );
+  const reports = useQuery(open && patientId ? `medical-reports-doctor:${session.user.id}:${patientId}` : null, () =>
+    api<MedicalReport[]>(`/medical-reports/doctor/patients/${patientId}`, { token: session.accessToken }),
+  );
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
       <DialogContent className="max-h-[92dvh] max-w-3xl overflow-y-auto sm:max-w-3xl">
         <DialogTitle>Patient history</DialogTitle>
         <DialogDescription>
-          {patientName ? `Medical profile and visits for ${patientName}.` : 'Medical profile, previous visits and prescriptions.'}
+          {patientName ? `Medical profile, reports and visits for ${patientName}.` : 'Medical profile, reports, previous visits and prescriptions.'}
         </DialogDescription>
 
         {history.loading && !history.data && <Spinner label="Loading patient history…" />}
@@ -61,13 +66,36 @@ export function PatientHistoryPanel({
           </Alert>
         )}
 
-        {history.data && <HistoryBody data={history.data} />}
+        {history.data && (
+          <HistoryBody
+            data={history.data}
+            session={session}
+            reports={reports.data ?? null}
+            reportsLoading={reports.loading && !reports.data}
+            reportsError={reports.error}
+            onReloadReports={reports.reload}
+          />
+        )}
       </DialogContent>
     </Dialog>
   );
 }
 
-function HistoryBody({ data }: { data: DoctorPatientClinicalHistory }) {
+function HistoryBody({
+  data,
+  session,
+  reports,
+  reportsLoading,
+  reportsError,
+  onReloadReports,
+}: {
+  data: DoctorPatientClinicalHistory;
+  session: Session;
+  reports: MedicalReport[] | null;
+  reportsLoading: boolean;
+  reportsError: string | null;
+  onReloadReports: () => void;
+}) {
   const profile = data.medicalProfile;
   const hasMedical =
     Boolean(profile.bloodGroup?.trim()) ||
@@ -126,6 +154,37 @@ function HistoryBody({ data }: { data: DoctorPatientClinicalHistory }) {
               ))}
             </ul>
           </div>
+        )}
+      </section>
+
+      <section aria-labelledby="medical-reports-heading" className="space-y-3">
+        <h3 id="medical-reports-heading" className="flex items-center gap-2 text-base font-semibold text-foreground">
+          <FolderOpenIcon className="size-4" aria-hidden />
+          Medical reports
+        </h3>
+        {reportsLoading && <Spinner label="Loading medical reports…" />}
+        {reportsError && (
+          <Alert
+            action={
+              <Button size="sm" variant="outline" onClick={onReloadReports}>
+                Try again
+              </Button>
+            }
+          >
+            Could not load medical reports. {reportsError}
+          </Alert>
+        )}
+        {reports && reports.length === 0 && (
+          <EmptyState title="No medical reports" icon={FolderOpenIcon}>
+            <p>Reports uploaded by the patient or front desk will appear here.</p>
+          </EmptyState>
+        )}
+        {reports && reports.length > 0 && (
+          <ul className="space-y-2">
+            {reports.map((report) => (
+              <ReportRow key={report.id} report={report} session={session} />
+            ))}
+          </ul>
         )}
       </section>
 
@@ -202,6 +261,42 @@ function HistoryBody({ data }: { data: DoctorPatientClinicalHistory }) {
         )}
       </section>
     </div>
+  );
+}
+
+function ReportRow({ report, session }: { report: MedicalReport; session: Session }) {
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const openReport = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const download = await api<MedicalReportDownload>(`/medical-reports/doctor/${report.id}/download`, { token: session.accessToken });
+      window.open(download.url, '_blank', 'noopener,noreferrer');
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <li className="rounded-lg border px-3 py-2">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-foreground">{report.originalFilename}</p>
+          <p className="text-xs text-muted-foreground">
+            {MEDICAL_REPORT_CATEGORY_LABELS[report.category]} · {formatDate(report.reportDate, { weekday: undefined })} ·{' '}
+            {report.uploadedByRole === 'RECEPTIONIST' ? 'Uploaded by reception' : 'Uploaded by patient'}
+          </p>
+        </div>
+        <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void openReport()}>
+          {busy ? 'Opening…' : 'Open / download'}
+        </Button>
+      </div>
+      {error && <p className="mt-2 text-sm text-destructive">{error}</p>}
+    </li>
   );
 }
 

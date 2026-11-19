@@ -14,6 +14,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatFee, formatTimeRange, relativeDay } from '@/lib/format';
 import { useClinicToday, useQuery } from '@/lib/hooks';
 import type { PatientAppointment, PatientProfile, Session } from '@/lib/types';
+import { MedicalReportsCard } from './medical-reports-card';
 import { PatientQueueCard } from './patient-queue-card';
 
 export function PatientDashboard() {
@@ -202,6 +203,8 @@ function Dashboard({ session }: { session: Session }) {
           </Card>
         )}
       </section>
+
+      <MedicalReportsCard session={session} />
 
       <section aria-labelledby="completed-heading" className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">

@@ -12,11 +12,12 @@ import { HealthController } from './health.controller.js';
 import { JobsModule } from './jobs/jobs.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
 import { PrescriptionsModule } from './prescriptions/prescriptions.module.js';
+import { MedicalReportsModule } from './medical-reports/medical-reports.module.js';
 import { QueueModule } from './queue/queue.module.js';
 import { ReceptionistModule } from './receptionist/receptionist.module.js';
 
 @Module({
-  imports: [DatabaseModule, AuthModule, DoctorsModule, AppointmentsModule, DoctorPortalModule, ReceptionistModule, AdminModule, PaymentsModule, JobsModule, AssistantModule, QueueModule, PrescriptionsModule],
+  imports: [DatabaseModule, AuthModule, DoctorsModule, AppointmentsModule, DoctorPortalModule, ReceptionistModule, AdminModule, PaymentsModule, JobsModule, AssistantModule, QueueModule, PrescriptionsModule, MedicalReportsModule],
   controllers: [AppController, HealthController],
   providers: [AppService],
 })
