@@ -13,6 +13,7 @@ import {
   Appointment,
   Doctor,
   DoctorReceptionistAssignment,
+  Patient,
   Prescription,
   type PrescriptionMedication,
 } from '../database/entities/index.js';
@@ -197,7 +198,59 @@ export class PrescriptionsService {
     });
   }
 
+  // ---- Patient (own finalized only; patient id from session, never from the client) ----
+
+  /** Finalized prescriptions for the signed-in patient, newest appointment first. */
+  async listForPatient(user: AuthUser) {
+    return this.guard(async () => {
+      const patientId = await this.patientIdFor(user);
+      const rows: Record<string, unknown>[] = await this.dataSource.query(
+        `SELECT p.id, p.appointment_id, p.status, p.diagnosis, p.notes, p.medications, p.finalized_at, p.created_at, p.updated_at,
+                a.appointment_date::text AS appointment_date, a.start_time::text AS start_time, a.end_time::text AS end_time, a.status::text AS appointment_status,
+                pu.name AS patient_name, du.name AS doctor_name, c.name AS clinic_name, c.address AS clinic_address, s.name AS specialty
+           FROM prescriptions p
+           JOIN appointments a ON a.id = p.appointment_id
+           JOIN patients pt ON pt.id = p.patient_id JOIN users pu ON pu.id = pt.user_id
+           JOIN doctors d ON d.id = p.doctor_id JOIN users du ON du.id = d.user_id
+           JOIN clinics c ON c.id = d.clinic_id JOIN specialties s ON s.id = d.specialty_id
+          WHERE p.patient_id = $1 AND p.status = 'FINALIZED'
+          ORDER BY a.appointment_date DESC, a.start_time DESC, p.finalized_at DESC
+          LIMIT 100`,
+        [patientId],
+      );
+      return rows.map((row) => this.describe(row));
+    });
+  }
+
+  /** One finalized prescription belonging to the signed-in patient. */
+  async getForPatient(user: AuthUser, id: string) {
+    return this.guard(async () => {
+      const patientId = await this.patientIdFor(user);
+      const rows: Record<string, unknown>[] = await this.dataSource.query(
+        `SELECT p.id, p.appointment_id, p.status, p.diagnosis, p.notes, p.medications, p.finalized_at, p.created_at, p.updated_at,
+                a.appointment_date::text AS appointment_date, a.start_time::text AS start_time, a.end_time::text AS end_time, a.status::text AS appointment_status,
+                pu.name AS patient_name, du.name AS doctor_name, c.name AS clinic_name, c.address AS clinic_address, s.name AS specialty
+           FROM prescriptions p
+           JOIN appointments a ON a.id = p.appointment_id
+           JOIN patients pt ON pt.id = p.patient_id JOIN users pu ON pu.id = pt.user_id
+           JOIN doctors d ON d.id = p.doctor_id JOIN users du ON du.id = d.user_id
+           JOIN clinics c ON c.id = d.clinic_id JOIN specialties s ON s.id = d.specialty_id
+          WHERE p.id = $1 AND p.patient_id = $2 AND p.status = 'FINALIZED'`,
+        [id, patientId],
+      );
+      if (!rows[0]) throw new NotFoundException('Prescription not found.');
+      return this.describe(rows[0]);
+    });
+  }
+
   // ---- internals ----
+
+  private async patientIdFor(user: AuthUser): Promise<string> {
+    const patient = await this.dataSource.getRepository(Patient).findOneBy({ userId: user.id });
+    if (!patient) throw new ForbiddenException('No patient profile is linked to this account.');
+    return patient.id;
+  }
+
 
   private async guard<T>(work: () => Promise<T>): Promise<T> {
     try {
