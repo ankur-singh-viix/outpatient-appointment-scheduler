@@ -56,9 +56,11 @@ export class ReceptionistService {
   /** Registered patients matching a name, email or phone number. A few characters are needed, and only a few results come back. */
   async searchPatients(search: string) {
     const pattern = `%${escapeLike(search.trim())}%`;
+    // Only the columns reception needs — never medical profile fields.
     const rows = await this.patients
       .createQueryBuilder('patient')
-      .innerJoinAndSelect('patient.user', 'user')
+      .innerJoin('patient.user', 'user')
+      .select(['patient.id', 'patient.phone', 'user.id', 'user.name', 'user.email'])
       .where('user.name ILIKE :pattern OR user.email ILIKE :pattern OR patient.phone ILIKE :pattern', { pattern })
       .orderBy('user.name', 'ASC')
       .take(10)

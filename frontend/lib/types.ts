@@ -231,7 +231,13 @@ export interface NotificationPreferencesView {
 }
 
 /** The signed-in patient's own details. Null fields are ones they never gave. */
+export type BloodGroup = 'A+' | 'A-' | 'B+' | 'B-' | 'AB+' | 'AB-' | 'O+' | 'O-';
+
 export interface PatientProfile {
+  /** Permanent patient UUID. */
+  patientId: string;
+  /** Human-readable permanent ID (CC-UHID-000001). */
+  uhid: string;
   name: string;
   email: string;
   memberSince: string;
@@ -239,6 +245,13 @@ export interface PatientProfile {
   dateOfBirth: string | null;
   gender: string | null;
   address: string | null;
+  bloodGroup: BloodGroup | string | null;
+  allergies: string | null;
+  sensitivities: string | null;
+  medicalConditions: string | null;
+  currentMedications: string | null;
+  previousSurgeries: string | null;
+  otherMedicalInfo: string | null;
 }
 
 /** What the browser needs to open Razorpay Checkout. Contains only the public key id. */

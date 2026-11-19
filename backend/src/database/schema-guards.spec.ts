@@ -31,6 +31,7 @@ describe('missingTables', () => {
       'queue_entries',
       'doctor_receptionist_assignments',
       'prescriptions',
+      'patient_medical_profile_history',
     ]);
     expect(missing[0]).toEqual(expect.objectContaining({ migration: '012_assistant_actions.sql' }));
     expect(missing[0].consequence).toMatch(/cannot prepare bookings/);
@@ -40,7 +41,11 @@ describe('missingTables', () => {
       query: async (sql: string) => [
         {
           found:
-            sql.includes('assistant_actions') || sql.includes('queue_entries') || sql.includes('doctor_receptionist') || sql.includes('prescriptions')
+            sql.includes('assistant_actions') ||
+            sql.includes('queue_entries') ||
+            sql.includes('doctor_receptionist') ||
+            sql.includes('prescriptions') ||
+            sql.includes('patient_medical_profile_history')
               ? 'present'
               : null,
         },
@@ -82,9 +87,9 @@ describe('missingColumns', () => {
   it('reports queue checked_in_at when migration 017 has not made it nullable', async () => {
     const missing = await missingColumns({
       query: async (sql: string) => {
-        if (sql.includes('hidden_by_patient_at')) return [{ is_nullable: 'YES' }];
+        if (sql.includes('hidden_by_patient_at') || sql.includes("'uhid'")) return [{ is_nullable: 'YES' }];
         if (sql.includes('checked_in_at')) return [{ is_nullable: 'NO' }];
-        return [];
+        return [{ is_nullable: 'YES' }];
       },
     });
     expect(missing).toEqual([
@@ -95,6 +100,13 @@ describe('missingColumns', () => {
       }),
     ]);
     expect(missing[0].consequence).toMatch(/booking-time queue tokens fail/);
+  });
+
+  it('reports patients.uhid when migration 018 has not been applied', async () => {
+    const missing = await missingColumns({
+      query: async (sql: string) => (sql.includes("'uhid'") ? [] : [{ is_nullable: 'YES' }]),
+    });
+    expect(missing).toEqual([expect.objectContaining({ table: 'patients', column: 'uhid', migration: '018_patient_uhid_and_medical_profile.sql' })]);
   });
 
   it('reports nothing when required columns exist and nullable ones allow NULL', async () => {

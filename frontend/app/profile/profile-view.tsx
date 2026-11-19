@@ -1,15 +1,17 @@
 'use client';
 
+import { useState } from 'react';
 import { LogOutIcon } from 'lucide-react';
 import { Alert, Avatar, Spinner } from '@/components/common';
 import { RequireRole } from '@/components/require-role';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { api } from '@/lib/api';
 import { formatDate, initials } from '@/lib/format';
 import { useQuery } from '@/lib/hooks';
 import { signOutEverywhere } from '@/lib/session';
 import type { PatientProfile, Session } from '@/lib/types';
+import { MedicalProfileForm } from './medical-profile-form';
 
 export function ProfileView() {
   return (
@@ -32,8 +34,9 @@ const NOT_GIVEN = <span className="font-normal text-muted-foreground">Not provid
 
 function Profile({ session }: { session: Session }) {
   const profile = useQuery(`profile:${session.user.id}`, () => api<PatientProfile>('/auth/me/profile', { token: session.accessToken }));
-  if (profile.loading && !profile.data) return <Spinner label="Loading your profile…" />;
-  if (profile.error || !profile.data) {
+  const [override, setOverride] = useState<PatientProfile | null>(null);
+  if (profile.loading && !profile.data && !override) return <Spinner label="Loading your profile…" />;
+  if ((profile.error || !profile.data) && !override) {
     return (
       <Alert
         action={
@@ -46,7 +49,7 @@ function Profile({ session }: { session: Session }) {
       </Alert>
     );
   }
-  const p = profile.data;
+  const p = override ?? profile.data!;
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <Card className="[--card-spacing:--spacing(6)]">
@@ -55,6 +58,7 @@ function Profile({ session }: { session: Session }) {
           <div className="min-w-0 flex-1">
             <p className="text-xl font-bold text-foreground">{p.name}</p>
             <p className="text-sm break-all text-muted-foreground">{p.email}</p>
+            <p className="mt-2 font-mono text-sm font-semibold tracking-wide text-teal-800 tabular-nums">{p.uhid}</p>
             <p className="mt-1 text-xs text-muted-foreground">Patient since {formatDate(p.memberSince.slice(0, 10), { weekday: undefined })}</p>
           </div>
         </CardContent>
@@ -65,9 +69,13 @@ function Profile({ session }: { session: Session }) {
           <CardTitle as="h2" className="text-lg font-semibold">
             Your details
           </CardTitle>
+          <CardDescription>Account and contact information. Your permanent patient ID is shown above.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <dl className="grid gap-x-8 gap-y-5 sm:grid-cols-2">
+            <Field label="UHID">
+              <span className="font-mono tabular-nums">{p.uhid}</span>
+            </Field>
             <Field label="Full name">{p.name}</Field>
             <Field label="Email">{p.email}</Field>
             <Field label="Phone">{p.phone ?? NOT_GIVEN}</Field>
@@ -76,8 +84,27 @@ function Profile({ session }: { session: Session }) {
             <Field label="Address">{p.address ?? NOT_GIVEN}</Field>
           </dl>
           <p className="border-t pt-4 text-sm text-muted-foreground">
-            These details are shown for your information. Changing them online is not available yet.
+            Contact details are shown for your information. Changing name, email or phone online is not available yet.
           </p>
+        </CardContent>
+      </Card>
+
+      <Card className="[--card-spacing:--spacing(6)]">
+        <CardHeader>
+          <CardTitle as="h2" className="text-lg font-semibold">
+            Medical information
+          </CardTitle>
+          <CardDescription>Only you can view and update this. Front desk staff cannot see these details.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <MedicalProfileForm
+            session={session}
+            profile={p}
+            onSaved={(next) => {
+              setOverride(next);
+              profile.reload();
+            }}
+          />
         </CardContent>
       </Card>
 

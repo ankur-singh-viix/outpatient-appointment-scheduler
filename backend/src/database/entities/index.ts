@@ -10,6 +10,7 @@ import { ExternalIdentity } from './external-identity.entity.js';
 import { NotificationPreference } from './notification-preference.entity.js';
 import { Notification } from './notification.entity.js';
 import { Patient } from './patient.entity.js';
+import { PatientMedicalProfileHistory } from './patient-medical-profile-history.entity.js';
 import { PaymentEvent } from './payment-event.entity.js';
 import { Payment } from './payment.entity.js';
 import { Prescription, PRESCRIPTION_STATUSES, type PrescriptionMedication, type PrescriptionStatus } from './prescription.entity.js';
@@ -36,6 +37,7 @@ export {
   Notification,
   NotificationPreference,
   Patient,
+  PatientMedicalProfileHistory,
   Payment,
   PaymentEvent,
   PRESCRIPTION_STATUSES,
@@ -62,6 +64,7 @@ export {
 export const ENTITIES = [
   User,
   Patient,
+  PatientMedicalProfileHistory,
   Doctor,
   Clinic,
   Specialty,
