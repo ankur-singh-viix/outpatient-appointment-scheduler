@@ -52,6 +52,11 @@ const REQUIRED_TABLES = [
     migration: '016_doctor_receptionist_and_prescriptions.sql',
     consequence: 'prescriptions cannot be created, finalized or printed',
   },
+  {
+    name: 'patient_medical_profile_history',
+    migration: '018_patient_uhid_and_medical_profile.sql',
+    consequence: 'patient medical profile updates cannot be audited; UHID/medical columns may also be missing',
+  },
 ];
 
 export interface MissingTable {
@@ -91,6 +96,12 @@ const REQUIRED_COLUMNS: {
     migration: '017_booking_time_queue_tokens.sql',
     mustAllowNull: true,
     consequence: 'booking-time queue tokens fail (checked_in_at rejects NULL for BOOKED entries); check-in and the rest of the queue keep working once the migration is applied',
+  },
+  {
+    table: 'patients',
+    column: 'uhid',
+    migration: '018_patient_uhid_and_medical_profile.sql',
+    consequence: 'permanent patient UHID is unavailable; medical profile fields may also be missing',
   },
 ];
 

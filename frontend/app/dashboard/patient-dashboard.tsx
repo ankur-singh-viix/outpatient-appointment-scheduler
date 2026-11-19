@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowRightIcon, CalendarCheckIcon, CalendarPlusIcon, ClockIcon, MapPinIcon, SearchIcon } from 'lucide-react';
+import { ArrowRightIcon, CalendarCheckIcon, CalendarPlusIcon, ClockIcon, HeartPulseIcon, MapPinIcon, SearchIcon } from 'lucide-react';
 import Link from 'next/link';
 import { Alert, EmptyState, PageHeader, StatusBadge } from '@/components/common';
 import { PaymentChip } from '@/components/payment-info';
@@ -13,7 +13,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { api } from '@/lib/api';
 import { formatDate, formatFee, formatTimeRange, relativeDay } from '@/lib/format';
 import { useClinicToday, useQuery } from '@/lib/hooks';
-import type { PatientAppointment, Session } from '@/lib/types';
+import type { PatientAppointment, PatientProfile, Session } from '@/lib/types';
 import { PatientQueueCard } from './patient-queue-card';
 
 export function PatientDashboard() {
@@ -32,6 +32,9 @@ function Dashboard({ session }: { session: Session }) {
   const today = useClinicToday();
   const appointments = useQuery(`dashboard:${session.user.id}`, () =>
     api<PatientAppointment[]>('/appointments/mine', { token: session.accessToken }),
+  );
+  const profile = useQuery(`dashboard-profile:${session.user.id}`, () =>
+    api<PatientProfile>('/auth/me/profile', { token: session.accessToken }),
   );
 
   const all = appointments.data ?? [];
@@ -53,6 +56,28 @@ function Dashboard({ session }: { session: Session }) {
       />
 
       <PatientQueueCard session={session} />
+
+      <Card className="[--card-spacing:--spacing(5)]">
+        <CardContent className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0 space-y-1">
+            <p className="flex items-center gap-1.5 text-xs font-semibold tracking-widest text-muted-foreground uppercase">
+              <HeartPulseIcon className="size-3.5" aria-hidden />
+              Your patient ID
+            </p>
+            {profile.loading && !profile.data ? (
+              <Skeleton className="h-7 w-40" />
+            ) : profile.data?.uhid ? (
+              <p className="font-mono text-xl font-bold tracking-wide text-foreground tabular-nums">{profile.data.uhid}</p>
+            ) : (
+              <p className="text-sm text-muted-foreground">Patient ID unavailable right now.</p>
+            )}
+            <p className="text-sm text-muted-foreground">Keep this UHID for clinic visits. Update medical details anytime on your profile.</p>
+          </div>
+          <Link href="/profile" className={buttonVariants({ variant: 'outline', size: 'lg', className: 'h-10' })}>
+            Medical profile
+          </Link>
+        </CardContent>
+      </Card>
 
       <Card className="bg-gradient-to-br from-teal-700 to-teal-900 text-white [--card-spacing:--spacing(6)]">
         <CardContent className="flex flex-wrap items-center justify-between gap-4">

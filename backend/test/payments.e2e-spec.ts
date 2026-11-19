@@ -1049,7 +1049,18 @@ describe('Payments, refunds and notifications (e2e)', () => {
     it("shows the patient's own details, read only, to patients only", async () => {
       await db.query("UPDATE patients SET phone = '+91 98765 43210', gender = 'Female' WHERE user_id = (SELECT id FROM users WHERE email = 'patient1@test.local')");
       const profile = (await http().get('/api/auth/me/profile').set(as(patientToken)).expect(200)).body;
-      expect(profile).toMatchObject({ name: 'Pat One', email: 'patient1@test.local', phone: '+91 98765 43210', gender: 'Female', dateOfBirth: null, address: null });
+      expect(profile).toMatchObject({
+        name: 'Pat One',
+        email: 'patient1@test.local',
+        phone: '+91 98765 43210',
+        gender: 'Female',
+        dateOfBirth: null,
+        address: null,
+        bloodGroup: null,
+        allergies: null,
+      });
+      expect(profile.uhid).toMatch(/^CC-UHID-\d{6}$/);
+      expect(profile.patientId).toBeTruthy();
       expect(profile.memberSince).toBeTruthy();
       expect(JSON.stringify(profile)).not.toMatch(/password|hash/i);
       expect((await http().get('/api/auth/me/profile').set(as(otherPatientToken)).expect(200)).body.email).toBe('patient2@test.local');

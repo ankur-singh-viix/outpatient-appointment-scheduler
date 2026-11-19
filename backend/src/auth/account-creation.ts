@@ -2,6 +2,7 @@ import { BadRequestException } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
 import { withDoctorTitle } from '../common/names.js';
 import { Clinic, Doctor, Patient, Specialty, User } from '../database/entities/index.js';
+import { allocatePatientUhid } from './patient-uhid.js';
 
 /**
  * What a visitor fills in to finish creating an account. PATIENT, DOCTOR and RECEPTIONIST may self-register.
@@ -42,9 +43,11 @@ export async function createAccount(
     manager.create(User, { name: displayName(input), email, passwordHash, googleId: null, role: input.role }),
   );
   if (input.role === 'PATIENT') {
+    // UHID is issued once here for a new patient profile — never again at booking or check-in.
     await manager.save(
       manager.create(Patient, {
         userId: created.id,
+        uhid: await allocatePatientUhid(manager),
         phone: input.phone ?? null,
         dateOfBirth: input.dateOfBirth ?? null,
         gender: input.gender ?? null,

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, HttpCode, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Post, Put, UseGuards } from '@nestjs/common';
 import { z } from 'zod';
 import { ZodValidationPipe } from '../common/zod-validation.pipe.js';
 import { profileSchema } from './auth.schemas.js';
@@ -6,6 +6,7 @@ import { CurrentUser, Roles } from './auth.decorators.js';
 import { AuthGuard } from './auth.guard.js';
 import { AuthService } from './auth.service.js';
 import type { AuthUser } from './auth.types.js';
+import { BLOOD_GROUPS } from './patient-uhid.js';
 import { InvitationService } from './invitation.service.js';
 import { SignupService, type ProfileInput } from './signup.service.js';
 
@@ -30,6 +31,19 @@ const acceptInviteSchema = z.strictObject({
   token: z.string().min(20).max(2000),
   password: z.string().min(8, 'must be at least 8 characters').max(128, 'must be at most 128 characters'),
 });
+
+const medicalText = z.union([z.string().trim().max(2000), z.null()]).optional();
+const medicalProfileSchema = z
+  .strictObject({
+    bloodGroup: z.union([z.enum(BLOOD_GROUPS), z.null()]).optional(),
+    allergies: medicalText,
+    sensitivities: medicalText,
+    medicalConditions: medicalText,
+    currentMedications: medicalText,
+    previousSurgeries: medicalText,
+    otherMedicalInfo: medicalText,
+  })
+  .refine((body) => Object.keys(body).length > 0, { message: 'Provide at least one medical field to update.' });
 
 
 @Controller('auth')
@@ -95,11 +109,22 @@ export class AuthController {
     return this.auth.me(user.id);
   }
 
-  /** The patient's own details (read only), for the My Profile page. */
+  /** The patient's own identity and medical profile, for My Profile. */
   @Get('me/profile')
   @UseGuards(AuthGuard)
   @Roles('PATIENT')
   profile(@CurrentUser() user: AuthUser) {
     return this.auth.patientProfile(user.id);
+  }
+
+  /** Updates the signed-in patient's own medical profile fields and appends history. */
+  @Put('me/profile/medical')
+  @UseGuards(AuthGuard)
+  @Roles('PATIENT')
+  updateMedicalProfile(
+    @CurrentUser() user: AuthUser,
+    @Body(new ZodValidationPipe(medicalProfileSchema)) body: z.infer<typeof medicalProfileSchema>,
+  ) {
+    return this.auth.updatePatientMedicalProfile(user.id, body);
   }
 }
