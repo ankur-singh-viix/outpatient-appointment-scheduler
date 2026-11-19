@@ -76,12 +76,21 @@ describe('Doctor clinical history (e2e)', () => {
     patientOnlyB = await makePatient('Only B Patient', 'onlyb.hist@test.local', 'Dust');
     patientEmpty = await makePatient('Empty History', 'empty.hist@test.local');
 
-    const doctorAUser = (await db.query("SELECT user_id FROM doctors WHERE id = $1", [doctorA])).rows[0].user_id as string;
+    const doctorAUser = (await db.query('SELECT user_id FROM doctors WHERE id = $1', [doctorA])).rows[0].user_id as string;
+    // Two completed visits (newest-first expectation) plus non-completed rows that must never appear in Previous Visits.
     await db.query(
       `INSERT INTO appointments (patient_id, doctor_id, booked_by_user_id, appointment_date, start_time, end_time, status, slot_number, slot_capacity)
        VALUES
          ($1, $2, $3, '2026-01-10', '09:00', '09:30', 'COMPLETED', 1, 1),
-         ($1, $2, $3, '2026-02-10', '10:00', '10:30', 'CONFIRMED', 1, 1)`,
+         ($1, $2, $3, '2026-02-10', '10:00', '10:30', 'COMPLETED', 1, 1),
+         ($1, $2, $3, '2026-02-15', '11:00', '11:30', 'CONFIRMED', 1, 1),
+         ($1, $2, $3, '2026-02-16', '11:00', '11:30', 'PENDING', 1, 1),
+         ($1, $2, $3, '2026-02-18', '11:00', '11:30', 'NO_SHOW', 1, 1)`,
+      [patientShared, doctorA, doctorAUser],
+    );
+    await db.query(
+      `INSERT INTO appointments (patient_id, doctor_id, booked_by_user_id, appointment_date, start_time, end_time, status, slot_number, slot_capacity, cancelled_at, cancelled_by_user_id, cancel_reason)
+       VALUES ($1, $2, $3, '2026-02-17', '11:00', '11:30', 'CANCELLED', 1, 1, now(), $3, 'Test cancel')`,
       [patientShared, doctorA, doctorAUser],
     );
     const olderAppt = (
@@ -103,9 +112,7 @@ describe('Doctor clinical history (e2e)', () => {
       [patientOnlyB, doctorB, doctorBUser],
     );
 
-    // One shared appointment for empty patient so doctor A is authorized but history has no visits? Wait - if they have appointment it shows in visits.
-    // empty patient: authorize via a cancelled appointment so medical can be empty and visits list has one cancelled row — or authorize with appointment and expect visits length 1.
-    // Spec wants empty history responses: use patient with appointment but no medical + no finalized Rx; visits may still list the appointment.
+    // Authorize doctor A via a non-completed appointment so medical can be empty and visits stay empty.
     await db.query(
       `INSERT INTO appointments (patient_id, doctor_id, booked_by_user_id, appointment_date, start_time, end_time, status, slot_number, slot_capacity)
        VALUES ($1, $2, $3, '2026-04-01', '12:00', '12:30', 'CONFIRMED', 1, 1)`,
@@ -153,7 +160,13 @@ describe('Doctor clinical history (e2e)', () => {
       newValue: 'Penicillin',
       updatedBy: { name: 'Shared Patient', role: 'PATIENT' },
     });
-    expect(body.visits.map((v: { date: string }) => v.date)).toEqual(['2026-02-10', '2026-01-10']);
+    // Previous Visits: COMPLETED only, newest first. CONFIRMED / PENDING / CANCELLED / NO_SHOW are excluded.
+    expect(body.visits).toHaveLength(2);
+    expect(body.visits.map((v: { date: string; status: string }) => ({ date: v.date, status: v.status }))).toEqual([
+      { date: '2026-02-10', status: 'COMPLETED' },
+      { date: '2026-01-10', status: 'COMPLETED' },
+    ]);
+    expect(body.visits.every((v: { status: string }) => v.status === 'COMPLETED')).toBe(true);
     expect(body.visits[1].prescription).toMatchObject({
       status: 'FINALIZED',
       diagnosis: 'Otitis',
@@ -162,6 +175,16 @@ describe('Doctor clinical history (e2e)', () => {
     });
     expect(body.visits[0].prescription).toBeNull();
     expect(JSON.stringify(body)).not.toMatch(/password|password_hash/i);
+  });
+
+  it('excludes confirmed, pending, cancelled and no-show appointments from previous visits', async () => {
+    const body = (await history(tokens.doctorA, patientShared).expect(200)).body;
+    const statuses = body.visits.map((v: { status: string }) => v.status);
+    expect(statuses).not.toContain('CONFIRMED');
+    expect(statuses).not.toContain('PENDING');
+    expect(statuses).not.toContain('CANCELLED');
+    expect(statuses).not.toContain('NO_SHOW');
+    expect(body.visits).toHaveLength(2);
   });
 
   it('refuses unauthorized doctors, patients and receptionists; unknown patients look missing', async () => {
@@ -184,7 +207,6 @@ describe('Doctor clinical history (e2e)', () => {
       otherMedicalInfo: null,
     });
     expect(body.medicalUpdates).toEqual([]);
-    expect(body.visits).toHaveLength(1);
-    expect(body.visits[0].prescription).toBeNull();
+    expect(body.visits).toEqual([]);
   });
 });
