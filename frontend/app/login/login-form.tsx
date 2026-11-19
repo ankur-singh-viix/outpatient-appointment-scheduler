@@ -67,7 +67,7 @@ export function LoginForm() {
             <CardTitle as="h1" className="text-2xl font-bold">
               Sign in
             </CardTitle>
-            <CardDescription>Patients sign in to book. Doctors sign in to manage their schedule.</CardDescription>
+            <CardDescription>Patients, doctors and receptionists sign in with the email they registered.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             {error && <Alert>{error}</Alert>}

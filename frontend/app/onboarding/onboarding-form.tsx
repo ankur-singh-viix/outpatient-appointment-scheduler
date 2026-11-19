@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowLeftIcon, StethoscopeIcon, UserRoundIcon } from 'lucide-react';
+import { ArrowLeftIcon, ClipboardListIcon, StethoscopeIcon, UserRoundIcon } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState, type FormEvent } from 'react';
@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { ApiError, api, errorMessage } from '@/lib/api';
+import { homeFor } from '@/lib/home';
 import { useClinicToday, useQuery } from '@/lib/hooks';
 import { LinkAccountPanel } from '@/components/link-account-panel';
 import { setClerkState, useClerkState } from '@/lib/clerk-state';
@@ -20,14 +21,15 @@ import { saveSession, useAuthState, useHydrated } from '@/lib/session';
 import { saveSignupDraft, useSignupDraft } from '@/lib/signup-draft';
 import type { Clinic, PublicUser, Session, Specialty } from '@/lib/types';
 import { ContinueRedirect } from '../continue/continue-redirect';
-import { fieldErrorsFromApi, validateDoctor, validatePatient, without, type Errors } from '@/lib/validation';
+import { fieldErrorsFromApi, validateDoctor, validatePatient, validateReceptionist, without, type Errors } from '@/lib/validation';
 import { cn } from '@/lib/utils';
 
-type Role = 'PATIENT' | 'DOCTOR';
+type Role = 'PATIENT' | 'DOCTOR' | 'RECEPTIONIST';
 
 const ROLE_OPTIONS: { role: Role; title: string; text: string; icon: typeof UserRoundIcon }[] = [
   { role: 'PATIENT', title: "I'm a patient", text: 'Find doctors, book visits and manage your appointments.', icon: UserRoundIcon },
   { role: 'DOCTOR', title: "I'm a doctor", text: 'Share your availability and manage the appointments booked with you.', icon: StethoscopeIcon },
+  { role: 'RECEPTIONIST', title: "I'm a receptionist", text: 'Manage the front desk for doctors who assign you.', icon: ClipboardListIcon },
 ];
 
 const EMPTY = { firstName: '', lastName: '', phone: '', dateOfBirth: '', gender: '', specialtyId: '', clinicId: '', fee: '', bio: '' };
@@ -86,7 +88,8 @@ export function OnboardingForm() {
     event.preventDefault();
     if (!role) return;
     setFormError(null);
-    const found = role === 'PATIENT' ? validatePatient(form, today) : validateDoctor(form);
+    const found =
+      role === 'PATIENT' ? validatePatient(form, today) : role === 'DOCTOR' ? validateDoctor(form) : validateReceptionist(form);
     setErrors(found);
     if (Object.keys(found).length) return;
 
@@ -100,15 +103,21 @@ export function OnboardingForm() {
             ...(form.dateOfBirth && { dateOfBirth: form.dateOfBirth }),
             ...(form.gender && { gender: form.gender }),
           }
-        : {
-            role,
-            firstName: form.firstName.trim(),
-            lastName: form.lastName.trim(),
-            specialtyId: form.specialtyId,
-            clinicId: form.clinicId,
-            consultationFee: Number(form.fee),
-            ...(form.bio.trim() && { bio: form.bio.trim() }),
-          };
+        : role === 'DOCTOR'
+          ? {
+              role,
+              firstName: form.firstName.trim(),
+              lastName: form.lastName.trim(),
+              specialtyId: form.specialtyId,
+              clinicId: form.clinicId,
+              consultationFee: Number(form.fee),
+              ...(form.bio.trim() && { bio: form.bio.trim() }),
+            }
+          : {
+              role,
+              firstName: form.firstName.trim(),
+              lastName: form.lastName.trim(),
+            };
 
     setSubmitting(true);
     try {
@@ -116,12 +125,13 @@ export function OnboardingForm() {
         // The Clerk sign-in is the credential: no token is stored. The response says which account was created.
         const created = await api<{ user: PublicUser }>('/auth/clerk/complete-profile', { method: 'POST', token: clerk.getToken, body });
         setClerkState({ account: { state: 'LINKED', user: created.user } });
+        router.push(homeFor(created.user.role));
       } else {
         const session = await api<Session>('/auth/complete-profile', { method: 'POST', token: draft?.signupToken, body });
         saveSession(session);
         saveSignupDraft(null);
+        router.push(homeFor(session.user.role));
       }
-      router.push(role === 'DOCTOR' ? '/doctor' : '/dashboard');
     } catch (error) {
       if (error instanceof ApiError && error.status === 400) {
         const fromServer = fieldErrorsFromApi(error.details);
@@ -153,7 +163,7 @@ export function OnboardingForm() {
               value={role ?? ''}
               onValueChange={(value) => setRole(value as Role)}
               aria-label="How will you use CareSlot?"
-              className="grid gap-3 sm:grid-cols-2"
+              className="grid gap-3 sm:grid-cols-3"
             >
               {ROLE_OPTIONS.map((option) => (
                 <Label
@@ -197,7 +207,7 @@ export function OnboardingForm() {
                 Back to role
               </Button>
               <p className="text-xs font-semibold tracking-widest text-primary uppercase">
-                {role === 'DOCTOR' ? 'Doctor' : 'Patient'} profile
+                {role === 'DOCTOR' ? 'Doctor' : role === 'RECEPTIONIST' ? 'Receptionist' : 'Patient'} profile
               </p>
               <CardTitle as="h1" className="text-2xl font-bold">
                 Your profile details
@@ -227,7 +237,7 @@ export function OnboardingForm() {
                 </Field>
               </div>
 
-              {role === 'PATIENT' ? (
+              {role === 'PATIENT' && (
                 <>
                   <div className="grid gap-4 sm:grid-cols-2">
                     <Field id="phone" label="Phone" optional error={errors.phone}>
@@ -247,7 +257,15 @@ export function OnboardingForm() {
                     </select>
                   </Field>
                 </>
-              ) : (
+              )}
+
+              {role === 'RECEPTIONIST' && (
+                <p className="rounded-lg bg-muted p-3 text-sm text-muted-foreground">
+                  After you create your profile, a doctor can assign you from their dashboard using this email. You will then see only that doctor&apos;s appointments and queue.
+                </p>
+              )}
+
+              {role === 'DOCTOR' && (
                 <>
                   {(specialties.error || clinics.error) && (
                     <Alert

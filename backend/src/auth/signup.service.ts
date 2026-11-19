@@ -44,7 +44,7 @@ interface SignupTokenPayload {
  * Sign-up in three steps, with nothing in `users` until the last one:
  * 1. register: store the email and a password HASH as a pending sign-up and email a 6-digit code;
  * 2. verify the code: the visitor receives a short-lived sign-up token;
- * 3. complete the profile as Patient or Doctor: only now are the real user (and patient or doctor) rows created.
+ * 3. complete the profile as Patient, Doctor or Receptionist: only now are the real user (and patient/doctor) rows created.
  */
 @Injectable()
 export class SignupService {

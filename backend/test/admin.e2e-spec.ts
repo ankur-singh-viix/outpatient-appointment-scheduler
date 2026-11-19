@@ -368,11 +368,9 @@ describe('Admin-managed receptionists (e2e)', () => {
   });
 
   describe('public sign-up', () => {
-    it('can still never create a receptionist or an administrator', async () => {
+    it('can still never create an administrator through public sign-up', async () => {
       const signupToken = await jwt.signAsync({ purpose: 'signup', email: 'sneaky@test.local' }, { expiresIn: '5m' });
-      for (const role of ['RECEPTIONIST', 'ADMIN']) {
-        await http().post('/api/auth/complete-profile').set(as(signupToken)).send({ role, firstName: 'Sneaky', lastName: 'Person' }).expect(400);
-      }
+      await http().post('/api/auth/complete-profile').set(as(signupToken)).send({ role: 'ADMIN', firstName: 'Sneaky', lastName: 'Person' }).expect(400);
       expect(await rows("SELECT 1 FROM users WHERE email = 'sneaky@test.local'")).toEqual([]);
     });
   });
