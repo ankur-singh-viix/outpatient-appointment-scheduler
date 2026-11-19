@@ -1,6 +1,6 @@
 'use client';
 
-import { CalendarPlusIcon, ChevronLeftIcon, ChevronRightIcon, PhoneIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarPlusIcon, ChevronLeftIcon, ChevronRightIcon, ClipboardListIcon, PhoneIcon, RefreshCwIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Alert, EmptyState, PageHeader, Spinner, StatusBadge } from '@/components/common';
 import { RequireRole } from '@/components/require-role';
@@ -14,6 +14,7 @@ import { useAutoRefresh, useClinicToday, useNow, useQuery } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 import type { DoctorAppointment, Session } from '@/lib/types';
 import { CancelAppointmentDialog } from './cancel-appointment-dialog';
+import { PatientHistoryPanel } from './patient-history-panel';
 
 const NEW_BOOKING_MS = 24 * 60 * 60 * 1000;
 const isActive = (a: DoctorAppointment) => a.status === 'CONFIRMED' || a.status === 'PENDING';
@@ -31,6 +32,7 @@ function AppointmentsView({ session }: { session: Session }) {
   const now = useNow();
   const [pickedDate, setPickedDate] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<DoctorAppointment | null>(null);
+  const [historyPatient, setHistoryPatient] = useState<{ id: string; name: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const date = pickedDate ?? today;
 
@@ -184,6 +186,16 @@ function AppointmentsView({ session }: { session: Session }) {
                         {/* On a phone the status and Cancel drop onto their own line under the patient's details. */}
                         <div className="flex w-full items-center justify-end gap-2 sm:w-auto">
                           <StatusBadge status={a.status} />
+                          {a.patient.id && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              aria-label={`View medical and visit history for ${a.patient.name}`}
+                              onClick={() => setHistoryPatient({ id: a.patient.id!, name: a.patient.name })}
+                            >
+                              <ClipboardListIcon aria-hidden /> History
+                            </Button>
+                          )}
                           {canCancel(a) && (
                             <Button
                               variant="outline"
@@ -215,6 +227,14 @@ function AppointmentsView({ session }: { session: Session }) {
           setNotice(`Appointment with ${cancelled.patient.name} cancelled. They can see your reason, and the time is free again.`);
           appointments.reload();
         }}
+      />
+
+      <PatientHistoryPanel
+        session={session}
+        patientId={historyPatient?.id ?? null}
+        patientName={historyPatient?.name}
+        open={historyPatient != null}
+        onClose={() => setHistoryPatient(null)}
       />
     </div>
   );
