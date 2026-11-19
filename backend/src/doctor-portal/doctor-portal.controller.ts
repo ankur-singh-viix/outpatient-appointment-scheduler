@@ -29,6 +29,7 @@ const cancelSchema = z.strictObject({
   reason: z.string().trim().min(3, 'must be at least 3 characters').max(200, 'must be at most 200 characters'),
 });
 const appointmentIdParam = z.strictObject({ id: z.uuid() });
+const patientIdParam = z.strictObject({ patientId: z.uuid() });
 
 const profileSchema = z.strictObject({
   name: z.string().trim().min(2, 'must be at least 2 characters').max(100, 'must be at most 100 characters'),
@@ -123,6 +124,18 @@ export class DoctorPortalController {
     @Query(new ZodValidationPipe(appointmentsQuery)) query: z.infer<typeof appointmentsQuery>,
   ) {
     return this.portal.appointments(user, query.scope ?? 'upcoming');
+  }
+
+  /**
+   * Medical profile, medical-update history and this doctor's visit/prescription history for one patient.
+   * Authorized only when the doctor has (or had) an appointment with that patient.
+   */
+  @Get('patients/:patientId/clinical-history')
+  patientClinicalHistory(
+    @CurrentUser() user: AuthUser,
+    @Param(new ZodValidationPipe(patientIdParam)) params: z.infer<typeof patientIdParam>,
+  ) {
+    return this.portal.patientClinicalHistory(user, params.patientId);
   }
 
   /** Booked appointments that are outside the doctor's current hours, with open times and whether the patient was asked to move. */

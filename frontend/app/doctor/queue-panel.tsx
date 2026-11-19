@@ -1,6 +1,6 @@
 'use client';
 
-import { CheckIcon, PhoneCallIcon, SkipForwardIcon, UsersIcon } from 'lucide-react';
+import { CheckIcon, ClipboardListIcon, PhoneCallIcon, SkipForwardIcon, UsersIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Alert, EmptyState } from '@/components/common';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,7 @@ import { STATUS_LABEL, actionNotice, canCallNext, doctorCheckInDetail, entryActi
 import type { DoctorQueue, QueueEntryResult, QueueEntryView, Session } from '@/lib/types';
 import { useQueuePolling } from '../queue/use-queue-polling';
 import { Freshness, QueueStatusPill, TokenBadge } from '../queue/queue-ui';
+import { PatientHistoryPanel } from './patient-history-panel';
 
 /**
  * The doctor's live queue: who is being seen, who is waiting after check-in (earliest check-in first), Complete consultation, and
@@ -21,6 +22,7 @@ export function DoctorQueuePanel({ session }: { session: Session }) {
   const queue = useQueuePolling<DoctorQueue>(`queue-doctor:${session.user.id}`, () => queueApi.doctorQueue(session), 8_000);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
+  const [historyPatient, setHistoryPatient] = useState<{ id: string; name: string } | null>(null);
   // Refresh often enough that waiting duration stays current between poll rounds.
   const now = useNow(10_000);
 
@@ -94,6 +96,7 @@ export function DoctorQueuePanel({ session }: { session: Session }) {
             onComplete={(entry) => void act(entry.id, 'complete', () => queueApi.complete(session, entry.id))}
             onSkip={(entry) => void act(entry.id, 'skip', () => queueApi.skipAsDoctor(session, entry.id))}
             onCallNext={() => void act('call-next', 'callNext', () => queueApi.callNext(session))}
+            onViewHistory={(entry) => entry.patient.id && setHistoryPatient({ id: entry.patient.id, name: entry.patient.name })}
           />
 
           <div className="rounded-xl border bg-card">
@@ -123,17 +126,29 @@ export function DoctorQueuePanel({ session }: { session: Session }) {
                       </p>
                     </div>
                     <QueueStatusPill status={entry.status} />
-                    {entryActions('DOCTOR', entry.status).includes('skip') && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={busy !== null}
-                        aria-label={`Skip token ${entry.token}, ${entry.patient.name}`}
-                        onClick={() => void act(entry.id, 'skip', () => queueApi.skipAsDoctor(session, entry.id))}
-                      >
-                        <SkipForwardIcon aria-hidden /> Skip
-                      </Button>
-                    )}
+                    <div className="flex flex-wrap gap-2">
+                      {entry.patient.id && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          aria-label={`View medical and visit history for ${entry.patient.name}`}
+                          onClick={() => setHistoryPatient({ id: entry.patient.id!, name: entry.patient.name })}
+                        >
+                          <ClipboardListIcon aria-hidden /> History
+                        </Button>
+                      )}
+                      {entryActions('DOCTOR', entry.status).includes('skip') && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busy !== null}
+                          aria-label={`Skip token ${entry.token}, ${entry.patient.name}`}
+                          onClick={() => void act(entry.id, 'skip', () => queueApi.skipAsDoctor(session, entry.id))}
+                        >
+                          <SkipForwardIcon aria-hidden /> Skip
+                        </Button>
+                      )}
+                    </div>
                   </li>
                 ))}
               </ol>
@@ -147,6 +162,14 @@ export function DoctorQueuePanel({ session }: { session: Session }) {
           )}
         </>
       )}
+
+      <PatientHistoryPanel
+        session={session}
+        patientId={historyPatient?.id ?? null}
+        patientName={historyPatient?.name}
+        open={historyPatient != null}
+        onClose={() => setHistoryPatient(null)}
+      />
     </section>
   );
 }
@@ -159,6 +182,7 @@ function NowServing({
   onCallNext,
   onComplete,
   onSkip,
+  onViewHistory,
 }: {
   day: DoctorQueue;
   waiting: QueueEntryView[];
@@ -167,6 +191,7 @@ function NowServing({
   onCallNext: () => void;
   onComplete: (entry: QueueEntryView) => void;
   onSkip: (entry: QueueEntryView) => void;
+  onViewHistory: (entry: QueueEntryView) => void;
 }) {
   const serving = day.serving;
   if (serving) {
@@ -189,6 +214,11 @@ function NowServing({
           {entryActions('DOCTOR', 'SERVING').includes('complete') && (
             <Button size="lg" className="h-10" disabled={busy !== null} onClick={() => onComplete(serving)}>
               <CheckIcon aria-hidden /> {busy === serving.id ? 'Working…' : 'Complete consultation'}
+            </Button>
+          )}
+          {serving.patient.id && (
+            <Button size="lg" variant="outline" className="h-10" onClick={() => onViewHistory(serving)}>
+              <ClipboardListIcon aria-hidden /> View medical history
             </Button>
           )}
           <Button

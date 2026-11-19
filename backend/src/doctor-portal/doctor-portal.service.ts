@@ -12,6 +12,8 @@ import {
   Clinic,
   Doctor,
   DoctorReceptionistAssignment,
+  Patient,
+  PatientMedicalProfileHistory,
   ReceptionistAssignment,
   ScheduleOverride,
   Specialty,
@@ -549,6 +551,97 @@ export class DoctorPortalService {
     return { ...(await this.availability(user)), ...summary };
   }
 
+  /**
+   * Medical profile + visit history for one patient the signed-in doctor is authorized to treat
+   * (at least one appointment with this doctor). Receptionists have no access to this endpoint.
+   */
+  async patientClinicalHistory(user: AuthUser, patientId: string) {
+    const doctor = await this.profileFor(user);
+    const authorized = await this.appointmentsRepo.existsBy({ doctorId: doctor.id, patientId });
+    if (!authorized) throw new NotFoundException('Patient not found.');
+
+    const patient = await this.dataSource.getRepository(Patient).findOne({
+      where: { id: patientId },
+      relations: { user: true },
+    });
+    if (!patient) throw new NotFoundException('Patient not found.');
+
+    const doctorUser = await this.dataSource.getRepository(User).findOneByOrFail({ id: user.id });
+
+    const updates = await this.dataSource.getRepository(PatientMedicalProfileHistory).find({
+      where: { patientId },
+      relations: { updatedBy: true },
+      order: { updatedAt: 'DESC' },
+      take: 100,
+    });
+
+    const visits: {
+      appointment_id: string;
+      date: string;
+      start_time: string;
+      end_time: string;
+      status: string;
+      token_number: number | null;
+      prescription_id: string | null;
+      prescription_status: string | null;
+      diagnosis: string | null;
+      notes: string | null;
+      medications: unknown;
+      finalized_at: Date | null;
+    }[] = await this.dataSource.query(
+      `SELECT a.id AS appointment_id, a.appointment_date::text AS date, a.start_time::text AS start_time, a.end_time::text AS end_time,
+              a.status::text AS status, q.token_number,
+              p.id AS prescription_id, p.status AS prescription_status, p.diagnosis, p.notes, p.medications, p.finalized_at
+         FROM appointments a
+         LEFT JOIN queue_entries q ON q.appointment_id = a.id
+         LEFT JOIN prescriptions p ON p.appointment_id = a.id AND p.status = 'FINALIZED'
+        WHERE a.doctor_id = $1 AND a.patient_id = $2
+        ORDER BY a.appointment_date DESC, a.start_time DESC
+        LIMIT 100`,
+      [doctor.id, patientId],
+    );
+
+    return {
+      patient: { id: patient.id, uhid: patient.uhid, name: patient.user.name },
+      medicalProfile: {
+        bloodGroup: patient.bloodGroup,
+        allergies: patient.allergies,
+        sensitivities: patient.sensitivities,
+        medicalConditions: patient.medicalConditions,
+        currentMedications: patient.currentMedications,
+        previousSurgeries: patient.previousSurgeries,
+        otherMedicalInfo: patient.otherMedicalInfo,
+      },
+      medicalUpdates: updates.map((row) => ({
+        id: row.id,
+        fieldName: row.fieldName,
+        previousValue: row.previousValue,
+        newValue: row.newValue,
+        updatedAt: row.updatedAt.toISOString(),
+        updatedBy: { name: row.updatedBy.name, role: row.updatedBy.role },
+      })),
+      visits: visits.map((row) => ({
+        appointmentId: row.appointment_id,
+        date: row.date,
+        startTime: hhmm(row.start_time),
+        endTime: hhmm(row.end_time),
+        status: row.status,
+        queueToken: row.token_number == null ? null : Number(row.token_number),
+        doctor: { id: doctor.id, name: doctorUser.name },
+        prescription: row.prescription_id
+          ? {
+              id: row.prescription_id,
+              status: row.prescription_status,
+              diagnosis: row.diagnosis,
+              notes: row.notes,
+              medications: row.medications ?? [],
+              finalizedAt: row.finalized_at ? new Date(row.finalized_at).toISOString() : null,
+            }
+          : null,
+      })),
+    };
+  }
+
   /** The receptionist currently assigned to this doctor, or null. */
   async receptionist(user: AuthUser) {
     const doctor = await this.profileFor(user);
@@ -669,7 +762,7 @@ function toDoctorAppointment(row: Appointment, queueToken: number | null = null)
     bookedAt: row.createdAt,
     /** Issued when the booking was confirmed; null until then. */
     queueToken,
-    patient: { name: row.patient.user.name, phone: row.patient.phone },
+    patient: { id: row.patient.id, name: row.patient.user.name, phone: row.patient.phone },
   };
 }
 

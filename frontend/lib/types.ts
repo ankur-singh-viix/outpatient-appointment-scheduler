@@ -285,7 +285,47 @@ export interface DoctorAppointment {
   bookedAt: string;
   /** Issued when the booking was confirmed; null until then. */
   queueToken: number | null;
-  patient: { name: string; phone: string | null };
+  /** id is present on doctor appointment lists for clinical-history links; outside-hours rows may omit it. */
+  patient: { id?: string; name: string; phone: string | null };
+}
+
+/** Doctor view of one patient's medical profile, updates and visits with this doctor (PR2). */
+export interface DoctorPatientClinicalHistory {
+  patient: { id: string; uhid: string; name: string };
+  medicalProfile: {
+    bloodGroup: string | null;
+    allergies: string | null;
+    sensitivities: string | null;
+    medicalConditions: string | null;
+    currentMedications: string | null;
+    previousSurgeries: string | null;
+    otherMedicalInfo: string | null;
+  };
+  medicalUpdates: {
+    id: string;
+    fieldName: string;
+    previousValue: string | null;
+    newValue: string | null;
+    updatedAt: string;
+    updatedBy: { name: string; role: Role | string };
+  }[];
+  visits: {
+    appointmentId: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    status: AppointmentStatus | string;
+    queueToken: number | null;
+    doctor: { id: string; name: string };
+    prescription: {
+      id: string;
+      status: string;
+      diagnosis: string | null;
+      notes: string | null;
+      medications: { name: string; dosage?: string; frequency?: string; duration?: string; instructions?: string }[];
+      finalizedAt: string | null;
+    } | null;
+  }[];
 }
 
 /** What every availability row says: its hours, and how they are cut into slots. */
@@ -630,8 +670,8 @@ export interface QueueEntryView {
   /** Appointment lifecycle status (CONFIRMED, NO_SHOW, …) for desk actions such as reopen. */
   appointmentStatus?: AppointmentStatus | string;
   appointment: { startTime: string; endTime: string };
-  /** Phone is for the front desk; patients never receive other patients' details. */
-  patient: { name: string; phone?: string | null };
+  /** Phone is for the front desk; patients never receive other patients' details. id is for doctor clinical history. */
+  patient: { id?: string; name: string; phone?: string | null };
   /** Null while BOOKED (token reserved at booking, not yet checked in). */
   checkedInAt: string | null;
   calledAt: string | null;

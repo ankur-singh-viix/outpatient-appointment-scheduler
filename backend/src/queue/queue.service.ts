@@ -26,6 +26,8 @@ interface QueueRow extends DayRow {
   queueDate: string;
   startTime: string;
   endTime: string;
+  /** Patient UUID for doctor clinical-history links; never medical fields. */
+  patientId: string;
   patientName: string;
   /** Present for the front desk; null on patient-facing responses that never read this field. */
   patientPhone: string | null;
@@ -316,8 +318,8 @@ export class QueueService {
       const day = date ?? this.today();
       const view = this.dayView(buildDay(await this.dayRows(this.dataSource.manager, doctor.id, day)), day);
       // Doctors never receive patient phone numbers (front desk only).
-      const scrub = <T extends { patient: { name: string; phone?: string | null } }>(entry: T | null) =>
-        entry ? { ...entry, patient: { name: entry.patient.name } } : null;
+      const scrub = <T extends { patient: { id?: string; name: string; phone?: string | null } }>(entry: T | null) =>
+        entry ? { ...entry, patient: { id: entry.patient.id, name: entry.patient.name } } : null;
       return {
         doctor: { id: doctor.id, name: doctor.name },
         ...view,
@@ -596,7 +598,7 @@ export class QueueService {
   /** Every entry of one doctor's day with its appointment's own status, read fresh each time. */
   private async dayRows(manager: EntityManager, doctorId: string, date: string): Promise<QueueRow[]> {
     const rows: Record<string, unknown>[] = await manager.query(
-      `SELECT q.id, q.appointment_id, q.doctor_id, du.name AS doctor_name, q.queue_date::text AS queue_date, q.token_number, q.status,
+      `SELECT q.id, q.appointment_id, q.doctor_id, q.patient_id, du.name AS doctor_name, q.queue_date::text AS queue_date, q.token_number, q.status,
               q.checked_in_at, q.called_at, q.completed_at, q.checked_out_at, q.updated_at,
               a.status::text AS appointment_status, a.start_time::text AS start_time, a.end_time::text AS end_time,
               pu.name AS patient_name, p.phone AS patient_phone
@@ -619,6 +621,7 @@ export class QueueService {
       queueDate: row.queue_date as string,
       startTime: hhmm(row.start_time as string),
       endTime: hhmm(row.end_time as string),
+      patientId: row.patient_id as string,
       patientName: row.patient_name as string,
       patientPhone: (row.patient_phone as string | null) ?? null,
       checkedInAt: (row.checked_in_at as Date | null) ?? null,
@@ -637,7 +640,7 @@ export class QueueService {
       status: row.status,
       appointmentStatus: row.appointmentStatus,
       appointment: { startTime: row.startTime, endTime: row.endTime },
-      patient: { name: row.patientName, phone: row.patientPhone },
+      patient: { id: row.patientId, name: row.patientName, phone: row.patientPhone },
       checkedInAt: row.checkedInAt?.toISOString() ?? null,
       calledAt: row.calledAt?.toISOString() ?? null,
       completedAt: row.completedAt?.toISOString() ?? null,
